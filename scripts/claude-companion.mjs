@@ -117,7 +117,7 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const STOP_REVIEW_TASK_MARKER = "Run a turn-end gate review of the previous Codex turn.";
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
 // ---------------------------------------------------------------------------
@@ -572,7 +572,7 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
   }
   if (!config.stopReviewGate) {
     nextSteps.push(
-      "Optional: run `$cc:setup --enable-review-gate` to require a fresh review before stop."
+      "Optional: run `$cc:setup --enable-review-gate` to require a fresh Claude review before each edit-producing Codex turn finishes."
     );
   }
 
@@ -626,10 +626,10 @@ async function handleSetup(argv) {
 
   if (options["enable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", true);
-    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
+    actionsTaken.push(`Enabled the turn-end review gate for ${workspaceRoot}.`);
   } else if (options["disable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", false);
-    actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+    actionsTaken.push(`Disabled the turn-end review gate for ${workspaceRoot}.`);
   }
 
   const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust);
@@ -867,8 +867,8 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
     String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)
   ) {
     return {
-      title: "Claude Code Stop Gate Review",
-      summary: "Stop-gate review of previous Claude turn"
+      title: "Claude Code Turn-End Gate Review",
+      summary: "Turn-end gate review of previous Codex turn"
     };
   }
 

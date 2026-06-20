@@ -297,9 +297,10 @@ describe("hooks", () => {
       );
 
       assert.equal(result.stdout.trim(), "");
-      assert.match(result.stderr, /stop-time review passed/i);
+      assert.match(result.stderr, /turn-end review passed/i);
       const snapshot = readStopReviewSnapshot(testEnv);
       assert.equal(snapshot.status, "allow");
+      assert.equal(snapshot.trigger, "turn-end");
       assert.equal(snapshot.claudeInvoked, true);
       assert.equal(snapshot.sessionId, null);
       assert.equal(snapshot.hasLastAssistantMessage, true);
@@ -602,10 +603,11 @@ describe("hooks", () => {
 
       const payload = JSON.parse(result.stdout);
       assert.equal(payload.decision, "block");
-      assert.match(payload.reason ?? "", /stop-time Claude Code review failed/i);
+      assert.match(payload.reason ?? "", /turn-end Claude Code review failed/i);
 
       const snapshot = readStopReviewSnapshot(testEnv);
       assert.equal(snapshot.status, "blocked");
+      assert.equal(snapshot.trigger, "turn-end");
       assert.equal(snapshot.claudeInvoked, true);
       assert.equal(snapshot.claudeStatus, "failed");
       assert.equal(snapshot.claudeExitCode, 7);
@@ -688,7 +690,7 @@ describe("hooks", () => {
       );
 
       assert.equal(result.stdout.trim(), "");
-      assert.match(result.stderr, /stop-time review passed/i);
+      assert.match(result.stderr, /turn-end review passed/i);
 
       const snapshot = readStopReviewSnapshot(testEnv);
       assert.equal(snapshot.status, "allow");
@@ -732,7 +734,7 @@ describe("hooks", () => {
       );
 
       assert.equal(result.stdout.trim(), "");
-      assert.match(result.stderr, /stop-time review passed/i);
+      assert.match(result.stderr, /turn-end review passed/i);
       assert.match(result.stderr, /running-review-job/);
     } finally {
       cleanupHookEnvironment(testEnv);

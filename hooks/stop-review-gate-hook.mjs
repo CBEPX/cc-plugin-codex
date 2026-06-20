@@ -6,14 +6,14 @@
  */
 
 /**
- * Stop-time review gate hook for Codex — Claude Code bridge.
+ * Turn-end review gate hook for Codex — Claude Code bridge.
  *
  * Flow:
  * 1. Check config.stopReviewGate — if disabled -> exit 0.
  * 2. If Claude Code is not ready, log setup guidance and allow stop to continue.
- * 3. Run a targeted stop-time review of the previous Codex response.
+ * 3. Run a targeted turn-end review of the previous Codex response.
  * 4. Parse ALLOW:/BLOCK: from Claude's output.
- * 5. If the review returns BLOCK, reject the stop.
+ * 5. If the review returns BLOCK, keep the Codex turn active.
  */
 
 import process from "node:process";
@@ -50,9 +50,9 @@ import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
-const STOP_REVIEW_SUCCESS_NOTE = "Claude Code stop-time review passed.";
+const STOP_REVIEW_SUCCESS_NOTE = "Claude Code turn-end review passed.";
 const STOP_REVIEW_NO_EDIT_NOTE =
-  "Claude Code stop-time review skipped: the most recent turn made no net edits.";
+  "Claude Code turn-end review skipped: the most recent turn made no net edits.";
 
 function emitDecision(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -111,7 +111,7 @@ function parseStopReviewOutput(rawOutput) {
       rawOutput: text,
       firstLine: "",
       reason:
-        "The stop-time Claude Code review returned no output. Run $cc:review --wait manually or bypass the gate."
+        "The turn-end Claude Code review returned no output. Run $cc:review --wait manually or bypass the gate."
     };
   }
 
@@ -136,7 +136,7 @@ function parseStopReviewOutput(rawOutput) {
       ok: false,
       rawOutput: text,
       firstLine,
-      reason: `Claude Code stop-time review found issues that still need fixes before ending the session: ${reason}`
+      reason: `Claude Code turn-end review found issues that still need fixes before ending this Codex turn: ${reason}`
     };
   }
   if (contractFirstLine.startsWith("ALLOW:")) {
@@ -149,7 +149,7 @@ function parseStopReviewOutput(rawOutput) {
       ok: false,
       rawOutput: text,
       firstLine: contractFirstLine,
-      reason: `Claude Code stop-time review found issues that still need fixes before ending the session: ${reason}`
+      reason: `Claude Code turn-end review found issues that still need fixes before ending this Codex turn: ${reason}`
     };
   }
 
@@ -158,7 +158,7 @@ function parseStopReviewOutput(rawOutput) {
     rawOutput: text,
     firstLine,
     reason:
-      "The stop-time Claude Code review returned an unexpected answer. Run $cc:review --wait manually or bypass the gate."
+      "The turn-end Claude Code review returned an unexpected answer. Run $cc:review --wait manually or bypass the gate."
   };
 }
 
@@ -198,8 +198,8 @@ async function runStopReview(cwd, input = {}) {
         claudeSessionId: result.sessionId ?? null,
         promptBytes,
         reason: detail
-          ? `The stop-time Claude Code review failed: ${detail}`
-          : "The stop-time Claude Code review failed. Run $cc:review --wait manually or bypass the gate."
+          ? `The turn-end Claude Code review failed: ${detail}`
+          : "The turn-end Claude Code review failed. Run $cc:review --wait manually or bypass the gate."
       };
     }
 
@@ -224,7 +224,7 @@ async function runStopReview(cwd, input = {}) {
       claudeStderr: detail,
       claudeSessionId: null,
       promptBytes,
-      reason: `The stop-time Claude Code review failed: ${detail}`
+      reason: `The turn-end Claude Code review failed: ${detail}`
     };
   } finally {
     cleanupReviewMcpConfig(mcpConfigFile);
@@ -252,7 +252,7 @@ function checkRunningJobs(workspaceRoot, sessionId = null) {
     (job) => job.status === "queued" || job.status === "running"
   );
   return runningJob
-    ? `Claude Code task ${runningJob.id} is still running. Check $cc:status and use $cc:cancel ${runningJob.id} if you want to stop it before ending the session.`
+    ? `Claude Code task ${runningJob.id} is still running. Check $cc:status and use $cc:cancel ${runningJob.id} if you want to stop it.`
     : null;
 }
 
@@ -328,6 +328,7 @@ async function main() {
     null;
   const stopReviewRun = {
     runId: generateJobId("stop"),
+    trigger: "turn-end",
     startedAt: nowIso(),
     status: "started",
     claudeInvoked: false,
