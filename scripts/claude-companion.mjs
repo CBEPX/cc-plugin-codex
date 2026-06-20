@@ -15,7 +15,7 @@
  * - Default effort by model: opus -> xhigh, sonnet -> high, haiku -> unset
  * - Claude CLI effort values: low, medium, high, xhigh, max
  * - Legacy effort aliases: none|minimal -> low
- * - Review gate matches upstream setup semantics: Stop hook runs when enabled
+ * - Review gate uses Claude CLI user defaults: no --model/--effort override
  *
  * Subcommands:
  *   setup, review, adversarial-review, task, task-worker,
@@ -33,6 +33,7 @@ import { resolveCodexHome } from "./lib/codex-paths.mjs";
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
+  detectClaudeDefaultSettings,
   runClaudeTurn,
   runClaudeReview,
   runClaudeAdversarialReview,
@@ -554,6 +555,7 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
   const claudeStatus = getClaudeAvailability(cwd);
   const authStatus = getClaudeAuthStatus(cwd);
+  const claudeDefaults = detectClaudeDefaultSettings();
   const hooksStatus = checkHooksStatus();
   const config = getConfig(workspaceRoot);
 
@@ -586,6 +588,7 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
     node: nodeStatus,
     claude: claudeStatus,
     auth: authStatus,
+    claudeDefaults,
     hooks: hooksStatus,
     hookTrust,
     reviewGateEnabled: Boolean(config.stopReviewGate),

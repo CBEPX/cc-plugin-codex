@@ -259,6 +259,7 @@ The review gate is an **optional turn-end hook**. When enabled, Codex runs a Cla
 **Caveats:**
 
 - **Disabled by default.** Enable with `$cc:setup --enable-review-gate`.
+- **Uses your Claude Code defaults.** The gate does not pass `--model` or `--effort`; set your preferred default in Claude Code if you want the gate to use a specific model or effort level.
 - **Token cost.** Every edit-producing turn can trigger a Claude invocation. This can drain usage limits quickly in active coding sessions.
 - **15-minute timeout.** The gate has a hard timeout. If Claude doesn't respond, the turn is allowed.
 - **Skip-on-no-edits.** The gate computes a working-tree fingerprint baseline and skips review when the last Codex turn made no net edits.

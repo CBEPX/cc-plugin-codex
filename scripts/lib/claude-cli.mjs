@@ -17,6 +17,8 @@ import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mj
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
 const CLAUDE_BIN = "claude";
+const CLAUDE_SETTINGS_FILE = "settings.json";
+const CLAUDE_LEGACY_CONFIG_FILE = ".claude.json";
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
 export const MAX_STREAM_PARSER_PARSE_ERRORS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
@@ -109,6 +111,61 @@ export function getClaudeAuthStatus(cwd) {
       detail: "not authenticated — run `claude auth login`",
     };
   }
+}
+
+function readJsonIfPresent(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+export function detectClaudeDefaultSettings(env = process.env) {
+  const homeDir = env.HOME || env.USERPROFILE || os.homedir();
+  const configDir =
+    typeof env.CLAUDE_CONFIG_DIR === "string" && env.CLAUDE_CONFIG_DIR.trim() !== ""
+      ? env.CLAUDE_CONFIG_DIR.trim()
+      : path.join(homeDir, ".claude");
+  const settingsPath = path.join(configDir, CLAUDE_SETTINGS_FILE);
+  const legacyConfigPath = path.join(homeDir, CLAUDE_LEGACY_CONFIG_FILE);
+  const settings = readJsonIfPresent(settingsPath);
+  const legacyConfig = readJsonIfPresent(legacyConfigPath);
+  const model = firstNonEmptyString(
+    settings?.model,
+    settings?.defaultModel,
+    settings?.modelName,
+    legacyConfig?.model,
+    legacyConfig?.defaultModel,
+    env.CLAUDE_MODEL,
+    env.ANTHROPIC_MODEL
+  );
+  const effort = firstNonEmptyString(
+    settings?.effortLevel,
+    settings?.effort,
+    legacyConfig?.effortLevel,
+    legacyConfig?.effort,
+    env.CLAUDE_EFFORT
+  );
+
+  return {
+    model,
+    effort,
+    settingsPath,
+    detail: `model ${model ?? "Claude CLI default"}, effort ${effort ?? "Claude CLI default"}`
+  };
 }
 
 // ---------------------------------------------------------------------------

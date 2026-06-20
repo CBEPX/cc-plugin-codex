@@ -141,6 +141,7 @@ describe("renderSetupReport", () => {
     node: { detail: "v20.0.0" },
     claude: { detail: "installed" },
     auth: { detail: "authenticated" },
+    claudeDefaults: { detail: "model claude-opus-4-8[1m], effort xhigh" },
     hooks: { detail: "Codex hooks installed" },
     reviewGateEnabled: false,
     actionsTaken: [],
@@ -162,6 +163,7 @@ describe("renderSetupReport", () => {
     const output = renderSetupReport(baseReport);
     assert.ok(output.includes("- node: v20.0.0"));
     assert.ok(output.includes("- auth: authenticated"));
+    assert.ok(output.includes("- Claude defaults: model claude-opus-4-8[1m], effort xhigh"));
     assert.ok(output.includes("- hooks: Codex hooks installed"));
   });
 
