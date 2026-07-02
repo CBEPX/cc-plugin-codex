@@ -20,6 +20,8 @@
 ### Fixed
 
 - Classify Claude usage-limit failures separately from generic Claude failures without creating synthetic model fallback history.
+- Keep successful Claude runs intact when their final output mentions rate limiting or `429` handling.
+- Stop synthesizing model fallback warnings when a terminal model id only omits the Claude CLI `[1m]` context suffix.
 
 ## v1.2.1
 

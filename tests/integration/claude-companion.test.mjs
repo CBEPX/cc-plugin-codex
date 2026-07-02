@@ -1346,7 +1346,7 @@ describe("claude-companion integration", () => {
     }
   });
 
-  it("reports a context-window downgrade when Fable 1M resolves to bare Fable", () => {
+  it("does not report model fallback when Fable terminal id omits the context suffix", () => {
     const testEnv = createTestEnvironment();
 
     try {
@@ -1372,11 +1372,45 @@ describe("claude-companion integration", () => {
       assert.equal(payload.status, "completed");
       assert.equal(payload.requestedModel, "claude-fable-5[1m]");
       assert.equal(payload.finalModel, "claude-fable-5");
-      assert.equal(payload.modelFallbacks.length, 1);
-      assert.equal(payload.modelFallbacks[0].fromModel, "claude-fable-5[1m]");
-      assert.equal(payload.modelFallbacks[0].toModel, "claude-fable-5");
-      assert.equal(payload.modelFallbacks[0].source, "terminal_result");
-      assert.match(payload.modelFallbacks[0].reason, /context window/i);
+      assert.deepEqual(payload.modelFallbacks, []);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not classify completed output that mentions rate limiting as a Claude limit failure", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonPayload = runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(jsonPayload.status, "completed");
+      assert.equal(jsonPayload.failure, null);
+      assert.match(jsonPayload.rawOutput, /completed:document rate limiting and 429 handling/);
+
+      const textResult = runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 0);
+      assert.match(textResult.stdout, /completed:document rate limiting and 429 handling/);
+      assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

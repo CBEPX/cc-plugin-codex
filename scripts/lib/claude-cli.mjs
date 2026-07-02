@@ -278,21 +278,6 @@ export function areModelIdsEquivalent(left, right) {
   return false;
 }
 
-function modelContextSuffix(model) {
-  return String(model ?? "").trim().toLowerCase().match(/\[([^\]]+)\]$/u)?.[1] ?? null;
-}
-
-function isModelContextWindowDowngrade(requestedModel, finalModel) {
-  const requestedContext = modelContextSuffix(requestedModel);
-  if (!requestedContext || !finalModel) {
-    return false;
-  }
-  return (
-    modelContextSuffix(finalModel) !== requestedContext &&
-    areModelIdsEquivalent(requestedModel, finalModel)
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Availability & Auth
 // ---------------------------------------------------------------------------
@@ -1007,19 +992,14 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       const validation = validateTurnCompletion(parser.state, code ?? 1);
       const modelEvents = [...parser.state.modelEvents];
       const finalModel = parser.state.finalModel;
-      const failure = classifyClaudeFailure({
-        finalMessage: parser.state.finalMessage,
-        stderr,
-      });
-      if (isModelContextWindowDowngrade(requestedModel, finalModel)) {
-        modelEvents.push({
-          fromModel: requestedModel,
-          toModel: finalModel,
-          reason: `Claude reported a terminal model without the requested [${modelContextSuffix(requestedModel)}] context window.`,
-          source: "terminal_result",
-          timestamp: new Date().toISOString(),
-        });
-      } else if (
+      const failure =
+        validation.status === "completed"
+          ? null
+          : classifyClaudeFailure({
+              finalMessage: parser.state.finalMessage,
+              stderr,
+            });
+      if (
         requestedModel &&
         finalModel &&
         !areModelIdsEquivalent(finalModel, requestedModel) &&

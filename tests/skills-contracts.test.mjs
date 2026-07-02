@@ -8,6 +8,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { MODEL_ALIASES } from "../scripts/lib/claude-cli.mjs";
+
 const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../", import.meta.url))
 );
@@ -15,6 +17,21 @@ const PROJECT_ROOT = path.resolve(
 function read(relativePath) {
   return fs.readFileSync(path.join(PROJECT_ROOT, relativePath), "utf8");
 }
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+test("README model alias docs match runtime aliases", () => {
+  const readme = read("README.md");
+
+  for (const [alias, model] of MODEL_ALIASES) {
+    assert.match(
+      readme,
+      new RegExp(`\\\`${escapeRegex(alias)}\\\`[\\s\\S]*?\\\`${escapeRegex(model)}\\\``)
+    );
+  }
+});
 
 test("internal runtime references keep the active-root and notification invariants", () => {
   const reviewRuntime = read("internal-skills/review-runtime/runtime.md");
