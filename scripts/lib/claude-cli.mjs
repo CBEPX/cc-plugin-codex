@@ -26,6 +26,7 @@ export const MAX_STDERR_BYTES = 64 * 1024;
 export const SANDBOX_TEMP_DIR = normalizePathSlashes(path.resolve(os.tmpdir()));
 
 const MODEL_FALLBACK_RE = /\bmodel[_ -]?(?:fallback|switch|switched|downgrade|downgraded)\b/i;
+const SYNTHETIC_MODEL_IDS = new Set(["<synthetic>"]);
 
 function pushBoundedTail(list, value, maxEntries) {
   list.push(value);
@@ -131,8 +132,16 @@ function firstModelUsageKey(value) {
   return keys.length === 1 ? keys[0] : null;
 }
 
+function normalizeObservedModel(model) {
+  const normalized = typeof model === "string" ? model.trim() : "";
+  if (!normalized || SYNTHETIC_MODEL_IDS.has(normalized.toLowerCase())) {
+    return null;
+  }
+  return normalized;
+}
+
 function extractObservedModel(value) {
-  return (
+  return normalizeObservedModel(
     firstStringFieldFromSources(collectEventModelSources(value), [
       "model",
       "actual_model",
@@ -141,6 +150,31 @@ function extractObservedModel(value) {
       "selectedModel",
     ]) ?? firstModelUsageKey(value)
   );
+}
+
+function extractClaudeLimitResetText(text) {
+  const match = String(text ?? "").match(/\bresets(?:\s+at)?\s+([^\r\n.]+)/i);
+  return match?.[1]?.trim() ?? null;
+}
+
+export function classifyClaudeFailure(value = {}) {
+  const message = [value.finalMessage, value.stderr]
+    .filter((part) => typeof part === "string" && part.trim())
+    .join("\n")
+    .trim();
+  if (!message) {
+    return null;
+  }
+  if (
+    !/you'?ve hit your .*limit|session limit|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i.test(message)
+  ) {
+    return null;
+  }
+  return {
+    kind: "claude_rate_limit",
+    message,
+    resetText: extractClaudeLimitResetText(message),
+  };
 }
 
 function compactModelEvent(value) {
@@ -956,6 +990,10 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       const validation = validateTurnCompletion(parser.state, code ?? 1);
       const modelEvents = [...parser.state.modelEvents];
       const finalModel = parser.state.finalModel;
+      const failure = classifyClaudeFailure({
+        finalMessage: parser.state.finalMessage,
+        stderr,
+      });
       if (
         requestedModel &&
         finalModel &&
@@ -986,6 +1024,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         requestedModel,
         finalModel,
         modelEvents,
+        failure,
         stderr,
         pid: proc.pid,
         pidIdentity,
@@ -1004,6 +1043,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         requestedModel,
         finalModel: null,
         modelEvents: [],
+        failure: classifyClaudeFailure({ stderr: err.message }),
         stderr: err.message,
         pid: proc.pid,
         pidIdentity,
@@ -1043,6 +1083,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     requestedModel: result.requestedModel,
     finalModel: result.finalModel,
     modelEvents: result.modelEvents,
+    failure: result.failure,
     stderr: result.stderr,
     pid: result.pid,
     pidIdentity: result.pidIdentity,

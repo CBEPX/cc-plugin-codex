@@ -326,6 +326,15 @@ function firstMeaningfulLine(text, fallback) {
   return line ?? fallback;
 }
 
+function formatClaudeFailureSummary(failure, fallback) {
+  if (failure?.kind !== "claude_rate_limit") {
+    return fallback;
+  }
+  return failure.resetText
+    ? `Claude usage limit reached; retry after ${failure.resetText}.`
+    : "Claude usage limit reached.";
+}
+
 function normalizeModelFallbacks(events) {
   if (!Array.isArray(events)) {
     return [];
@@ -946,6 +955,7 @@ async function executeReviewRun(request) {
         status: result.status,
         warning: result.warning ?? null,
         stderr: result.stderr,
+        failure: result.failure ?? null,
         stdout: result.result,
         requestedModel: result.requestedModel ?? null,
         finalModel: result.finalModel ?? null,
@@ -970,9 +980,12 @@ async function executeReviewRun(request) {
       turnId: null,
       payload,
       rendered,
-      summary: firstMeaningfulLine(
-        typeof result.result === "string" ? result.result : "",
-        `${reviewName} completed.`
+      summary: formatClaudeFailureSummary(
+        result.failure,
+        firstMeaningfulLine(
+          typeof result.result === "string" ? result.result : "",
+          `${reviewName} completed.`
+        )
       ),
       jobTitle: `Claude Code ${reviewName}`,
       jobClass: "review",
@@ -1049,6 +1062,7 @@ async function executeReviewRun(request) {
       status: result.status,
       warning: result.warning ?? null,
       stderr: result.stderr,
+      failure: result.failure ?? null,
       stdout: typeof result.result === "string" ? result.result : JSON.stringify(result.result),
       requestedModel: result.requestedModel ?? null,
       finalModel: result.finalModel ?? null,
@@ -1072,11 +1086,13 @@ async function executeReviewRun(request) {
       }),
       modelFallbacks
     ),
-    summary:
+    summary: formatClaudeFailureSummary(
+      result.failure,
       parsed.parsed?.summary ??
-      firstMeaningfulLine(
-        typeof result.result === "string" ? result.result : "",
-        parsed.parseError ?? `${reviewName} finished.`
+        firstMeaningfulLine(
+          typeof result.result === "string" ? result.result : "",
+          parsed.parseError ?? `${reviewName} finished.`
+        )
       ),
     jobTitle: `Claude Code ${reviewName}`,
     jobClass: "review",
@@ -1164,7 +1180,8 @@ async function executeTaskRun(request) {
   const rendered = appendModelFallbackSummary(
     renderTaskResult({
         rawOutput,
-        failureMessage
+        failureMessage,
+        failure: result.failure ?? null
       }
     ),
     modelFallbacks
@@ -1176,6 +1193,7 @@ async function executeTaskRun(request) {
     requestedModel: result.requestedModel ?? null,
     finalModel: result.finalModel ?? null,
     modelFallbacks,
+    failure: result.failure ?? null,
     rawOutput,
     touchedFiles: Array.isArray(result.touchedFiles)
       ? result.touchedFiles
@@ -1191,11 +1209,14 @@ async function executeTaskRun(request) {
     turnId: null,
     payload,
     rendered,
-    summary: firstMeaningfulLine(
-      rawOutput,
+    summary: formatClaudeFailureSummary(
+      result.failure,
       firstMeaningfulLine(
-        failureMessage,
-        `${taskMetadata.title} finished.`
+        rawOutput,
+        firstMeaningfulLine(
+          failureMessage,
+          `${taskMetadata.title} finished.`
+        )
       )
     ),
     jobTitle: taskMetadata.title,

@@ -68,6 +68,20 @@ describe("StreamParser", () => {
     assert.equal(parser.state.finalMessage, "");
   });
 
+  it("ignores Claude synthetic error model ids", () => {
+    const parser = new StreamParser();
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      model: "<synthetic>",
+      session_id: "sess-limit",
+    });
+
+    parser.feed(resultEvent + "\n");
+
+    assert.equal(parser.state.finalModel, null);
+  });
+
   it("does not overwrite accumulated deltas with a shorter terminal suffix", () => {
     const parser = new StreamParser();
     const delta = JSON.stringify({

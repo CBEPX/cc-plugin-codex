@@ -388,6 +388,17 @@ export function renderReviewResult(parsedResult, meta) {
 }
 
 export function renderTaskResult(parsedResult) {
+  if (parsedResult?.failure?.kind === "claude_rate_limit") {
+    const reset = parsedResult.failure.resetText
+      ? ` Retry after ${parsedResult.failure.resetText}.`
+      : "";
+    const original = String(parsedResult.failure.message ?? "").trim();
+    return [
+      `Claude usage limit reached.${reset}`,
+      original ? `\nOriginal Claude message:\n${original}` : "",
+      "",
+    ].join("\n");
+  }
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   if (rawOutput) return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Claude Code did not return a final message.";

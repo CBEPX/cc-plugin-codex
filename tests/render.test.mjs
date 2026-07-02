@@ -322,6 +322,20 @@ describe("renderTaskResult", () => {
     assert.equal(output, "timeout\n");
   });
 
+  it("renders Claude usage limits with reset text", () => {
+    const output = renderTaskResult({
+      failure: {
+        kind: "claude_rate_limit",
+        message: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+        resetText: "4:50pm (Europe/Moscow)",
+      },
+    });
+
+    assert.match(output, /Claude usage limit reached/i);
+    assert.match(output, /Retry after 4:50pm \(Europe\/Moscow\)/);
+    assert.match(output, /You've hit your session limit/);
+  });
+
   it("returns default message when nothing provided", () => {
     const output = renderTaskResult({});
     assert.ok(output.includes("did not return a final message"));

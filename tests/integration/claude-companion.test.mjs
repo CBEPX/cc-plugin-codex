@@ -80,6 +80,7 @@ async function main() {
     getValue("--session-id") ||
     \`stub-\${sanitize(prompt)}-\${process.pid}\`;
   const emitUnknownNoTerminal = /\\bunknown-no-terminal\\b/.test(prompt);
+  const emitSessionLimit = /\\bsession-limit\\b/.test(prompt);
   const terminalModelFallback = /\\bterminal-model-fallback\\b/.test(prompt);
   const emitModelFallback =
     (!terminalModelFallback && /\\bmodel-fallback\\b/.test(prompt)) ||
@@ -136,6 +137,19 @@ async function main() {
   await sleep(delay);
 
   if (emitUnknownNoTerminal) {
+    return;
+  }
+
+  if (emitSessionLimit) {
+    process.stdout.write(
+      JSON.stringify({
+        type: "result",
+        session_id: sessionId,
+        result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+        model: "<synthetic>",
+      }) + "\\n"
+    );
+    process.exitCode = 1;
     return;
   }
 
@@ -1326,6 +1340,48 @@ describe("claude-companion integration", () => {
       assert.equal(payload.modelFallbacks[0].fromModel, "claude-opus-4-8");
       assert.equal(payload.modelFallbacks[0].toModel, "claude-sonnet-5");
       assert.equal(payload.modelFallbacks[0].source, "terminal_result");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("classifies Claude session limit failures without synthetic model fallback", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "session-limit delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const jsonPayload = JSON.parse(jsonResult.stdout);
+
+      assert.equal(jsonPayload.status, "failed");
+      assert.equal(jsonPayload.failure?.kind, "claude_rate_limit");
+      assert.match(jsonPayload.failure?.message ?? "", /session limit/i);
+      assert.equal(jsonPayload.failure?.resetText, "4:50pm (Europe/Moscow)");
+      assert.deepEqual(jsonPayload.modelFallbacks, []);
+
+      const textResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "session-limit delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 1);
+      assert.match(textResult.stdout, /Claude usage limit reached/i);
+      assert.match(textResult.stdout, /Retry after 4:50pm \(Europe\/Moscow\)/);
+      assert.doesNotMatch(textResult.stdout, /Model fallback/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
