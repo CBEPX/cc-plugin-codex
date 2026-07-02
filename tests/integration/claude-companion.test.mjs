@@ -82,6 +82,7 @@ async function main() {
   const emitUnknownNoTerminal = /\\bunknown-no-terminal\\b/.test(prompt);
   const emitSessionLimit = /\\bsession-limit\\b/.test(prompt);
   const terminalModelFallback = /\\bterminal-model-fallback\\b/.test(prompt);
+  const terminalModel = process.env.CLAUDE_FAKE_TERMINAL_MODEL;
   const emitModelFallback =
     (!terminalModelFallback && /\\bmodel-fallback\\b/.test(prompt)) ||
     process.env.CLAUDE_FAKE_MODEL_FALLBACK === "1";
@@ -158,8 +159,8 @@ async function main() {
       type: "result",
       session_id: sessionId,
       result: structuredResult ? "" : resultText,
-      ...(terminalModelFallback || emitModelFallback
-        ? { model: "claude-sonnet-5" }
+      ...(terminalModel || terminalModelFallback || emitModelFallback
+        ? { model: terminalModel || "claude-sonnet-5" }
         : {}),
       ...(structuredResult
         ? { structured_output: structuredResult }
@@ -1345,6 +1346,42 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("reports a context-window downgrade when Fable 1M resolves to bare Fable", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const payload = runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "--model",
+          "fable",
+          "delay=20",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_FAKE_TERMINAL_MODEL: "claude-fable-5",
+          },
+        }
+      );
+
+      assert.equal(payload.status, "completed");
+      assert.equal(payload.requestedModel, "claude-fable-5[1m]");
+      assert.equal(payload.finalModel, "claude-fable-5");
+      assert.equal(payload.modelFallbacks.length, 1);
+      assert.equal(payload.modelFallbacks[0].fromModel, "claude-fable-5[1m]");
+      assert.equal(payload.modelFallbacks[0].toModel, "claude-fable-5");
+      assert.equal(payload.modelFallbacks[0].source, "terminal_result");
+      assert.match(payload.modelFallbacks[0].reason, /context window/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("classifies Claude session limit failures without synthetic model fallback", () => {
     const testEnv = createTestEnvironment();
 
@@ -1497,6 +1534,33 @@ describe("claude-companion integration", () => {
       );
       assert.match(reviewInvocation.prompt, /working tree diff/i);
       assert.match(reviewResult.stdout, /Claude Code Review/);
+
+      const fableInvocationFile = path.join(testEnv.rootDir, "fable-review-invocation.json");
+      runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--model",
+          "fable",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: fableInvocationFile,
+          },
+        }
+      );
+
+      const fableInvocation = JSON.parse(
+        fs.readFileSync(fableInvocationFile, "utf8")
+      );
+      assert.equal(
+        fableInvocation.args[fableInvocation.args.indexOf("--model") + 1],
+        "claude-fable-5[1m]"
+      );
 
       const branchInvocationFile = path.join(testEnv.rootDir, "branch-review-invocation.json");
       const result = runCompanion(

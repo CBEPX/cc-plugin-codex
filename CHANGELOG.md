@@ -5,6 +5,7 @@
 ### Added
 
 - Add `$cc:mcp-diagnose` to explain which Claude MCP servers and requested tools the plugin can see for review commands without exposing raw server configs or secrets.
+- Add the `fable` Claude model alias for review, adversarial-review, and rescue/task commands, resolving to `claude-fable-5[1m]` without adding a hidden effort default.
 
 ## v1.2.1
 

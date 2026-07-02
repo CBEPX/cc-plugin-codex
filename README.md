@@ -122,13 +122,14 @@ $cc:review --base main              # review branch vs main
 $cc:review --scope branch           # explicitly compare branch tip to base
 $cc:review --background             # run in background, check with $cc:status later
 $cc:review --model sonnet           # switch to sonnet (defaults to high effort)
+$cc:review --model fable --effort xhigh  # use Fable explicitly for hardest reviews
 $cc:review --model opus --effort high   # opus with a lighter effort
 $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 ```
 
 **Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
-**Defaults:** model `opus` (resolves to `claude-opus-4-8`, the 1M-context variant) with `xhigh` effort. If you pick `sonnet`, it resolves to `claude-sonnet-5` (also 1M context) and the default effort drops to `high`. `haiku` resolves to `claude-haiku-4-5` and has no effort setting. Pass `--model` and `--effort` to override.
+**Defaults:** model `opus` (resolves to `claude-opus-4-8`, the 1M-context variant) with `xhigh` effort. If you pick `sonnet`, it resolves to `claude-sonnet-5` (also 1M context) and the default effort drops to `high`. `haiku` resolves to `claude-haiku-4-5`, `fable` resolves to `claude-fable-5[1m]`, and both have no default effort setting. Pass `--model` and `--effort` to override.
 
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
@@ -186,8 +187,8 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--resume-last` | Alias for `--resume` |
 | `--fresh` | Force a new task (don't resume) |
 | `--write` | Allow file edits (default) |
-| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, or full ID; defaults to `opus`. The `opus` and `sonnet` aliases resolve to their 1M-context variants `claude-opus-4-8` and `claude-sonnet-5`.) |
-| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku) |
+| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`. The `opus`, `sonnet`, and `fable` aliases resolve to their 1M-context variants `claude-opus-4-8`, `claude-sonnet-5`, and `claude-fable-5[1m]`.) |
+| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable) |
 | `--prompt-file <path>` | Read task description from a file |
 | `--timeout-ms <ms>` | Foreground observer timeout before returning a retrievable job |
 

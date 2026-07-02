@@ -256,7 +256,8 @@ function canonicalModelForComparison(model) {
   }
   const withoutContextSuffix = normalized.replace(/\[[^\]]+\]$/u, "");
   const withoutDateSuffix = withoutContextSuffix.replace(/-\d{8}$/u, "");
-  return MODEL_ALIASES.get(withoutDateSuffix) ?? withoutDateSuffix;
+  const resolved = MODEL_ALIASES.get(withoutDateSuffix) ?? withoutDateSuffix;
+  return resolved.replace(/\[[^\]]+\]$/u, "");
 }
 
 export function areModelIdsEquivalent(left, right) {
@@ -275,6 +276,21 @@ export function areModelIdsEquivalent(left, right) {
     return true;
   }
   return false;
+}
+
+function modelContextSuffix(model) {
+  return String(model ?? "").trim().toLowerCase().match(/\[([^\]]+)\]$/u)?.[1] ?? null;
+}
+
+function isModelContextWindowDowngrade(requestedModel, finalModel) {
+  const requestedContext = modelContextSuffix(requestedModel);
+  if (!requestedContext || !finalModel) {
+    return false;
+  }
+  return (
+    modelContextSuffix(finalModel) !== requestedContext &&
+    areModelIdsEquivalent(requestedModel, finalModel)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +828,7 @@ export const MODEL_ALIASES = new Map([
   ["opus", "claude-opus-4-8"],
   ["sonnet", "claude-sonnet-5"],
   ["haiku", "claude-haiku-4-5"],
+  ["fable", "claude-fable-5[1m]"],
 ]);
 
 export const EFFORT_ALIASES = {
@@ -994,7 +1011,15 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalMessage: parser.state.finalMessage,
         stderr,
       });
-      if (
+      if (isModelContextWindowDowngrade(requestedModel, finalModel)) {
+        modelEvents.push({
+          fromModel: requestedModel,
+          toModel: finalModel,
+          reason: `Claude reported a terminal model without the requested [${modelContextSuffix(requestedModel)}] context window.`,
+          source: "terminal_result",
+          timestamp: new Date().toISOString(),
+        });
+      } else if (
         requestedModel &&
         finalModel &&
         !areModelIdsEquivalent(finalModel, requestedModel) &&

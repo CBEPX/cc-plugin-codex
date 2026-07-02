@@ -561,6 +561,7 @@ describe("areModelIdsEquivalent", () => {
 
   it("treats Claude CLI aliases as equivalent to concrete family ids", () => {
     assert.equal(areModelIdsEquivalent("fable", "claude-fable-5"), true);
+    assert.equal(areModelIdsEquivalent("fable", "claude-fable-5[1m]"), true);
   });
 
   it("ignores bracketed context-window suffixes for comparison", () => {
@@ -644,11 +645,16 @@ describe("resolveModel", () => {
     assert.equal(resolveModel("opus"), "claude-opus-4-8");
   });
 
+  it("maps 'fable' to the 1M-context Claude Fable 5 id", () => {
+    assert.equal(resolveModel("fable"), "claude-fable-5[1m]");
+  });
+
   it("MODEL_ALIASES map has expected entries", () => {
-    assert.equal(MODEL_ALIASES.size, 3);
+    assert.equal(MODEL_ALIASES.size, 4);
     assert.ok(MODEL_ALIASES.has("opus"));
     assert.ok(MODEL_ALIASES.has("sonnet"));
     assert.ok(MODEL_ALIASES.has("haiku"));
+    assert.ok(MODEL_ALIASES.has("fable"));
   });
 });
 
@@ -690,6 +696,11 @@ describe("resolveDefaultEffort", () => {
   it("returns undefined for haiku (no effort default)", () => {
     assert.equal(resolveDefaultEffort("haiku", null), undefined);
     assert.equal(resolveDefaultEffort("claude-haiku-4-5", undefined), undefined);
+  });
+
+  it("returns undefined for fable (no hidden effort default)", () => {
+    assert.equal(resolveDefaultEffort("fable", null), undefined);
+    assert.equal(resolveDefaultEffort("claude-fable-5[1m]", undefined), undefined);
   });
 
   it("returns undefined for unknown model when effort not provided", () => {
