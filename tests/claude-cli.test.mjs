@@ -4,10 +4,14 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   StreamParser,
   areModelIdsEquivalent,
+  classifyClaudeFailure,
   validateTurnCompletion,
   resolveModel,
   resolveEffort,
@@ -28,6 +32,8 @@ import {
   MAX_STREAM_PARSER_TOOL_USES,
   MAX_STREAM_PARSER_TOUCHED_FILES,
   MAX_STREAM_PARSER_MODEL_EVENTS,
+  MAX_STDERR_BYTES,
+  runClaudeTurn,
 } from "../scripts/lib/claude-cli.mjs";
 
 // ===========================================================================
@@ -290,6 +296,39 @@ describe("StreamParser", () => {
     assert.equal(events[0].modelFallback.toModel, "claude-sonnet-5");
   });
 
+  it("parses model switch marker events that only report the target model", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "model_switch",
+      session_id: "sess-switch-marker",
+      model: "claude-sonnet-5",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].modelFallback.fromModel, null);
+    assert.equal(events[0].modelFallback.toModel, "claude-sonnet-5");
+  });
+
+  it("parses compact modelswitch marker events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "modelswitch",
+      session_id: "sess-compact-switch",
+      model: "claude-haiku-4-5",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].modelFallback.toModel, "claude-haiku-4-5");
+  });
+
   it("does not misclassify generic changed events with model fields as fallbacks", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({
@@ -544,6 +583,63 @@ describe("StreamParser", () => {
     const ev2 = JSON.stringify({ type: "stream_event", session_id: "second", event: { delta: { type: "text_delta", text: "y" } } });
     parser.feed(ev1 + "\n" + ev2 + "\n");
     assert.equal(parser.state.sessionId, "first");
+  });
+});
+
+describe("classifyClaudeFailure", () => {
+  it("classifies Claude 429 stderr and extracts reset text", () => {
+    const failure = classifyClaudeFailure({
+      stderr: "APIErrorStatus: 429. You've hit your session limit; resets at 4:50pm (Europe/Moscow).",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.match(failure.message, /429/);
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("ignores non-limit failures", () => {
+    assert.equal(classifyClaudeFailure({ stderr: "syntax error" }), null);
+  });
+});
+
+describe("runClaudeTurn", () => {
+  it("keeps only the newest stderr bytes on failed Claude runs", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      const longStderr = `DROP-ME\n${"x".repeat(MAX_STDERR_BYTES + 32)}\nKEEP-ME`;
+      const fakeClaude = path.join(tmpDir, "fake-claude.mjs");
+      fs.writeFileSync(
+        fakeClaude,
+        `process.stderr.write(${JSON.stringify(longStderr)}, () => process.exit(1));\n`
+      );
+
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          path.join(tmpDir, "claude.cmd"),
+          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs" %*\r\n`
+        );
+      } else {
+        const launcher = path.join(tmpDir, "claude");
+        fs.writeFileSync(
+          launcher,
+          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs" "$@"\n`
+        );
+        fs.chmodSync(launcher, 0o755);
+      }
+
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "prompt");
+
+      assert.equal(result.status, "failed");
+      assert.ok(Buffer.byteLength(result.stderr, "utf8") <= MAX_STDERR_BYTES);
+      assert.ok(result.stderr.endsWith("KEEP-ME"));
+      assert.ok(!result.stderr.includes("DROP-ME"));
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -56,6 +56,11 @@ describe("validateReviewResultShape", () => {
     assert.ok(validateReviewResultShape(data)?.includes("summary"));
   });
 
+  it("rejects blank summary", () => {
+    const data = { verdict: "ok", summary: "  ", findings: [], next_steps: [] };
+    assert.ok(validateReviewResultShape(data)?.includes("summary"));
+  });
+
   it("rejects missing findings array", () => {
     const data = { verdict: "ok", summary: "ok", next_steps: [] };
     assert.ok(validateReviewResultShape(data)?.includes("findings"));
@@ -284,6 +289,27 @@ describe("renderReviewResult", () => {
     assert.ok(highIdx < lowIdx);
   });
 
+  it("sorts medium findings between high and low", () => {
+    const parsed = {
+      parsed: {
+        verdict: "reject",
+        summary: "Issues found.",
+        findings: [
+          { severity: "low", title: "Style", body: "x", file: "a.js" },
+          { severity: "medium", title: "Risk", body: "y", file: "b.js" },
+          { severity: "high", title: "Bug", body: "z", file: "c.js" },
+        ],
+        next_steps: [],
+      },
+    };
+    const output = renderReviewResult(parsed, meta);
+    const highIdx = output.indexOf("[high]");
+    const mediumIdx = output.indexOf("[medium]");
+    const lowIdx = output.indexOf("[low]");
+    assert.ok(highIdx < mediumIdx);
+    assert.ok(mediumIdx < lowIdx);
+  });
+
   it("formats line ranges correctly", () => {
     const parsed = {
       parsed: {
@@ -301,6 +327,48 @@ describe("renderReviewResult", () => {
     assert.ok(output.includes("f.js:5-10"));
     assert.ok(output.includes("g.js:3)"));
     assert.ok(output.includes("h.js)"));
+  });
+
+  it("normalizes malformed findings before rendering", () => {
+    const parsed = {
+      parsed: {
+        verdict: " approve ",
+        summary: " Review summary. ",
+        findings: [
+          null,
+          {
+            severity: " high ",
+            title: "  Trimmed title  ",
+            body: "  Body text  ",
+            file: "  src/file.js  ",
+            line_start: 0,
+            line_end: -1,
+            recommendation: "  Fix it.  ",
+          },
+          {
+            severity: "medium",
+            title: "Range fallback",
+            body: "End before start.",
+            file: "src/range.js",
+            line_start: 9,
+            line_end: 3,
+          },
+        ],
+        next_steps: ["  Ship carefully.  ", "", 42],
+      },
+    };
+
+    const output = renderReviewResult(parsed, meta);
+
+    assert.ok(output.includes("Verdict: approve"));
+    assert.ok(output.includes("Review summary."));
+    assert.ok(output.includes("[low] Finding 1 (unknown)"));
+    assert.ok(output.includes("No details provided."));
+    assert.ok(output.includes("[high] Trimmed title (src/file.js)"));
+    assert.ok(output.includes("  Recommendation: Fix it."));
+    assert.ok(output.includes("[medium] Range fallback (src/range.js:9)"));
+    assert.ok(output.includes("- Ship carefully."));
+    assert.ok(!output.includes("- 42"));
   });
 });
 
@@ -589,6 +657,13 @@ describe("renderStoredJobResult", () => {
     const stored = { result: { codex: { stdout: "Review body." } } };
     const output = renderStoredJobResult(job, stored);
     assert.equal(output, "Review body.\n");
+  });
+
+  it("returns string stored result payloads", () => {
+    const job = { id: "j1", status: "completed", title: "Claude Code Task" };
+    const stored = { result: "Plain stored task output." };
+    const output = renderStoredJobResult(job, stored);
+    assert.equal(output, "Plain stored task output.\n");
   });
 
   it("appends model fallback history to stored output", () => {

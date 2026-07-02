@@ -56,6 +56,7 @@
     "test:integration": "node --test tests/integration/*.test.mjs",
     "test:mutation": "stryker run",
     "test:mutation:dry-run": "stryker run --dryRunOnly",
+    "test:mutation:force": "stryker run --force",
     "test:mutation:unit": "node --test tests/args.test.mjs tests/structured-output.test.mjs tests/render.test.mjs tests/claude-cli.test.mjs",
     "test:e2e": "node --test tests/e2e/*.test.mjs",
     "uninstall:codex": "node scripts/installer-cli.mjs uninstall",

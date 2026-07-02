@@ -428,9 +428,10 @@ Mutation testing is available as an advisory local signal for the high-risk CLI 
 ```bash
 npm run test:mutation:dry-run
 npm run test:mutation
+npm run test:mutation:force
 ```
 
-Stryker runs through the native `node:test` command runner, so coverage analysis is disabled and the mutation score does not fail the build. The generated report is written under `reports/mutation/`. Do not mass-disable surviving mutants; either improve the focused tests or use a `// Stryker disable ...: reason` comment for an intentional equivalent mutant.
+Stryker runs through the native `node:test` command runner, so coverage analysis is disabled and the mutation score does not fail the build. The generated report is written under `reports/mutation/`. Use `test:mutation:force` after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; either improve the focused tests or use a `// Stryker disable ...: reason` comment for an intentional equivalent mutant.
 
 Mutation testing requires Node.js 20+ because Stryker 9 has a newer development-time engine requirement. The plugin runtime still supports the Node.js version listed in the prerequisites.
 
