@@ -337,9 +337,10 @@ test("simple runtime skills resolve the active plugin root from the skill path",
   const result = read("skills/result/SKILL.md");
   const cancel = read("skills/cancel/SKILL.md");
   const transfer = read("skills/transfer/SKILL.md");
+  const mcpDiagnose = read("skills/mcp-diagnose/SKILL.md");
   const activeRootPattern = /<plugin-root>\/scripts\/claude-companion\.mjs/i;
 
-  for (const skillText of [status, result, cancel, transfer]) {
+  for (const skillText of [status, result, cancel, transfer, mcpDiagnose]) {
     assert.match(skillText, /Resolve `<plugin-root>` as two directories above this `SKILL\.md` file/i);
     assert.match(skillText, activeRootPattern);
     assert.doesNotMatch(skillText, /<installed-plugin-root>/i);
@@ -348,4 +349,6 @@ test("simple runtime skills resolve the active plugin root from the skill path",
   assert.match(transfer, /claude-companion\.mjs" transfer \$ARGUMENTS/i);
   assert.match(transfer, /codex resume <session-id>/i);
   assert.match(transfer, /--source <claude-jsonl>/i);
+  assert.match(mcpDiagnose, /claude-companion\.mjs" mcp-diagnose \$ARGUMENTS/i);
+  assert.match(mcpDiagnose, /Do not print raw MCP server configs or secrets/i);
 });

@@ -144,6 +144,7 @@ function printUsage() {
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
+      "  node scripts/claude-companion.mjs mcp-diagnose [--cwd <path>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [--json]",
       "  node scripts/claude-companion.mjs session-routing-context [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs task-resume-candidate [--json]",
@@ -797,16 +798,23 @@ function mergeMcpServers(target, source, options = {}) {
         continue;
       }
       target[name] = value;
+      if (options.sources && options.source) {
+        options.sources[name] = options.source;
+      }
     }
   }
 }
 
 function collectConfiguredMcpServers(cwd, options = {}) {
   const available = {};
+  const sources = {};
   const userConfigPath = path.join(os.homedir(), ".claude.json");
   const userConfig = readJsonConfig(userConfigPath);
   if (userConfig) {
-    mergeMcpServers(available, userConfig.mcpServers);
+    mergeMcpServers(available, userConfig.mcpServers, {
+      sources,
+      source: "user",
+    });
 
     const resolvedCwd = path.resolve(cwd);
     const projects = userConfig.projects && typeof userConfig.projects === "object"
@@ -818,7 +826,11 @@ function collectConfiguredMcpServers(cwd, options = {}) {
         projectConfig?.cwd === resolvedCwd ||
         projectConfig?.path === resolvedCwd;
       if (projectMatches) {
-        mergeMcpServers(available, projectConfig?.mcpServers, { override: true });
+        mergeMcpServers(available, projectConfig?.mcpServers, {
+          override: true,
+          sources,
+          source: "user-project",
+        });
       }
     }
   }
@@ -827,9 +839,16 @@ function collectConfiguredMcpServers(cwd, options = {}) {
     ? path.join(cwd, ".mcp.json")
     : null;
   if (projectConfigPath) {
-    mergeMcpServers(available, readJsonConfig(projectConfigPath)?.mcpServers);
+    mergeMcpServers(available, readJsonConfig(projectConfigPath)?.mcpServers, {
+      sources,
+      source: "project",
+    });
   }
-  return { available, userConfigPath, projectConfigPath };
+  const ignoredProjectConfigPath =
+    !options.allowProjectMcpServers && fs.existsSync(path.join(cwd, ".mcp.json"))
+      ? path.join(cwd, ".mcp.json")
+      : null;
+  return { available, sources, userConfigPath, projectConfigPath, ignoredProjectConfigPath };
 }
 
 function parseUserMcpToolName(tool, availableServerNames = []) {
@@ -894,6 +913,103 @@ function buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile) {
       ? [...SANDBOX_REVIEW_TOOLS, ...userMcpTools]
       : SANDBOX_REVIEW_TOOLS,
   };
+}
+
+function buildMcpDiagnostic(cwd, options = {}) {
+  const userMcpTools = normalizeUserMcpTools(options.userMcpTools);
+  const {
+    available,
+    sources,
+    userConfigPath,
+    projectConfigPath,
+    ignoredProjectConfigPath,
+  } = collectConfiguredMcpServers(cwd, {
+    allowProjectMcpServers: Boolean(options.allowProjectMcpServers),
+  });
+  const availableServerNames = Object.keys(available).sort();
+  const selectedServers = new Set();
+  const requestedTools = userMcpTools.map((tool) => {
+    const { serverName, toolName } = parseUserMcpToolName(tool, availableServerNames);
+    const bundled = serverName === "gitReview";
+    const found = bundled || Object.prototype.hasOwnProperty.call(available, serverName);
+    if (found && !bundled) {
+      selectedServers.add(serverName);
+    }
+    const reason = found
+      ? null
+      : ignoredProjectConfigPath
+        ? `Claude MCP server "${serverName}" was not found. Project .mcp.json is ignored unless --allow-project-mcp-servers is set.`
+        : `Claude MCP server "${serverName}" was not found.`;
+    return {
+      tool,
+      valid: true,
+      serverName,
+      toolName,
+      found,
+      selected: found && !bundled,
+      source: bundled ? "bundled" : (sources[serverName] ?? null),
+      reason,
+    };
+  });
+  const allowedUserTools = requestedTools
+    .filter((tool) => tool.found)
+    .map((tool) => tool.tool);
+  return {
+    cwd: path.resolve(cwd),
+    userConfigPath,
+    projectConfigPath,
+    ignoredProjectConfigPath,
+    projectMcpServersEnabled: Boolean(options.allowProjectMcpServers),
+    availableServers: availableServerNames.map((name) => ({
+      name,
+      source: sources[name] ?? null,
+    })),
+    selectedServers: [...selectedServers].sort(),
+    requestedTools,
+    allowedTools: userMcpTools.length > 0
+      ? [...SANDBOX_REVIEW_TOOLS, ...allowedUserTools]
+      : SANDBOX_REVIEW_TOOLS,
+  };
+}
+
+function renderMcpDiagnostic(report) {
+  const lines = ["# Claude MCP Diagnostics", ""];
+  lines.push(`CWD: ${report.cwd}`);
+  lines.push(`User config: ${report.userConfigPath}`);
+  if (report.projectConfigPath) {
+    lines.push(`Project config: ${report.projectConfigPath}`);
+  } else if (report.ignoredProjectConfigPath) {
+    lines.push(
+      `Project config: ignored (${report.ignoredProjectConfigPath}; pass --allow-project-mcp-servers to enable)`
+    );
+  } else {
+    lines.push("Project config: disabled");
+  }
+  lines.push("");
+  lines.push("Available servers:");
+  if (report.availableServers.length === 0) {
+    lines.push("- none");
+  } else {
+    for (const server of report.availableServers) {
+      lines.push(`- ${server.name} (${server.source ?? "unknown"})`);
+    }
+  }
+  lines.push("");
+  lines.push("Requested tools:");
+  if (report.requestedTools.length === 0) {
+    lines.push("- none");
+  } else {
+    for (const tool of report.requestedTools) {
+      const status = tool.found
+        ? `selected from ${tool.source}`
+        : `missing: ${tool.reason}`;
+      lines.push(`- ${tool.tool}: ${status}`);
+    }
+  }
+  lines.push("");
+  lines.push(`Selected servers: ${report.selectedServers.join(", ") || "none"}`);
+  lines.push("");
+  return `${lines.join("\n").trimEnd()}\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2042,6 +2158,20 @@ async function handleAdversarialReview(argv) {
   });
 }
 
+function handleMcpDiagnose(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "user-mcp-tool"],
+    repeatableOptions: ["user-mcp-tool"],
+    booleanOptions: ["json", "allow-project-mcp-servers"],
+  });
+  const cwd = resolveCommandCwd(options);
+  const payload = buildMcpDiagnostic(cwd, {
+    userMcpTools: options["user-mcp-tool"],
+    allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
+  });
+  outputCommandResult(payload, renderMcpDiagnostic(payload), options.json);
+}
+
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: [
@@ -2619,6 +2749,9 @@ async function main() {
       break;
     case "cancel":
       await handleCancel(argv);
+      break;
+    case "mcp-diagnose":
+      handleMcpDiagnose(argv);
       break;
     case "mcp-git":
       await handleMcpGit(argv);

@@ -1618,6 +1618,138 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("diagnoses selected and missing MCP tools without exposing server secrets", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            context7: {
+              command: "node",
+              args: ["context7-server.mjs"],
+              env: { CONTEXT7_TOKEN: "SECRET_TOKEN" },
+            },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            localdocs: { command: "node", args: ["localdocs-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        [
+          "mcp-diagnose",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--user-mcp-tool",
+          "mcp__context7__resolve-library-id",
+          "--user-mcp-tool",
+          "mcp__localdocs__search",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(payload.projectMcpServersEnabled, false);
+      assert.equal(payload.userConfigPath, path.join(testEnv.homeDir, ".claude.json"));
+      assert.equal(payload.projectConfigPath, null);
+      assert.equal(payload.ignoredProjectConfigPath, path.join(testEnv.workspaceDir, ".mcp.json"));
+      assert.deepEqual(payload.availableServers.map((server) => server.name), ["context7"]);
+      assert.deepEqual(payload.selectedServers, ["context7"]);
+      assert.ok(payload.allowedTools.includes("mcp__gitReview__diff"));
+      assert.ok(payload.allowedTools.includes("mcp__context7__resolve-library-id"));
+      assert.ok(!payload.allowedTools.includes("mcp__localdocs__search"));
+      assert.deepEqual(
+        payload.requestedTools.map((tool) => ({
+          tool: tool.tool,
+          serverName: tool.serverName,
+          found: tool.found,
+          selected: tool.selected,
+          source: tool.source,
+        })),
+        [
+          {
+            tool: "mcp__context7__resolve-library-id",
+            serverName: "context7",
+            found: true,
+            selected: true,
+            source: "user",
+          },
+          {
+            tool: "mcp__localdocs__search",
+            serverName: "localdocs",
+            found: false,
+            selected: false,
+            source: null,
+          },
+        ]
+      );
+      assert.match(payload.requestedTools[1].reason, /Project \.mcp\.json is ignored/);
+      assert.doesNotMatch(JSON.stringify(payload), /SECRET_TOKEN/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("diagnoses project MCP tools only when project MCP servers are enabled", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            localdocs: { command: "node", args: ["localdocs-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        [
+          "mcp-diagnose",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--allow-project-mcp-servers",
+          "--user-mcp-tool",
+          "mcp__localdocs__search",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(payload.projectMcpServersEnabled, true);
+      assert.equal(payload.projectConfigPath, path.join(testEnv.workspaceDir, ".mcp.json"));
+      assert.deepEqual(payload.availableServers, [
+        { name: "localdocs", source: "project" },
+      ]);
+      assert.deepEqual(payload.selectedServers, ["localdocs"]);
+      assert.deepEqual(payload.requestedTools, [
+        {
+          tool: "mcp__localdocs__search",
+          valid: true,
+          serverName: "localdocs",
+          toolName: "search",
+          found: true,
+          selected: true,
+          source: "project",
+          reason: null,
+        },
+      ]);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("rejects explicit user MCP tools that only exist in project .mcp.json by default", () => {
     const testEnv = createTestEnvironment();
 

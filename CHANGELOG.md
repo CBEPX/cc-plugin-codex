@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Add `$cc:mcp-diagnose` to explain which Claude MCP servers and requested tools the plugin can see for review commands without exposing raw server configs or secrets.
+
 ## v1.2.1
 
 - Switch marketplace installs to Codex native plugin hooks: bundled hooks now load from `hooks/hooks.json` in the active plugin cache with `$PLUGIN_ROOT` instead of writing managed global hook commands into `~/.codex/hooks.json`.

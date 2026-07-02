@@ -28,7 +28,7 @@
 `cc-plugin-codex` turns Codex into a host for Claude Code work.
 **Codex stays in charge of the thread. Claude Code does the review and rescue work.**
 
-You get eight commands (`$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:transfer`, `$cc:status`, `$cc:result`, `$cc:cancel`, `$cc:setup`) that launch tracked Claude Code work, transfer Claude transcripts into Codex, manage lifecycle and ownership, and surface results back into Codex.
+You get nine commands (`$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:transfer`, `$cc:status`, `$cc:result`, `$cc:cancel`, `$cc:mcp-diagnose`, `$cc:setup`) that launch tracked Claude Code work, transfer Claude transcripts into Codex, manage lifecycle and ownership, and surface results back into Codex.
 
 That includes:
 - Built-in Codex subagent orchestration for rescue and background review flows
@@ -104,6 +104,7 @@ When it finishes, Codex should nudge you toward the right result. If not, `$cc:s
 | `$cc:status` | List running and recent Claude Code jobs, or inspect one job |
 | `$cc:result` | Open the output of a finished job |
 | `$cc:cancel` | Cancel an active background job |
+| `$cc:mcp-diagnose` | Explain which Claude MCP tools would be available to reviews |
 | `$cc:setup` | Verify installation, auth, hooks, and review gate |
 
 Quick routing rule:
@@ -136,6 +137,17 @@ In foreground, review returns the result directly. In background, the plugin use
 If the diff is too large to inline safely, the review prompt falls back to concise status/stat context and tells Claude to inspect the diff directly with read-only `git diff` commands instead of failing the run.
 
 By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted read-only tools when reviewing untrusted diffs. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
+
+### `$cc:mcp-diagnose`
+
+Shows which Claude MCP servers the plugin can see for review commands, which requested tools would be allowed, and why a tool is missing.
+
+```text
+$cc:mcp-diagnose --user-mcp-tool mcp__context7__resolve-library-id
+$cc:mcp-diagnose --allow-project-mcp-servers --user-mcp-tool mcp__localdocs__search
+```
+
+The diagnostic output lists server names and config sources only; it does not print raw MCP server configs or secrets.
 
 ### `$cc:adversarial-review`
 
