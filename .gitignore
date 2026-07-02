@@ -1,4 +1,8 @@
 .claude/
 node_modules/
+.stryker-tmp/
+reports/mutation/
+reports/stryker-incremental.json
+stryker.log
 *.log
 .DS_Store

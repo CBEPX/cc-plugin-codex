@@ -1,6 +1,9 @@
 # Local dependencies and generated packaging output
 node_modules/
 *.tgz
+.stryker-tmp/
+reports/
+stryker.log
 
 # Local scratch and notes
 tasks/

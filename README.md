@@ -415,6 +415,25 @@ Disable it: `$cc:setup --disable-review-gate`. The gate fires on every Ctrl+C, w
 **Background jobs not cleaned up**
 Jobs are terminated when the Codex session that owns them exits. If a session crashes without cleanup, use `$cc:status` and `$cc:cancel <job-id>` to clean up any leftovers.
 
+## Development
+
+Run the normal project gate before publishing or opening a PR:
+
+```bash
+npm run check
+```
+
+Mutation testing is available as an advisory local signal for the high-risk CLI parsing and prompt-rendering modules:
+
+```bash
+npm run test:mutation:dry-run
+npm run test:mutation
+```
+
+Stryker runs through the native `node:test` command runner, so coverage analysis is disabled and the mutation score does not fail the build. The generated report is written under `reports/mutation/`. Do not mass-disable surviving mutants; either improve the focused tests or use a `// Stryker disable ...: reason` comment for an intentional equivalent mutant.
+
+Mutation testing requires Node.js 20+ because Stryker 9 has a newer development-time engine requirement. The plugin runtime still supports the Node.js version listed in the prerequisites.
+
 ## License
 
 [Apache-2.0](LICENSE) — see [NOTICE](NOTICE) for attribution.
