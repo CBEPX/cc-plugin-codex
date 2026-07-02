@@ -2,10 +2,24 @@
 
 ## [Unreleased]
 
+## v1.3.0
+
 ### Added
 
+- Add `$cc:transfer` to import the current Claude transcript into a resumable Codex thread.
+- Add explicit `--user-mcp-tool` opt-in for review and adversarial-review runs, with project `.mcp.json` servers gated behind `--allow-project-mcp-servers`.
 - Add `$cc:mcp-diagnose` to explain which Claude MCP servers and requested tools the plugin can see for review commands without exposing raw server configs or secrets.
 - Add the `fable` Claude model alias for review, adversarial-review, and rescue/task commands, resolving to `claude-fable-5[1m]` without adding a hidden effort default.
+
+### Changed
+
+- Track Claude model fallback events in task and review results, including terminal-only model changes.
+- Harden foreground task observation, cancellation races, long/untracked review context handling, and Codex app-server waits.
+- Update the built-in Claude model aliases to `claude-opus-4-8` and `claude-sonnet-5`.
+
+### Fixed
+
+- Classify Claude usage-limit failures separately from generic Claude failures without creating synthetic model fallback history.
 
 ## v1.2.1
 
