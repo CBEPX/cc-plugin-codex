@@ -8,7 +8,7 @@
 /**
  * Session lifecycle hook for Codex — Claude Code bridge.
  *
- * SessionStart: Exports CLAUDE_COMPANION_SESSION_ID via CLAUDE_ENV_FILE.
+ * SessionStart: Exports CLAUDE_COMPANION_SESSION_ID and transcript path via CLAUDE_ENV_FILE.
  *
  * SessionEnd:   Cleans up tracked jobs for the session, kills orphan `claude` processes.
  *
@@ -32,6 +32,7 @@ import {
   transitionJob,
 } from "../scripts/lib/state.mjs";
 import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
+import { TRANSCRIPT_PATH_ENV } from "../scripts/lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 
 export { SESSION_ID_ENV };
@@ -129,6 +130,9 @@ function handleSessionStart(input) {
   const nestedSession = isNestedCodexSession(input.session_id);
   // Export session ID so companion scripts can correlate jobs
   appendEnvVar(SESSION_ID_ENV, input.session_id);
+  if (!nestedSession) {
+    appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
+  }
   appendEnvVar(SKIP_INTERACTIVE_HOOKS_ENV, nestedSession ? "1" : "0");
   // Forward plugin data dir if set
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);

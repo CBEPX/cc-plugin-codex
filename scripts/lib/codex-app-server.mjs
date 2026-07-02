@@ -41,12 +41,28 @@ function resolveAppServerCommand() {
   return { executable, args };
 }
 
-export async function callCodexAppServer({ cwd, method, params }) {
+export async function callCodexAppServer({
+  cwd,
+  method,
+  params,
+  waitForNotificationMethod = null,
+  timeoutMs: requestedTimeoutMs = null,
+  responseCompletesWait = null,
+  onNotification = null,
+}) {
   const { executable, args } = resolveAppServerCommand();
-  const timeoutMs = Number.parseInt(
+  const hasConfiguredTimeout =
+    process.env.CC_PLUGIN_CODEX_APP_SERVER_TIMEOUT_MS != null;
+  const configuredTimeoutMs = Number.parseInt(
     process.env.CC_PLUGIN_CODEX_APP_SERVER_TIMEOUT_MS ?? `${DEFAULT_TIMEOUT_MS}`,
     10
   );
+  const envTimeoutMs = Number.isFinite(configuredTimeoutMs)
+    ? configuredTimeoutMs
+    : DEFAULT_TIMEOUT_MS;
+  const timeoutMs = requestedTimeoutMs == null || (hasConfiguredTimeout && envTimeoutMs <= 0)
+    ? envTimeoutMs
+    : Math.max(Number(requestedTimeoutMs) || 0, envTimeoutMs);
 
   return await new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(executable, args, {
@@ -61,12 +77,18 @@ export async function callCodexAppServer({ cwd, method, params }) {
 
     let settled = false;
     let stderr = "";
+    let responseResult = null;
+    let responseReceived = false;
+    let notificationReceived = false;
     const timeoutHandle = Number.isFinite(timeoutMs) && timeoutMs > 0
       ? setTimeout(() => {
+          const waitTarget = waitForNotificationMethod
+            ? `${method} notification ${waitForNotificationMethod}`
+            : method;
           finish(
             rejectPromise,
             new Error(
-              `${executable} app-server timed out waiting for ${method} after ${timeoutMs}ms`
+              `${executable} app-server timed out waiting for ${waitTarget} after ${timeoutMs}ms`
             )
           );
         }, timeoutMs)
@@ -92,6 +114,15 @@ export async function callCodexAppServer({ cwd, method, params }) {
       handler(value);
     }
 
+    function maybeFinishSuccess() {
+      if (
+        responseReceived &&
+        (!waitForNotificationMethod || notificationReceived)
+      ) {
+        finish(resolvePromise, responseResult);
+      }
+    }
+
     function writeMessage(message) {
       child.stdin.write(`${JSON.stringify(message)}\n`);
     }
@@ -114,18 +145,27 @@ export async function callCodexAppServer({ cwd, method, params }) {
       );
     });
 
-    child.on("exit", (code, signal) => {
+    child.on("close", (code, signal) => {
       if (settled) {
+        return;
+      }
+      if (
+        responseReceived &&
+        (!waitForNotificationMethod || notificationReceived)
+      ) {
+        finish(resolvePromise, responseResult);
         return;
       }
 
       const suffix = stderr.trim() ? `\n${stderr.trim()}` : "";
+      const message = responseReceived && waitForNotificationMethod && !notificationReceived
+        ? `${executable} app-server exited before ${method} emitted ${waitForNotificationMethod} ` +
+          `(code=${code}, signal=${signal})${suffix}`
+        : `${executable} app-server exited before responding to ${method} ` +
+          `(code=${code}, signal=${signal})${suffix}`;
       finish(
         rejectPromise,
-        new Error(
-          `${executable} app-server exited before responding to ${method} ` +
-            `(code=${code}, signal=${signal})${suffix}`
-        )
+        new Error(message)
       );
     });
 
@@ -152,21 +192,44 @@ export async function callCodexAppServer({ cwd, method, params }) {
       }
 
       if (message.id !== 2) {
+        if (message.method === waitForNotificationMethod) {
+          notificationReceived = true;
+          if (typeof onNotification === "function") {
+            onNotification(message.params ?? null);
+          }
+          maybeFinishSuccess();
+        }
         return;
       }
 
       if (message.error) {
         const suffix = stderr.trim() ? `\n${stderr.trim()}` : "";
-        finish(
-          rejectPromise,
+        const error = Object.assign(
           new Error(
             `Codex app-server ${method} failed: ${JSON.stringify(message.error)}${suffix}`
-          )
+          ),
+          {
+            rpcCode: message.error.code,
+            rpcMessage: message.error.message,
+          }
+        );
+        finish(
+          rejectPromise,
+          error
         );
         return;
       }
 
-      finish(resolvePromise, message.result);
+      responseResult = message.result;
+      responseReceived = true;
+      if (
+        waitForNotificationMethod &&
+        typeof responseCompletesWait === "function" &&
+        responseCompletesWait(responseResult)
+      ) {
+        notificationReceived = true;
+      }
+      maybeFinishSuccess();
     });
 
     writeMessage({

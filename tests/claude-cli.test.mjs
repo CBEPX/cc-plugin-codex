@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 
 import {
   StreamParser,
+  areModelIdsEquivalent,
   validateTurnCompletion,
   resolveModel,
   resolveEffort,
@@ -26,6 +27,7 @@ import {
   MAX_STREAM_PARSER_PARSE_ERRORS,
   MAX_STREAM_PARSER_TOOL_USES,
   MAX_STREAM_PARSER_TOUCHED_FILES,
+  MAX_STREAM_PARSER_MODEL_EVENTS,
 } from "../scripts/lib/claude-cli.mjs";
 
 // ===========================================================================
@@ -232,6 +234,132 @@ describe("StreamParser", () => {
     assert.equal(events[0].subtype, "api_retry");
   });
 
+  it("parses explicit model fallback events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "model_fallback",
+      session_id: "sess-model",
+      from_model: "claude-opus-4-8",
+      to_model: "claude-sonnet-5",
+      reason: "capacity",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].phase, "model_fallback");
+    assert.deepEqual(events[0].modelFallback.fromModel, "claude-opus-4-8");
+    assert.deepEqual(events[0].modelFallback.toModel, "claude-sonnet-5");
+    assert.equal(events[0].modelFallback.reason, "capacity");
+    assert.equal(parser.state.modelEvents.length, 1);
+  });
+
+  it("parses nested model fallback events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "stream_event",
+      session_id: "sess-nested-model",
+      event: {
+        type: "model_switch",
+        previous_model: "claude-opus-4-8",
+        current_model: "claude-sonnet-5",
+      },
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].modelFallback.fromModel, "claude-opus-4-8");
+    assert.equal(events[0].modelFallback.toModel, "claude-sonnet-5");
+  });
+
+  it("does not misclassify generic changed events with model fields as fallbacks", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "settings_changed",
+      message: "settings changed",
+      model: "claude-opus-4-8",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 0);
+    assert.equal(parser.state.modelEvents.length, 0);
+  });
+
+  it("does not consume result events with fallback-like prose as model fallbacks", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      session_id: "sess-result-prose",
+      result: "The model changed in the text explanation.",
+      model: "claude-sonnet-5",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "result");
+    assert.equal(parser.state.modelEvents.length, 0);
+    assert.equal(parser.state.finalModel, "claude-sonnet-5");
+  });
+
+  it("captures the terminal result model", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      result: "done",
+      model: "claude-sonnet-5",
+      session_id: "sess-final-model",
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-sonnet-5");
+  });
+
+  it("captures the observed model from message_start stream events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "stream_event",
+      session_id: "sess-message-model",
+      event: {
+        type: "message_start",
+        message: {
+          model: "claude-opus-4-8",
+        },
+      },
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-opus-4-8");
+  });
+
+  it("captures the final model from result modelUsage", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      result: "done",
+      session_id: "sess-model-usage",
+      modelUsage: {
+        "claude-sonnet-5": {
+          inputTokens: 1,
+          outputTokens: 1,
+          contextWindow: 1000000,
+        },
+      },
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-sonnet-5");
+  });
+
   it("returns null for unknown event types and tracks them", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({ type: "unknown_event", data: "x" });
@@ -253,6 +381,28 @@ describe("StreamParser", () => {
     assert.equal(
       parser.state.unknownEvents.at(-1).type,
       `unknown_${MAX_STREAM_PARSER_UNKNOWN_EVENTS + 6}`
+    );
+  });
+
+  it("caps model fallback history to the configured maximum", () => {
+    const parser = new StreamParser();
+
+    for (let i = 0; i < MAX_STREAM_PARSER_MODEL_EVENTS + 3; i++) {
+      parser.feed(
+        JSON.stringify({
+          type: "system",
+          subtype: "model_fallback",
+          from_model: `claude-opus-${i}`,
+          to_model: `claude-sonnet-${i}`,
+        }) + "\n"
+      );
+    }
+
+    assert.equal(parser.state.modelEvents.length, MAX_STREAM_PARSER_MODEL_EVENTS);
+    assert.equal(parser.state.modelEvents[0].fromModel, "claude-opus-3");
+    assert.equal(
+      parser.state.modelEvents.at(-1).toModel,
+      `claude-sonnet-${MAX_STREAM_PARSER_MODEL_EVENTS + 2}`
     );
   });
 
@@ -384,6 +534,34 @@ describe("StreamParser", () => {
 });
 
 // ===========================================================================
+// areModelIdsEquivalent
+// ===========================================================================
+
+describe("areModelIdsEquivalent", () => {
+  it("treats dated model snapshots as equivalent to their stable alias target", () => {
+    assert.equal(
+      areModelIdsEquivalent("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+      true
+    );
+  });
+
+  it("treats Claude CLI aliases as equivalent to concrete family ids", () => {
+    assert.equal(areModelIdsEquivalent("fable", "claude-fable-5"), true);
+  });
+
+  it("ignores bracketed context-window suffixes for comparison", () => {
+    assert.equal(
+      areModelIdsEquivalent("claude-sonnet-5[1m]", "claude-sonnet-5"),
+      true
+    );
+  });
+
+  it("does not treat different model families as equivalent", () => {
+    assert.equal(areModelIdsEquivalent("claude-opus-4-8", "claude-sonnet-5"), false);
+  });
+});
+
+// ===========================================================================
 // validateTurnCompletion
 // ===========================================================================
 
@@ -427,8 +605,8 @@ describe("validateTurnCompletion", () => {
 // ===========================================================================
 
 describe("resolveModel", () => {
-  it("maps 'sonnet' to the 1M variant 'claude-sonnet-4-6[1m]'", () => {
-    assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6[1m]");
+  it("maps 'sonnet' to 'claude-sonnet-5'", () => {
+    assert.equal(resolveModel("sonnet"), "claude-sonnet-5");
   });
 
   it("maps 'haiku' to 'claude-haiku-4-5'", () => {
@@ -448,8 +626,8 @@ describe("resolveModel", () => {
     assert.equal(resolveModel(""), undefined);
   });
 
-  it("maps 'opus' to the 1M variant 'claude-opus-4-7[1m]'", () => {
-    assert.equal(resolveModel("opus"), "claude-opus-4-7[1m]");
+  it("maps 'opus' to 'claude-opus-4-8'", () => {
+    assert.equal(resolveModel("opus"), "claude-opus-4-8");
   });
 
   it("MODEL_ALIASES map has expected entries", () => {
@@ -475,7 +653,7 @@ describe("resolveDefaultModel", () => {
   it("passes through an explicit model", () => {
     assert.equal(resolveDefaultModel("sonnet"), "sonnet");
     assert.equal(resolveDefaultModel("haiku"), "haiku");
-    assert.equal(resolveDefaultModel("claude-opus-4-7"), "claude-opus-4-7");
+    assert.equal(resolveDefaultModel("claude-opus-4-8"), "claude-opus-4-8");
   });
 
   it("exposes DEFAULT_MODEL constant as 'opus'", () => {
@@ -484,17 +662,15 @@ describe("resolveDefaultModel", () => {
 });
 
 describe("resolveDefaultEffort", () => {
-  it("defaults to xhigh for opus alias and resolved id (including 1M variant)", () => {
+  it("defaults to xhigh for opus alias and resolved id", () => {
     assert.equal(resolveDefaultEffort("opus", null), "xhigh");
-    assert.equal(resolveDefaultEffort("claude-opus-4-7", null), "xhigh");
-    assert.equal(resolveDefaultEffort("claude-opus-4-7[1m]", null), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-4-8", null), "xhigh");
     assert.equal(resolveDefaultEffort("OPUS", undefined), "xhigh");
   });
 
-  it("defaults to high for sonnet alias and resolved id (including 1M variant)", () => {
+  it("defaults to high for sonnet alias and resolved id", () => {
     assert.equal(resolveDefaultEffort("sonnet", null), "high");
-    assert.equal(resolveDefaultEffort("claude-sonnet-4-6", null), "high");
-    assert.equal(resolveDefaultEffort("claude-sonnet-4-6[1m]", null), "high");
+    assert.equal(resolveDefaultEffort("claude-sonnet-5", null), "high");
   });
 
   it("returns undefined for haiku (no effort default)", () => {
@@ -520,11 +696,9 @@ describe("resolveDefaultEffort", () => {
 
   it("DEFAULT_EFFORT_BY_MODEL contains the expected entries", () => {
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("opus"), "xhigh");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-7"), "xhigh");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-7[1m]"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-8"), "xhigh");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("sonnet"), "high");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-4-6"), "high");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-4-6[1m]"), "high");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-5"), "high");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.has("haiku"), false);
   });
 });
@@ -643,7 +817,7 @@ describe("buildArgs", () => {
     const args = buildArgs("p", { model: "sonnet" });
     const idx = args.indexOf("--model");
     assert.ok(idx >= 0);
-    assert.equal(args[idx + 1], "claude-sonnet-4-6[1m]");
+    assert.equal(args[idx + 1], "claude-sonnet-5");
   });
 
   it("includes --effort with resolved effort", () => {

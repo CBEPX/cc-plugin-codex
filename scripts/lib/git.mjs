@@ -10,6 +10,7 @@ import { isProbablyText } from "./fs.mjs";
 import { formatCommandFailure, runCommand, runCommandChecked } from "./process.mjs";
 
 const MAX_UNTRACKED_BYTES = 24 * 1024;
+const MAX_UNTRACKED_TOTAL_BYTES = MAX_UNTRACKED_BYTES + 4 * 1024;
 const MAX_INLINE_REVIEW_DIFF_BYTES = 64 * 1024;
 const REVIEW_DIFF_READ_MAX_BUFFER = MAX_INLINE_REVIEW_DIFF_BYTES + 8 * 1024;
 const HASH_OBJECT_BATCH_SIZE = 128;
@@ -328,6 +329,40 @@ function shouldInlineReviewDiff(...sections) {
   return true;
 }
 
+function formatUntrackedFiles(cwd, relativePaths) {
+  const sections = [];
+  let totalBytes = 0;
+  const omittedPaths = [];
+
+  for (let index = 0; index < relativePaths.length; index += 1) {
+    const relativePath = relativePaths[index];
+    const section = formatUntrackedFile(cwd, relativePath);
+    const separator = sections.length > 0 ? "\n\n" : "";
+    const nextBytes = Buffer.byteLength(separator + section, "utf8");
+    if (totalBytes + nextBytes > MAX_UNTRACKED_TOTAL_BYTES) {
+      omittedPaths.push(relativePath);
+      continue;
+    }
+    sections.push(section);
+    totalBytes += nextBytes;
+  }
+
+  if (omittedPaths.length > 0) {
+    const displayedPaths = omittedPaths.slice(0, 20).map((relativePath) => `- ${relativePath}`);
+    if (omittedPaths.length > displayedPaths.length) {
+      displayedPaths.push(`- ... and ${omittedPaths.length - displayedPaths.length} more`);
+    }
+    sections.push([
+      "### Omitted untracked files",
+      `(skipped: ${omittedPaths.length} untracked file(s) omitted because the aggregate untracked-file context exceeds ${MAX_UNTRACKED_TOTAL_BYTES} bytes)`,
+      ...displayedPaths,
+      "Inspect remaining untracked files directly with read-only git commands such as `git ls-files --others --exclude-standard`."
+    ].join("\n"));
+  }
+
+  return sections.join("\n\n");
+}
+
 function readBoundedGitDiff(cwd, args) {
   const result = git(cwd, args, { maxBuffer: REVIEW_DIFF_READ_MAX_BUFFER });
   if (result.error) {
@@ -346,7 +381,7 @@ function readBoundedGitDiff(cwd, args) {
 
 function collectWorkingTreeContext(cwd, state) {
   const status = gitChecked(cwd, ["status", "--short"]).stdout.trim();
-  const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
+  const untrackedBody = formatUntrackedFiles(cwd, state.untracked);
   const stagedDiff = readBoundedGitDiff(cwd, ["diff", "--cached", "--no-ext-diff", "--submodule=diff"]);
   const unstagedDiff = readBoundedGitDiff(cwd, ["diff", "--no-ext-diff", "--submodule=diff"]);
   const inlineDiffs =

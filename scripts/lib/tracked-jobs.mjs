@@ -13,12 +13,13 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { terminateProcessTree } from "./process.mjs";
-import { nowIso, ensureStateDir, getCurrentSession, patchJob, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
+import { nowIso, ensureStateDir, getCurrentSession, patchJob, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
 
 export { nowIso };
 
 export const SESSION_ID_ENV = "CLAUDE_COMPANION_SESSION_ID";
 export const MAX_JOB_LOG_BYTES = 1024 * 1024;
+export const MAX_JOB_MODEL_FALLBACK_EVENTS = 50;
 const LOG_TRUNCATION_MARKER = "[... earlier log output truncated ...]\n";
 
 function sliceTextTailByBytes(text, maxBytes) {
@@ -92,6 +93,82 @@ function appendToBoundedLog(logFile, text) {
   trimLogFile(logFile);
 }
 
+function normalizeModelFallback(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const fromModel =
+    typeof value.fromModel === "string" && value.fromModel.trim()
+      ? value.fromModel.trim()
+      : null;
+  const toModel =
+    typeof value.toModel === "string" && value.toModel.trim()
+      ? value.toModel.trim()
+      : null;
+  if (!fromModel && !toModel) {
+    return null;
+  }
+
+  return {
+    fromModel,
+    toModel,
+    reason:
+      typeof value.reason === "string" && value.reason.trim()
+        ? value.reason.trim()
+        : null,
+    source:
+      typeof value.source === "string" && value.source.trim()
+        ? value.source.trim()
+        : null,
+    timestamp:
+      typeof value.timestamp === "string" && value.timestamp.trim()
+        ? value.timestamp.trim()
+        : nowIso(),
+  };
+}
+
+function normalizeModelFallbackList(value) {
+  return Array.isArray(value)
+    ? value.map((event) => normalizeModelFallback(event)).filter(Boolean)
+    : [];
+}
+
+function modelFallbackKey(event) {
+  return JSON.stringify([
+    event.fromModel ?? "",
+    event.toModel ?? "",
+    event.reason ?? "",
+    event.source ?? "",
+  ]);
+}
+
+function mergeModelFallbacks(existing, incoming) {
+  const merged = [];
+  const seen = new Set();
+  for (const event of [
+    ...normalizeModelFallbackList(existing),
+    ...normalizeModelFallbackList(incoming),
+  ]) {
+    const key = modelFallbackKey(event);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(event);
+  }
+  return merged.slice(-MAX_JOB_MODEL_FALLBACK_EVENTS);
+}
+
+function extractPayloadModelFallbacks(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return [];
+  }
+  const direct = normalizeModelFallbackList(payload.modelFallbacks);
+  const codex = normalizeModelFallbackList(payload.codex?.modelFallbacks);
+  return mergeModelFallbacks(direct, codex);
+}
+
 function normalizeProgressEvent(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return {
@@ -101,7 +178,8 @@ function normalizeProgressEvent(value) {
       turnId: typeof value.turnId === "string" && value.turnId.trim() ? value.turnId.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
-      logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
+      logBody: value.logBody == null ? null : String(value.logBody).trimEnd(),
+      modelFallback: normalizeModelFallback(value.modelFallback)
     };
   }
 
@@ -112,7 +190,8 @@ function normalizeProgressEvent(value) {
     turnId: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
-    logBody: null
+    logBody: null,
+    modelFallback: null
   };
 }
 
@@ -160,6 +239,7 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastPhase = null;
   let lastThreadId = null;
   let lastTurnId = null;
+  let lastModelFallbackKey = null;
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
@@ -182,6 +262,19 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       lastTurnId = normalized.turnId;
       patch.turnId = normalized.turnId;
       changed = true;
+    }
+
+    if (normalized.modelFallback) {
+      const key = modelFallbackKey(normalized.modelFallback);
+      if (key !== lastModelFallbackKey) {
+        lastModelFallbackKey = key;
+        const existing = readJobFile(workspaceRoot, jobId);
+        patch.modelFallbacks = mergeModelFallbacks(
+          existing?.modelFallbacks,
+          [normalized.modelFallback]
+        );
+        changed = true;
+      }
     }
 
     if (!changed) {
@@ -247,6 +340,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     // Use CAS for terminal transition: running → completed/failed
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
+    const modelFallbacks = extractPayloadModelFallbacks(execution.payload);
     const terminalData = {
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
@@ -257,6 +351,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       summary: execution.summary,
       result: execution.payload,
       rendered: execution.rendered,
+      ...(modelFallbacks.length > 0 ? { modelFallbacks } : {}),
     };
 
     const transitioned = transitionJob(

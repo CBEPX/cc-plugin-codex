@@ -21,8 +21,11 @@ export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
 export const MAX_STREAM_PARSER_PARSE_ERRORS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
 export const MAX_STREAM_PARSER_TOUCHED_FILES = 256;
+export const MAX_STREAM_PARSER_MODEL_EVENTS = 50;
 export const MAX_STDERR_BYTES = 64 * 1024;
 export const SANDBOX_TEMP_DIR = normalizePathSlashes(path.resolve(os.tmpdir()));
+
+const MODEL_FALLBACK_RE = /\bmodel[_ -]?(?:fallback|switch|switched|downgrade|downgraded)\b/i;
 
 function pushBoundedTail(list, value, maxEntries) {
   list.push(value);
@@ -70,6 +73,174 @@ function sliceTextTailByBytes(text, maxBytes) {
 function appendTextTail(existing, chunk, maxBytes) {
   const next = `${existing ?? ""}${chunk ?? ""}`;
   return sliceTextTailByBytes(next, maxBytes);
+}
+
+function firstStringField(source, names) {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+  for (const name of names) {
+    const value = source[name];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function firstStringFieldFromSources(sources, names) {
+  for (const source of sources) {
+    const value = firstStringField(source, names);
+    if (value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function collectEventModelSources(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+  const sources = [value];
+  if (value.event && typeof value.event === "object" && !Array.isArray(value.event)) {
+    sources.push(value.event);
+    if (
+      value.event.message &&
+      typeof value.event.message === "object" &&
+      !Array.isArray(value.event.message)
+    ) {
+      sources.push(value.event.message);
+    }
+  }
+  if (value.message && typeof value.message === "object" && !Array.isArray(value.message)) {
+    sources.push(value.message);
+  }
+  return sources;
+}
+
+function firstModelUsageKey(value) {
+  const modelUsage =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? value.modelUsage
+      : null;
+  if (!modelUsage || typeof modelUsage !== "object" || Array.isArray(modelUsage)) {
+    return null;
+  }
+  const keys = Object.keys(modelUsage).filter((key) => key.trim());
+  return keys.length === 1 ? keys[0] : null;
+}
+
+function extractObservedModel(value) {
+  return (
+    firstStringFieldFromSources(collectEventModelSources(value), [
+      "model",
+      "actual_model",
+      "actualModel",
+      "selected_model",
+      "selectedModel",
+    ]) ?? firstModelUsageKey(value)
+  );
+}
+
+function compactModelEvent(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const nestedEvent =
+    value.event && typeof value.event === "object" && !Array.isArray(value.event)
+      ? value.event
+      : null;
+  const sources = nestedEvent ? [value, nestedEvent] : [value];
+  const modelContext = [
+    value.type,
+    value.subtype,
+    value.name,
+    typeof value.event === "string" ? value.event : null,
+    nestedEvent?.type,
+    nestedEvent?.name,
+    nestedEvent?.subtype,
+  ].filter((part) => typeof part === "string").join(" ");
+  const hasFallbackMarker = MODEL_FALLBACK_RE.test(modelContext);
+  const fromModel = firstStringFieldFromSources(sources, [
+    "from_model",
+    "fromModel",
+    "previous_model",
+    "previousModel",
+    "original_model",
+    "originalModel",
+    "requested_model",
+    "requestedModel",
+    "source_model",
+    "sourceModel",
+  ]);
+  const toModel =
+    firstStringFieldFromSources(sources, [
+      "to_model",
+      "toModel",
+      "fallback_model",
+      "fallbackModel",
+      "new_model",
+      "newModel",
+      "current_model",
+      "currentModel",
+      "actual_model",
+      "actualModel",
+      "selected_model",
+      "selectedModel",
+    ]) ??
+    (hasFallbackMarker ? firstStringFieldFromSources(sources, ["model"]) : null);
+
+  if (!hasFallbackMarker && !(fromModel && toModel && fromModel !== toModel)) {
+    return null;
+  }
+  if (!fromModel && !toModel) {
+    return null;
+  }
+
+  const reason = firstStringFieldFromSources(sources, ["reason", "message", "detail", "details"]);
+  return {
+    fromModel,
+    toModel,
+    reason,
+    source: firstStringFieldFromSources(sources, ["subtype", "type", "name"]) ?? "model_fallback",
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function formatModelEventMessage(event) {
+  const from = event?.fromModel ?? "unknown";
+  const to = event?.toModel ?? "unknown";
+  const reason = event?.reason ? ` (${event.reason})` : "";
+  return `Claude model fallback: ${from} -> ${to}${reason}`;
+}
+
+function canonicalModelForComparison(model) {
+  const normalized = String(model ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  const withoutContextSuffix = normalized.replace(/\[[^\]]+\]$/u, "");
+  const withoutDateSuffix = withoutContextSuffix.replace(/-\d{8}$/u, "");
+  return MODEL_ALIASES.get(withoutDateSuffix) ?? withoutDateSuffix;
+}
+
+export function areModelIdsEquivalent(left, right) {
+  const a = canonicalModelForComparison(left);
+  const b = canonicalModelForComparison(right);
+  if (!a || !b) {
+    return false;
+  }
+  if (a === b) {
+    return true;
+  }
+  if (!a.startsWith("claude-") && (b === `claude-${a}` || b.startsWith(`claude-${a}-`))) {
+    return true;
+  }
+  if (!b.startsWith("claude-") && (a === `claude-${b}` || a.startsWith(`claude-${b}-`))) {
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +299,8 @@ export class StreamParser {
       unresolvedParseErrors: 0,
       toolUses: [],
       touchedFiles: [],
+      modelEvents: [],
+      finalModel: null,
     };
   }
 
@@ -157,6 +330,24 @@ export class StreamParser {
       if (event.session_id && !this.state.sessionId) {
         this.state.sessionId = event.session_id;
       }
+      const modelEvent = compactModelEvent(event);
+      if (modelEvent) {
+        this.state.finalModel = modelEvent.toModel ?? this.state.finalModel;
+        pushBoundedTail(
+          this.state.modelEvents,
+          modelEvent,
+          MAX_STREAM_PARSER_MODEL_EVENTS
+        );
+        return {
+          kind: "model_fallback",
+          modelFallback: modelEvent,
+          data: event,
+          message: formatModelEventMessage(modelEvent),
+          phase: "model_fallback",
+          threadId: this.state.sessionId,
+        };
+      }
+      this.state.finalModel = extractObservedModel(event) ?? this.state.finalModel;
       switch (event.type) {
         case "stream_event":
           return this._handleStreamEvent(event);
@@ -174,6 +365,7 @@ export class StreamParser {
             this.state.structuredOutput = event.structured_output ?? null;
           }
           if (event.session_id) this.state.sessionId = event.session_id;
+          this.state.finalModel = extractObservedModel(event) ?? this.state.finalModel;
           return { kind: "result", data: event };
         default:
           pushBoundedTail(this.state.unknownEvents, {
@@ -491,7 +683,7 @@ function resolveCompanionScriptPath() {
  * MCP server. The server's CC_GIT_ROOT env var is set to `gitRoot` so that its
  * tool handlers operate strictly inside the review worktree.
  */
-export function createReviewMcpConfig(gitRoot) {
+export function createReviewMcpConfig(gitRoot, options = {}) {
   if (!gitRoot || typeof gitRoot !== "string") {
     throw new Error("createReviewMcpConfig: gitRoot is required");
   }
@@ -505,6 +697,7 @@ export function createReviewMcpConfig(gitRoot) {
           CC_GIT_ROOT: gitRoot,
         },
       },
+      ...(options.extraMcpServers ?? {}),
     },
   };
 
@@ -582,8 +775,8 @@ export function pruneStaleReviewMcpConfigs(options = {}) {
 // ---------------------------------------------------------------------------
 
 export const MODEL_ALIASES = new Map([
-  ["opus", "claude-opus-4-7[1m]"],
-  ["sonnet", "claude-sonnet-4-6[1m]"],
+  ["opus", "claude-opus-4-8"],
+  ["sonnet", "claude-sonnet-5"],
   ["haiku", "claude-haiku-4-5"],
 ]);
 
@@ -598,11 +791,9 @@ export const DEFAULT_MODEL = "opus";
 
 export const DEFAULT_EFFORT_BY_MODEL = new Map([
   ["opus", "xhigh"],
-  ["claude-opus-4-7", "xhigh"],
-  ["claude-opus-4-7[1m]", "xhigh"],
+  ["claude-opus-4-8", "xhigh"],
   ["sonnet", "high"],
-  ["claude-sonnet-4-6", "high"],
-  ["claude-sonnet-4-6[1m]", "high"],
+  ["claude-sonnet-5", "high"],
 ]);
 
 export function resolveDefaultModel(model) {
@@ -716,6 +907,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     outputFormat: "stream-json",
     ...options,
   });
+  const requestedModel = options.model ? resolveModel(options.model) : null;
 
   return new Promise((resolve, reject) => {
     const proc = spawn(CLAUDE_BIN, args, {
@@ -755,8 +947,6 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     });
 
     proc.on("close", (code) => {
-
-
       // Flush remaining buffer
       const remaining = parser.flush();
       for (const evt of remaining) {
@@ -764,6 +954,26 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       }
 
       const validation = validateTurnCompletion(parser.state, code ?? 1);
+      const modelEvents = [...parser.state.modelEvents];
+      const finalModel = parser.state.finalModel;
+      if (
+        requestedModel &&
+        finalModel &&
+        !areModelIdsEquivalent(finalModel, requestedModel) &&
+        !modelEvents.some(
+          (event) =>
+            areModelIdsEquivalent(event.fromModel, requestedModel) &&
+            areModelIdsEquivalent(event.toModel, finalModel)
+        )
+      ) {
+        modelEvents.push({
+          fromModel: requestedModel,
+          toModel: finalModel,
+          reason: "Claude reported a different terminal model.",
+          source: "terminal_result",
+          timestamp: new Date().toISOString(),
+        });
+      }
       resolve({
         status: validation.status,
         warning: validation.warning,
@@ -773,6 +983,9 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         structuredOutput: parser.state.structuredOutput,
         toolUses: parser.state.toolUses,
         touchedFiles: parser.state.touchedFiles,
+        requestedModel,
+        finalModel,
+        modelEvents,
         stderr,
         pid: proc.pid,
         pidIdentity,
@@ -780,7 +993,6 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     });
 
     proc.on("error", (err) => {
-
       resolve({
         status: "failed",
         exitCode: -1,
@@ -789,6 +1001,9 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         structuredOutput: null,
         toolUses: [],
         touchedFiles: [],
+        requestedModel,
+        finalModel: null,
+        modelEvents: [],
         stderr: err.message,
         pid: proc.pid,
         pidIdentity,
@@ -825,6 +1040,9 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     result: result.finalMessage,
     structuredOutput: result.structuredOutput ?? null,
     sessionId: result.sessionId,
+    requestedModel: result.requestedModel,
+    finalModel: result.finalModel,
+    modelEvents: result.modelEvents,
     stderr: result.stderr,
     pid: result.pid,
     pidIdentity: result.pidIdentity,

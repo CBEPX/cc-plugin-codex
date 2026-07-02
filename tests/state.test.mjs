@@ -776,6 +776,7 @@ describe("cleanupOldJobs", () => {
 
 describe("reapStaleJobs", () => {
   const staleTimestamp = () => new Date(Date.now() - 5_000).toISOString();
+  const staleQueuedWithoutPidTimestamp = () => new Date(Date.now() - 31_000).toISOString();
   const backdateJob = (id, timestamp) => {
     const jobFile = path.join(resolveJobsDir(PROJECT_CWD), `${id}.json`);
     const current = JSON.parse(fs.readFileSync(jobFile, "utf8"));
@@ -826,6 +827,55 @@ describe("reapStaleJobs", () => {
     assert.equal(result[0].pid, null);
     assert.equal(result[0].pidIdentity, null);
     assert.ok(result[0].completedAt);
+  });
+
+  it("transitions queued job with dead worker PID to failed", () => {
+    const id = "test-reap-queued-dead";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "queued",
+      pid: 99999999,
+      pidIdentity: "bogus-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(PROJECT_CWD, [readJobFile(PROJECT_CWD, id)]);
+
+    assert.equal(result[0].status, "failed");
+    assert.ok(result[0].errorMessage.includes("Auto-reaped"));
+  });
+
+  it("transitions stale queued job without a recorded worker PID to failed", () => {
+    const id = "test-reap-queued-nopid";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "queued",
+      pid: null,
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleQueuedWithoutPidTimestamp());
+
+    const result = reapStaleJobs(PROJECT_CWD, [readJobFile(PROJECT_CWD, id)]);
+
+    assert.equal(result[0].status, "failed");
+    assert.match(result[0].errorMessage, /Worker did not start/);
+  });
+
+  it("keeps queued jobs without a worker PID during the extended startup grace window", () => {
+    const id = "test-reap-queued-nopid-grace";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "queued",
+      pid: null,
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(PROJECT_CWD, [readJobFile(PROJECT_CWD, id)]);
+
+    assert.equal(result[0].status, "queued");
+    assert.equal(result[0].pid, null);
   });
 
   it("does not touch running job with alive PID", () => {
@@ -901,7 +951,7 @@ describe("reapStaleJobs", () => {
     assert.equal(result[1].status, "failed");
   });
 
-  it("reaps cancelling job with dead PID", () => {
+  it("reaps cancelling job with dead PID as cancelled", () => {
     const id = "test-reap-cancelling";
     writeJobFile(PROJECT_CWD, id, {
       id,
@@ -915,7 +965,8 @@ describe("reapStaleJobs", () => {
     const jobs = [readJobFile(PROJECT_CWD, id)];
     const result = reapStaleJobs(PROJECT_CWD, jobs);
 
-    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].status, "cancelled");
+    assert.match(result[0].errorMessage, /Cancelled by user/);
   });
 
   it("listJobs integrates the reaper automatically", () => {

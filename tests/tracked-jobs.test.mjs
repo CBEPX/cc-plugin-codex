@@ -17,6 +17,7 @@ import {
   appendLogLine,
   appendLogBlock,
   createJobLogFile,
+  createJobProgressUpdater,
   createJobRecord,
   runTrackedJob,
 } from "../scripts/lib/tracked-jobs.mjs";
@@ -263,6 +264,56 @@ describe("createJobRecord", () => {
       assert.equal(record.sessionId, "owner-session");
     } finally {
       clearCurrentSession(repoDir);
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createJobProgressUpdater
+// ---------------------------------------------------------------------------
+
+describe("createJobProgressUpdater", () => {
+  it("persists model fallback progress on the running job", () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-model-fallback-job",
+      workspaceRoot: repoDir,
+      status: "running",
+      phase: "running",
+      title: "model fallback",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      const updateProgress = createJobProgressUpdater(repoDir, job.id);
+      updateProgress({
+        phase: "model_fallback",
+        modelFallback: {
+          fromModel: "claude-opus-4-8",
+          toModel: "claude-sonnet-5",
+          reason: "capacity",
+          source: "model_fallback",
+        },
+      });
+      updateProgress({
+        phase: "model_fallback",
+        modelFallback: {
+          fromModel: "claude-opus-4-8",
+          toModel: "claude-sonnet-5",
+          reason: "capacity",
+          source: "model_fallback",
+        },
+      });
+
+      const saved = readJobFile(repoDir, job.id);
+      assert.equal(saved.phase, "model_fallback");
+      assert.equal(saved.modelFallbacks.length, 1);
+      assert.equal(saved.modelFallbacks[0].fromModel, "claude-opus-4-8");
+      assert.equal(saved.modelFallbacks[0].toModel, "claude-sonnet-5");
+    } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
   });

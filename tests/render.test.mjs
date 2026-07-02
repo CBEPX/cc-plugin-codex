@@ -495,6 +495,28 @@ describe("renderJobStatusReport", () => {
     assert.ok(output.includes("| Elapsed | 5s |"));
     assert.ok(output.includes("| Cancel | `$cc:cancel j2` |"));
   });
+
+  it("shows model fallback history", () => {
+    const job = {
+      id: "j3",
+      status: "running",
+      phase: "model_fallback",
+      kindLabel: "rescue",
+      startedAt: "2026-04-02T19:00:00.000Z",
+      elapsed: "5s",
+      modelFallbacks: [
+        {
+          fromModel: "claude-opus-4-8",
+          toModel: "claude-sonnet-5",
+          reason: "capacity",
+        },
+      ],
+    };
+
+    const output = renderJobStatusReport(job);
+
+    assert.ok(output.includes("| Model fallback | claude-opus-4-8 -> claude-sonnet-5 (capacity) |"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -553,6 +575,48 @@ describe("renderStoredJobResult", () => {
     const stored = { result: { codex: { stdout: "Review body." } } };
     const output = renderStoredJobResult(job, stored);
     assert.equal(output, "Review body.\n");
+  });
+
+  it("appends model fallback history to stored output", () => {
+    const job = { id: "j1", status: "completed", title: "Claude Code Task" };
+    const stored = {
+      result: {
+        rawOutput: "Task output.",
+        modelFallbacks: [
+          {
+            fromModel: "claude-opus-4-8",
+            toModel: "claude-sonnet-5",
+            reason: "capacity",
+          },
+        ],
+      },
+    };
+
+    const output = renderStoredJobResult(job, stored);
+
+    assert.ok(output.includes("Task output."));
+    assert.ok(output.includes("Model fallback:\n- claude-opus-4-8 -> claude-sonnet-5 (capacity)"));
+  });
+
+  it("does not duplicate a model fallback block already present in rendered output", () => {
+    const job = { id: "j1", status: "completed", title: "Claude Code Task" };
+    const stored = {
+      rendered:
+        "Task output.\n\nModel fallback:\n- claude-opus-4-8 -> claude-sonnet-5 (capacity)\n",
+      result: {
+        modelFallbacks: [
+          {
+            fromModel: "claude-opus-4-8",
+            toModel: "claude-sonnet-5",
+            reason: "capacity",
+          },
+        ],
+      },
+    };
+
+    const output = renderStoredJobResult(job, stored);
+
+    assert.equal(output.split("Model fallback:").length - 1, 1);
   });
 
   it("recovers a structured adversarial review from rawOutput with prose preamble", () => {

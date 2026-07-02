@@ -1,6 +1,6 @@
 ---
 name: adversarial-review
-description: 'Run a design-challenging Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model>, --effort <low|medium|high|xhigh|max>, [focus text]. Defaults to opus + xhigh effort. Use only when the user wants stronger scrutiny than a normal review, such as explicit tradeoff challenge, risky-change review, or custom focus text.'
+description: 'Run a design-challenging Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model>, --effort <low|medium|high|xhigh|max>, --user-mcp-tool <mcp__server__tool>, --allow-project-mcp-servers, [focus text]. Defaults to opus + xhigh effort. Use only when the user wants stronger scrutiny than a normal review, such as explicit tradeoff challenge, risky-change review, or custom focus text.'
 ---
 
 # Claude Code Adversarial Review
@@ -16,7 +16,7 @@ Unlike `$cc:review`, this skill accepts custom focus text after the flags. The m
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
 `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review ...`
 
-Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, plus optional focus text after the flags (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku has no effort)
+Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`, plus optional focus text after the flags (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku has no effort)
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -24,7 +24,8 @@ Raw slash-command arguments:
 Rules:
 - This skill is review-only. Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Before launching the review, stay in read-only inspection mode: inspect git status and diff stats only, then ask at most one user question about whether to wait or run in background.
-- Preserve the user's scope flags and custom focus text exactly.
+- Preserve the user's scope flags, explicit `--user-mcp-tool <mcp__server__tool>` and `--allow-project-mcp-servers` flags, and custom focus text exactly.
+- Do not add user MCP tools unless the user asked for them.
 - Use the same review target selection as `$cc:review`.
 
 Execution mode rules:
@@ -49,6 +50,8 @@ Argument handling:
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - `$cc:adversarial-review` uses the same review target selection as `$cc:review`.
 - It supports working-tree review, branch review, and `--base <ref>`.
+- It uses only the bundled read-only git MCP by default. User MCP access is opt-in per exact `--user-mcp-tool <mcp__server__tool>` from user-scope Claude config; project `.mcp.json` server definitions also require `--allow-project-mcp-servers`.
+- Opted-in user MCP tools run as auto-approved external Claude MCP processes. Preserve them only when explicitly requested, and prefer trusted read-only tools for untrusted diffs.
 - It does not support `--scope staged` or `--scope unstaged`.
 - Unlike `$cc:review`, it can still take extra focus text after the flags.
 - The companion review process itself always runs in the foreground. Background mode only changes how Codex launches that command.

@@ -1,6 +1,6 @@
 ---
 name: review
-description: 'Run a standard Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model>, --effort <low|medium|high|xhigh|max>. Defaults to opus + xhigh effort. Use as the default path for ordinary code-review requests when the user did not explicitly ask for stronger adversarial scrutiny or for Claude to own the implementation work.'
+description: 'Run a standard Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model>, --effort <low|medium|high|xhigh|max>, --user-mcp-tool <mcp__server__tool>, --allow-project-mcp-servers. Defaults to opus + xhigh effort. Use as the default path for ordinary code-review requests when the user did not explicitly ask for stronger adversarial scrutiny or for Claude to own the implementation work.'
 ---
 
 # Claude Code Review
@@ -16,7 +16,7 @@ If the overall request is "you review it too, also ask Claude to review in the b
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
 `node "<plugin-root>/scripts/claude-companion.mjs" review ...`
 
-Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model>`, `--effort <low|medium|high|xhigh|max>` (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku has no effort)
+Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers` (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku has no effort)
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -25,6 +25,7 @@ Rules:
 - This skill is review-only. Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Before launching the review, stay in read-only inspection mode: inspect git status and diff stats only, then ask at most one user question about whether to wait or run in background.
 - Preserve the user's review scope flags exactly.
+- Preserve explicit `--user-mcp-tool <mcp__server__tool>` and `--allow-project-mcp-servers` flags exactly. Do not add user MCP tools unless the user asked for them.
 - Do not accept staged-only or unstaged-only review modes.
 - Do not add extra review instructions or focus text. Route those requests to `$cc:adversarial-review`.
 
@@ -48,6 +49,8 @@ Argument handling:
 - Preserve the user's arguments exactly.
 - Treat `--wait` and `--background` as Codex-side execution controls only. Strip them before calling the companion command.
 - `$cc:review` is native-review only. It does not support staged-only review, unstaged-only review, or extra focus text.
+- Review uses only the bundled read-only git MCP by default. User MCP access is opt-in per exact `--user-mcp-tool <mcp__server__tool>` from user-scope Claude config; project `.mcp.json` server definitions also require `--allow-project-mcp-servers`.
+- Opted-in user MCP tools run as auto-approved external Claude MCP processes. Preserve them only when explicitly requested, and prefer trusted read-only tools for untrusted diffs.
 - If the user needs custom review instructions or more adversarial framing, they should use `$cc:adversarial-review`.
 - The companion review process itself always runs in the foreground. Background mode only changes how Codex launches that command.
 - For the detailed execution contract, treat the internal runtime reference at `../../internal-skills/review-runtime/runtime.md` as supporting guidance only. It is an internal reference document, not a public skill to invoke.

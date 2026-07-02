@@ -1,6 +1,6 @@
 ---
 name: rescue
-description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model>, --effort <low|medium|high|xhigh|max>, --prompt-file <path>, [task text]. Defaults to opus + xhigh effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
+description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model>, --effort <low|medium|high|xhigh|max>, --timeout-ms <ms>, --prompt-file <path>, [task text]. Defaults to opus + xhigh effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
 ---
 
 # Claude Code Rescue
@@ -22,7 +22,7 @@ Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always ru
 Raw slash-command arguments:
 `$ARGUMENTS`
 
-Supported arguments: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`, plus free-text task text
+Supported arguments: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--timeout-ms <ms>`, `--prompt-file <path>`, plus free-text task text
 
 Main-thread routing rules:
 - If the user explicitly invoked `$cc:rescue` or `Claude Code Rescue`, do not keep the work in the main Codex thread. Delegate it.
@@ -30,7 +30,7 @@ Main-thread routing rules:
 - Treat `--background` and `--wait` as execution controls, not task text.
 - `--background` and `--wait` are Codex-side execution controls only. Never forward either flag to `claude-companion.mjs task`.
 - The main Codex thread owns that execution-mode choice. It decides whether to wait for the subagent. The child subagent must never reinterpret those flags as companion flags.
-- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime or routing controls, not task text.
+- Treat `--model`, `--effort`, `--timeout-ms`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime or routing controls, not task text.
 - If the user task text itself begins with a slash command such as `/simplify`, `/fix`, or `/review`, treat that slash command as literal Claude Code task text to be forwarded unchanged. Do not execute or reinterpret it in the parent Codex thread.
 - `--model` selects the Claude model for the companion `task` command only. It does not select the Codex subagent model.
 - If the user explicitly passed `--background`, run the rescue subagent in the background.

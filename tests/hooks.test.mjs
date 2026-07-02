@@ -172,6 +172,10 @@ function cleanupHookEnvironment(testEnv) {
   fs.rmSync(testEnv.rootDir, { recursive: true, force: true });
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function stateDirFor(homeDir, workspaceDir) {
   const realWorkspace = fs.realpathSync.native(workspaceDir);
   const workspaceHash = createHash("sha256")
@@ -490,6 +494,77 @@ describe("hooks", () => {
 
       const exportedEnv = fs.readFileSync(envFile, "utf8");
       assert.match(exportedEnv, /CLAUDE_COMPANION_SESSION_ID='child-session'/);
+      assert.match(exportedEnv, /CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS='1'/);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session start exports the Claude transcript path for transfer", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const envFile = path.join(testEnv.rootDir, "session.env");
+      const transcriptPath = path.join(
+        testEnv.homeDir,
+        ".claude",
+        "projects",
+        "-workspace",
+        "session.jsonl"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+          transcript_path: transcriptPath,
+        },
+        {
+          ...testEnv.env,
+          CLAUDE_ENV_FILE: envFile,
+        }
+      );
+
+      const exportedEnv = fs.readFileSync(envFile, "utf8");
+      assert.match(exportedEnv, /CODEX_COMPANION_TRANSCRIPT_PATH=/);
+      assert.match(exportedEnv, new RegExp(escapeRegExp(transcriptPath)));
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("nested session start does not override the parent Claude transcript path", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const envFile = path.join(testEnv.rootDir, "nested.env");
+      const transcriptPath = path.join(
+        testEnv.homeDir,
+        ".claude",
+        "projects",
+        "-workspace",
+        "nested.jsonl"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "child-session",
+          transcript_path: transcriptPath,
+        },
+        {
+          ...testEnv.env,
+          CLAUDE_ENV_FILE: envFile,
+          CLAUDE_COMPANION_SESSION_ID: "parent-session",
+        }
+      );
+
+      const exportedEnv = fs.readFileSync(envFile, "utf8");
+      assert.doesNotMatch(exportedEnv, /CODEX_COMPANION_TRANSCRIPT_PATH=/);
       assert.match(exportedEnv, /CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS='1'/);
     } finally {
       cleanupHookEnvironment(testEnv);

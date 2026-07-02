@@ -336,11 +336,16 @@ test("simple runtime skills resolve the active plugin root from the skill path",
   const status = read("skills/status/SKILL.md");
   const result = read("skills/result/SKILL.md");
   const cancel = read("skills/cancel/SKILL.md");
+  const transfer = read("skills/transfer/SKILL.md");
   const activeRootPattern = /<plugin-root>\/scripts\/claude-companion\.mjs/i;
 
-  for (const skillText of [status, result, cancel]) {
+  for (const skillText of [status, result, cancel, transfer]) {
     assert.match(skillText, /Resolve `<plugin-root>` as two directories above this `SKILL\.md` file/i);
     assert.match(skillText, activeRootPattern);
     assert.doesNotMatch(skillText, /<installed-plugin-root>/i);
   }
+
+  assert.match(transfer, /claude-companion\.mjs" transfer \$ARGUMENTS/i);
+  assert.match(transfer, /codex resume <session-id>/i);
+  assert.match(transfer, /--source <claude-jsonl>/i);
 });
