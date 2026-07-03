@@ -43,23 +43,27 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 
 ### 1. Install
 
-Install from the Sendbird marketplace:
+Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex marketplace add sendbird/codex-marketplace
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.3.1
+codex plugin add cc@cbepx
 ```
 
-Then install `cc` from the Sendbird marketplace inside Codex, and run `$cc:setup` once.
+Then run `$cc:setup` once inside Codex.
 
 `cc-plugin-codex` uses Codex native plugin hooks. The active plugin copy lives under Codex's plugin cache, and hook commands resolve through `$PLUGIN_ROOT`; there is no separate local checkout install.
 
-The optional `npx` helper runs the same marketplace/cache install path and enables the required Codex feature gates:
+The optional `npx` helper can install this fork release and enable the required Codex feature gates:
 
 ```bash
-npx cc-plugin-codex install
+CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
+CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.3.1 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.3.1/cc-plugin-codex-1.3.1.tgz install
 ```
 
-On Windows, prefer the Sendbird marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
+On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
 Codex CLI's official guidance still treats Windows support as experimental and recommends a WSL workspace for the best Codex experience. Claude Code supports both native Windows and WSL.
 
 > **Prerequisites:** Node.js 18+, Codex with hook support, and `claude` CLI installed and authenticated.
@@ -317,15 +321,16 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 
 ## Install Variants
 
-### Sendbird marketplace (preferred)
+### CBEPX fork marketplace (preferred for this fork)
 
-Add the marketplace:
+Install from the fork's marketplace snapshot:
 
 ```bash
-codex marketplace add sendbird/codex-marketplace
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.3.1
+codex plugin add cc@cbepx
 ```
 
-Then install `cc` from the Sendbird marketplace inside Codex, and run:
+Then run:
 
 ```text
 $cc:setup
@@ -333,10 +338,22 @@ $cc:setup
 
 Marketplace/plugin install places the plugin under Codex's plugin cache. `$cc:setup` verifies Claude Code, confirms `[features].hooks = true` plus `[features].plugin_hooks = true`, and trusts the current `hooks/hooks.json` hook hashes from the active plugin cache.
 
+### Sendbird marketplace (upstream)
+
+```bash
+codex plugin marketplace add sendbird/codex-marketplace
+codex plugin add cc@sendbird
+```
+
+Then run `$cc:setup`.
+
 ### npx helper
 
 ```bash
-npx cc-plugin-codex install
+CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
+CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.3.1 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.3.1/cc-plugin-codex-1.3.1.tgz install
 ```
 
 After install, run:
@@ -345,9 +362,11 @@ After install, run:
 $cc:setup
 ```
 
-The helper adds the Sendbird marketplace, installs `cc` through Codex app-server, enables native hook feature gates, and removes stale global hook entries from older installs.
+The helper adds the configured marketplace, installs `cc` through Codex app-server, enables native hook feature gates, and removes stale global hook entries from older installs.
 
 ### Shell script (POSIX-only)
+
+Use this only for the upstream Sendbird build:
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/sendbird/cc-plugin-codex/main/scripts/install.sh" | bash

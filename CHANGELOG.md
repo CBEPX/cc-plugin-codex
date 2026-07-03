@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v1.3.1
+
+### Fixed
+
+- Add a CBEPX fork marketplace snapshot and document fork-first install commands for the packaged fork release.
+
 ## v1.3.0
 
 ### Added
