@@ -1,6 +1,6 @@
 {
   "name": "cc-plugin-codex",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Claude Code Plugin for Codex by Sendbird",
   "type": "module",
   "author": {
@@ -51,8 +51,13 @@
     "prepack": "npm run check:version-sync && npm run check:changelog",
     "setup:git-hooks": "node scripts/setup-git-hooks.mjs",
     "test": "node --test tests/*.test.mjs",
+    "test:coverage": "node --test --experimental-test-coverage tests/*.test.mjs tests/integration/*.test.mjs",
     "test:cross-platform": "node --test tests/args.test.mjs tests/changelog.test.mjs tests/claude-cli.test.mjs tests/fs.test.mjs tests/prompts.test.mjs tests/render.test.mjs tests/sandbox-modes.test.mjs tests/skills-contracts.test.mjs tests/structured-output.test.mjs tests/version-sync.test.mjs",
     "test:integration": "node --test tests/integration/*.test.mjs",
+    "test:mutation": "stryker run",
+    "test:mutation:dry-run": "stryker run --dryRunOnly",
+    "test:mutation:force": "stryker run --force",
+    "test:mutation:unit": "node --test tests/args.test.mjs tests/structured-output.test.mjs tests/render.test.mjs tests/claude-cli.test.mjs",
     "test:e2e": "node --test tests/e2e/*.test.mjs",
     "uninstall:codex": "node scripts/installer-cli.mjs uninstall",
     "update:codex": "node scripts/installer-cli.mjs update",
@@ -60,9 +65,15 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@stryker-mutator/core": "^9.6.1",
     "@types/node": "^25.6.0",
     "eslint": "^10.2.0",
     "globals": "^17.5.0",
     "typescript": "^6.0.2"
+  },
+  "overrides": {
+    "typed-rest-client": {
+      "qs": "6.15.3"
+    }
   }
 }

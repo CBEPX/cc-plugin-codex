@@ -8,6 +8,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { MODEL_ALIASES } from "../scripts/lib/claude-cli.mjs";
+
 const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../", import.meta.url))
 );
@@ -15,6 +17,21 @@ const PROJECT_ROOT = path.resolve(
 function read(relativePath) {
   return fs.readFileSync(path.join(PROJECT_ROOT, relativePath), "utf8");
 }
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+test("README model alias docs match runtime aliases", () => {
+  const readme = read("README.md");
+
+  for (const [alias, model] of MODEL_ALIASES) {
+    assert.match(
+      readme,
+      new RegExp(`\\\`${escapeRegex(alias)}\\\`[\\s\\S]*?\\\`${escapeRegex(model)}\\\``)
+    );
+  }
+});
 
 test("internal runtime references keep the active-root and notification invariants", () => {
   const reviewRuntime = read("internal-skills/review-runtime/runtime.md");
@@ -336,11 +353,19 @@ test("simple runtime skills resolve the active plugin root from the skill path",
   const status = read("skills/status/SKILL.md");
   const result = read("skills/result/SKILL.md");
   const cancel = read("skills/cancel/SKILL.md");
+  const transfer = read("skills/transfer/SKILL.md");
+  const mcpDiagnose = read("skills/mcp-diagnose/SKILL.md");
   const activeRootPattern = /<plugin-root>\/scripts\/claude-companion\.mjs/i;
 
-  for (const skillText of [status, result, cancel]) {
+  for (const skillText of [status, result, cancel, transfer, mcpDiagnose]) {
     assert.match(skillText, /Resolve `<plugin-root>` as two directories above this `SKILL\.md` file/i);
     assert.match(skillText, activeRootPattern);
     assert.doesNotMatch(skillText, /<installed-plugin-root>/i);
   }
+
+  assert.match(transfer, /claude-companion\.mjs" transfer \$ARGUMENTS/i);
+  assert.match(transfer, /codex resume <session-id>/i);
+  assert.match(transfer, /--source <claude-jsonl>/i);
+  assert.match(mcpDiagnose, /claude-companion\.mjs" mcp-diagnose \$ARGUMENTS/i);
+  assert.match(mcpDiagnose, /Do not print raw MCP server configs or secrets/i);
 });

@@ -82,6 +82,27 @@ describe("parseArgs", () => {
     });
   });
 
+  describe("repeatable value options", () => {
+    const config = {
+      valueOptions: ["tool"],
+      repeatableOptions: ["tool"],
+      aliasMap: { t: "tool" },
+    };
+
+    it("collects repeated long value options", () => {
+      const result = parseArgs(
+        ["--tool", "mcp__a__one", "--tool=mcp__b__two"],
+        config
+      );
+      assert.deepEqual(result.options.tool, ["mcp__a__one", "mcp__b__two"]);
+    });
+
+    it("collects repeated short aliases", () => {
+      const result = parseArgs(["-t", "mcp__a__one", "-t", "mcp__b__two"], config);
+      assert.deepEqual(result.options.tool, ["mcp__a__one", "mcp__b__two"]);
+    });
+  });
+
   describe("short options", () => {
     const config = {
       valueOptions: ["output"],

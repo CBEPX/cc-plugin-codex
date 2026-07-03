@@ -5,11 +5,11 @@
 <h3 align="center">Claude Code Plugin for Codex</h3>
 
 <p align="center">
-  Run Claude Code reviews, rescue tasks, and tracked background work from inside Codex.
+  Run Claude Code reviews, rescue tasks, transfers, and tracked background work from inside Codex.
 </p>
 
 <p align="center">
-  <code>cc-plugin-codex</code> runs inside Codex and lets you use Claude Code and Claude models for review, rescue, and tracked background workflows.
+  <code>cc-plugin-codex</code> runs inside Codex and lets you use Claude Code and Claude models for review, rescue, transfer, and tracked background workflows.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@
 `cc-plugin-codex` turns Codex into a host for Claude Code work.
 **Codex stays in charge of the thread. Claude Code does the review and rescue work.**
 
-You get seven commands (`$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:status`, `$cc:result`, `$cc:cancel`, `$cc:setup`) that launch tracked Claude Code work, manage lifecycle and ownership, and surface results back into Codex.
+You get nine commands (`$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:transfer`, `$cc:status`, `$cc:result`, `$cc:cancel`, `$cc:mcp-diagnose`, `$cc:setup`) that launch tracked Claude Code work, transfer Claude transcripts into Codex, manage lifecycle and ownership, and surface results back into Codex.
 
 That includes:
 - Built-in Codex subagent orchestration for rescue and background review flows
@@ -100,9 +100,11 @@ When it finishes, Codex should nudge you toward the right result. If not, `$cc:s
 | `$cc:review` | Read-only Claude Code review of your changes |
 | `$cc:adversarial-review` | Design-challenging review — questions approach, tradeoffs, hidden assumptions |
 | `$cc:rescue` | Hand a task to Claude Code — bugs, fixes, investigations, follow-ups |
+| `$cc:transfer` | Import the current Claude transcript into a resumable Codex thread |
 | `$cc:status` | List running and recent Claude Code jobs, or inspect one job |
 | `$cc:result` | Open the output of a finished job |
 | `$cc:cancel` | Cancel an active background job |
+| `$cc:mcp-diagnose` | Explain which Claude MCP tools would be available to reviews |
 | `$cc:setup` | Verify installation, auth, hooks, and review gate |
 
 Quick routing rule:
@@ -120,18 +122,33 @@ $cc:review --base main              # review branch vs main
 $cc:review --scope branch           # explicitly compare branch tip to base
 $cc:review --background             # run in background, check with $cc:status later
 $cc:review --model sonnet           # switch to sonnet (defaults to high effort)
+$cc:review --model fable --effort xhigh  # use Fable explicitly for hardest reviews
 $cc:review --model opus --effort high   # opus with a lighter effort
+$cc:review --user-mcp-tool mcp__context7__resolve-library-id
 ```
 
-**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|max>`
+**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
-**Defaults:** model `opus` (resolves to `claude-opus-4-7[1m]`, the 1M-context variant) with `xhigh` effort. If you pick `sonnet`, it resolves to `claude-sonnet-4-6[1m]` (also 1M context) and the default effort drops to `high`. `haiku` resolves to `claude-haiku-4-5` and has no effort setting. Pass `--model` and `--effort` to override.
+**Defaults:** model `opus` resolves to `claude-opus-4-8` with `xhigh` effort. If you pick `sonnet`, it resolves to `claude-sonnet-5` and the default effort drops to `high`. `haiku` resolves to `claude-haiku-4-5`, `fable` resolves to `claude-fable-5[1m]`, and both have no default effort setting. Pass `--model` and `--effort` to override.
 
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
 In foreground, review returns the result directly. In background, the plugin uses a Codex built-in subagent, tracks the review as a job, and nudges you to open the result when it completes.
 
 If the diff is too large to inline safely, the review prompt falls back to concise status/stat context and tells Claude to inspect the diff directly with read-only `git diff` commands instead of failing the run.
+
+By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted read-only tools when reviewing untrusted diffs. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
+
+### `$cc:mcp-diagnose`
+
+Shows which Claude MCP servers the plugin can see for review commands, which requested tools would be allowed, and why a tool is missing.
+
+```text
+$cc:mcp-diagnose --user-mcp-tool mcp__context7__resolve-library-id
+$cc:mcp-diagnose --allow-project-mcp-servers --user-mcp-tool mcp__localdocs__search
+```
+
+The diagnostic output lists server names and config sources only; it does not print raw MCP server configs or secrets.
 
 ### `$cc:adversarial-review`
 
@@ -141,6 +158,7 @@ Same as `$cc:review`, but steers Claude to challenge the implementation — trad
 $cc:adversarial-review
 $cc:adversarial-review --background question the retry and rollback strategy
 $cc:adversarial-review --base main challenge the caching design
+$cc:adversarial-review --user-mcp-tool mcp__context7__resolve-library-id focus on API parity
 ```
 
 Accepts the same flags as `$cc:review`, plus free-text focus after flags to steer the review.
@@ -169,13 +187,25 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--resume-last` | Alias for `--resume` |
 | `--fresh` | Force a new task (don't resume) |
 | `--write` | Allow file edits (default) |
-| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, or full ID; defaults to `opus`. The `opus` and `sonnet` aliases resolve to their 1M-context variants `claude-opus-4-7[1m]` and `claude-sonnet-4-6[1m]`.) |
-| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku) |
+| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`. The aliases resolve to `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5`, and `claude-fable-5[1m]`.) |
+| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable) |
 | `--prompt-file <path>` | Read task description from a file |
+| `--timeout-ms <ms>` | Foreground observer timeout before returning a retrievable job |
 
 **Resume behavior:** If you don't pass `--resume` or `--fresh`, rescue checks for a resumable Claude session and asks once whether to continue or start fresh. Your phrasing guides the recommendation — "continue the last run" → resume, "start over" → fresh.
 
 Background rescue runs through a built-in Codex subagent. When the child finishes, the plugin tries to nudge the parent thread with the exact `$cc:result <job-id>` to open.
+
+### `$cc:transfer`
+
+Transfer the current Claude transcript into a persistent Codex thread and print a resume command.
+
+```text
+$cc:transfer
+$cc:transfer --source ~/.claude/projects/-Users-me-repo/session.jsonl
+```
+
+The SessionStart hook normally supplies the current transcript path automatically. `--source` is available as a manual override. Codex can import only Claude session JSONL files under `~/.claude/projects`, and the command requires a Codex version with native external-agent session import support.
 
 ### `$cc:status`
 
@@ -384,6 +414,26 @@ Disable it: `$cc:setup --disable-review-gate`. The gate fires on every Ctrl+C, w
 
 **Background jobs not cleaned up**
 Jobs are terminated when the Codex session that owns them exits. If a session crashes without cleanup, use `$cc:status` and `$cc:cancel <job-id>` to clean up any leftovers.
+
+## Development
+
+Run the normal project gate before publishing or opening a PR:
+
+```bash
+npm run check
+```
+
+Mutation testing is available as an advisory local signal for the high-risk CLI parsing and prompt-rendering modules:
+
+```bash
+npm run test:mutation:dry-run
+npm run test:mutation
+npm run test:mutation:force
+```
+
+Stryker runs through the native `node:test` command runner, so coverage analysis is disabled and the mutation score does not fail the build. The generated report is written under `reports/mutation/`. Use `test:mutation:force` after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; either improve the focused tests or use a `// Stryker disable ...: reason` comment for an intentional equivalent mutant.
+
+Mutation testing requires Node.js 20+ because Stryker 9 has a newer development-time engine requirement. The plugin runtime still supports the Node.js version listed in the prerequisites.
 
 ## License
 

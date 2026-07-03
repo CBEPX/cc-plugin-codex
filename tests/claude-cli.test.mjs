@@ -4,9 +4,14 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   StreamParser,
+  areModelIdsEquivalent,
+  classifyClaudeFailure,
   validateTurnCompletion,
   resolveModel,
   resolveEffort,
@@ -26,6 +31,9 @@ import {
   MAX_STREAM_PARSER_PARSE_ERRORS,
   MAX_STREAM_PARSER_TOOL_USES,
   MAX_STREAM_PARSER_TOUCHED_FILES,
+  MAX_STREAM_PARSER_MODEL_EVENTS,
+  MAX_STDERR_BYTES,
+  runClaudeTurn,
 } from "../scripts/lib/claude-cli.mjs";
 
 // ===========================================================================
@@ -64,6 +72,115 @@ describe("StreamParser", () => {
     assert.equal(parser.state.receivedTerminalEvent, true);
     assert.deepEqual(parser.state.structuredOutput, { answer: "ALPHA" });
     assert.equal(parser.state.finalMessage, "");
+  });
+
+  it("ignores Claude synthetic error model ids", () => {
+    const parser = new StreamParser();
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      model: "<synthetic>",
+      session_id: "sess-limit",
+    });
+
+    parser.feed(resultEvent + "\n");
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+  });
+
+  it("detects Claude synthetic model ids in multi-model usage payloads", () => {
+    const parser = new StreamParser();
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "Claude AI usage limit reached|1751554800",
+      modelUsage: {
+        "claude-opus-4-8": { input_tokens: 10 },
+        "<synthetic>": { input_tokens: 0 },
+      },
+      session_id: "sess-limit",
+    });
+
+    parser.feed(resultEvent + "\n");
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+  });
+
+  it("does not treat unrelated assistant synthetic model ids as terminal limit signals", () => {
+    const parser = new StreamParser();
+    const assistantEvent = JSON.stringify({
+      type: "assistant",
+      message: { model: "<synthetic>" },
+      session_id: "sess-limit",
+    });
+
+    parser.feed(assistantEvent + "\n");
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.hasTerminalLimitSignal, false);
+  });
+
+  it("treats assistant synthetic limit text as a terminal limit signal", () => {
+    const parser = new StreamParser();
+    const assistantEvent = JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        content: [
+          { type: "text", text: "You've hit your session limit · resets 4:50pm (Europe/Moscow)" },
+        ],
+      },
+      session_id: "sess-limit",
+    });
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      session_id: "sess-limit",
+    });
+
+    parser.feed(assistantEvent + "\n" + resultEvent + "\n");
+    const failure = classifyClaudeFailure({
+      finalMessage: parser.state.finalMessage,
+      finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
+    });
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("treats stream wrapper synthetic limit text as a terminal limit signal", () => {
+    const parser = new StreamParser();
+    const streamEvent = JSON.stringify({
+      type: "stream_event",
+      event: {
+        type: "message_start",
+        message: {
+          model: "<synthetic>",
+          content: [
+            { type: "text", text: "You've hit your session limit · resets 4:50pm (Europe/Moscow)" },
+          ],
+        },
+      },
+      session_id: "sess-limit",
+    });
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      session_id: "sess-limit",
+    });
+
+    parser.feed(streamEvent + "\n" + resultEvent + "\n");
+    const failure = classifyClaudeFailure({
+      finalMessage: parser.state.finalMessage,
+      finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
+    });
+
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
   });
 
   it("does not overwrite accumulated deltas with a shorter terminal suffix", () => {
@@ -232,6 +349,165 @@ describe("StreamParser", () => {
     assert.equal(events[0].subtype, "api_retry");
   });
 
+  it("parses explicit model fallback events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "model_fallback",
+      session_id: "sess-model",
+      from_model: "claude-opus-4-8",
+      to_model: "claude-sonnet-5",
+      reason: "capacity",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].phase, "model_fallback");
+    assert.deepEqual(events[0].modelFallback.fromModel, "claude-opus-4-8");
+    assert.deepEqual(events[0].modelFallback.toModel, "claude-sonnet-5");
+    assert.equal(events[0].modelFallback.reason, "capacity");
+    assert.equal(parser.state.modelEvents.length, 1);
+  });
+
+  it("parses nested model fallback events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "stream_event",
+      session_id: "sess-nested-model",
+      event: {
+        type: "model_switch",
+        previous_model: "claude-opus-4-8",
+        current_model: "claude-sonnet-5",
+      },
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].modelFallback.fromModel, "claude-opus-4-8");
+    assert.equal(events[0].modelFallback.toModel, "claude-sonnet-5");
+  });
+
+  it("parses model switch marker events that only report the target model", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "model_switch",
+      session_id: "sess-switch-marker",
+      model: "claude-sonnet-5",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].modelFallback.fromModel, null);
+    assert.equal(events[0].modelFallback.toModel, "claude-sonnet-5");
+  });
+
+  it("parses compact modelswitch marker events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "modelswitch",
+      session_id: "sess-compact-switch",
+      model: "claude-haiku-4-5",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "model_fallback");
+    assert.equal(events[0].modelFallback.toModel, "claude-haiku-4-5");
+  });
+
+  it("does not misclassify generic changed events with model fields as fallbacks", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "system",
+      subtype: "settings_changed",
+      message: "settings changed",
+      model: "claude-opus-4-8",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 0);
+    assert.equal(parser.state.modelEvents.length, 0);
+  });
+
+  it("does not consume result events with fallback-like prose as model fallbacks", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      session_id: "sess-result-prose",
+      result: "The model changed in the text explanation.",
+      model: "claude-sonnet-5",
+    });
+
+    const events = parser.feed(evt + "\n");
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "result");
+    assert.equal(parser.state.modelEvents.length, 0);
+    assert.equal(parser.state.finalModel, "claude-sonnet-5");
+  });
+
+  it("captures the terminal result model", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      result: "done",
+      model: "claude-sonnet-5",
+      session_id: "sess-final-model",
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-sonnet-5");
+  });
+
+  it("captures the observed model from message_start stream events", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "stream_event",
+      session_id: "sess-message-model",
+      event: {
+        type: "message_start",
+        message: {
+          model: "claude-opus-4-8",
+        },
+      },
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-opus-4-8");
+  });
+
+  it("captures the final model from result modelUsage", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      result: "done",
+      session_id: "sess-model-usage",
+      modelUsage: {
+        "claude-sonnet-5": {
+          inputTokens: 1,
+          outputTokens: 1,
+          contextWindow: 1000000,
+        },
+      },
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-sonnet-5");
+  });
+
   it("returns null for unknown event types and tracks them", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({ type: "unknown_event", data: "x" });
@@ -253,6 +529,28 @@ describe("StreamParser", () => {
     assert.equal(
       parser.state.unknownEvents.at(-1).type,
       `unknown_${MAX_STREAM_PARSER_UNKNOWN_EVENTS + 6}`
+    );
+  });
+
+  it("caps model fallback history to the configured maximum", () => {
+    const parser = new StreamParser();
+
+    for (let i = 0; i < MAX_STREAM_PARSER_MODEL_EVENTS + 3; i++) {
+      parser.feed(
+        JSON.stringify({
+          type: "system",
+          subtype: "model_fallback",
+          from_model: `claude-opus-${i}`,
+          to_model: `claude-sonnet-${i}`,
+        }) + "\n"
+      );
+    }
+
+    assert.equal(parser.state.modelEvents.length, MAX_STREAM_PARSER_MODEL_EVENTS);
+    assert.equal(parser.state.modelEvents[0].fromModel, "claude-opus-3");
+    assert.equal(
+      parser.state.modelEvents.at(-1).toModel,
+      `claude-sonnet-${MAX_STREAM_PARSER_MODEL_EVENTS + 2}`
     );
   });
 
@@ -383,6 +681,245 @@ describe("StreamParser", () => {
   });
 });
 
+describe("classifyClaudeFailure", () => {
+  it("classifies Claude 429 stderr and extracts reset text", () => {
+    const failure = classifyClaudeFailure({
+      stderr: "APIErrorStatus: 429. You've hit your session limit; resets at 4:50pm (Europe/Moscow).",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.match(failure.message, /429/);
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("classifies strong Claude limit messages from final output", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.match(failure.message, /session limit/);
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("ignores strong-looking limit prose from final output without a synthetic model signal", () => {
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Added session limit enforcement; the counter resets every hour.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Documented the fixture: You've hit your session limit · resets 4:50pm.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+  });
+
+  it("classifies usage-limit-reached final output when Claude marks it synthetic", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached|1751554800",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.match(failure.message, /usage limit reached/);
+    assert.equal(failure.resetText, "2025-07-03T15:00:00.000Z");
+  });
+
+  it("extracts reset text from stderr when final output has the limit signal", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached",
+      finalMessageHasLimitSignal: true,
+      stderr: "APIErrorStatus: 429; resets at 4:50pm (Europe/Moscow).",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("does not extract unrelated reset prose from stderr", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached",
+      finalMessageHasLimitSignal: true,
+      stderr: "watchdog resets the connection after 30 seconds",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, null);
+  });
+
+  it("does not extract unrelated reset prose from stderr-classified failures", () => {
+    const failure = classifyClaudeFailure({
+      stderr: "HTTP 429 from Claude API\nwatchdog resets the connection after 30 seconds",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, null);
+  });
+
+  it("does not extract unrelated reset prose from same-line stderr-classified failures", () => {
+    const failure = classifyClaudeFailure({
+      stderr: "HTTP 429 from Claude API; watchdog resets the connection after 30 seconds",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, null);
+  });
+
+  it("uses reset prose that follows the terminal limit text in final output", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage:
+        "the watchdog resets the connection after 30 seconds. " +
+        "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("uses the last terminal reset when earlier output quotes canonical epoch fixtures", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage:
+        "quoted fixture: Claude AI usage limit reached|1751554800. " +
+        "You've hit your session limit · resets 6:00pm (Europe/Moscow)",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "6:00pm (Europe/Moscow)");
+  });
+
+  it("uses the last canonical epoch when multiple canonical limit epochs are present", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage:
+        "quoted fixture: Claude AI usage limit reached|1751554800. " +
+        "Claude AI usage limit reached|1751558400",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "2025-07-03T16:00:00.000Z");
+  });
+
+  it("only extracts epochs from canonical usage-limit text", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached; resets 4:50pm (Europe/Moscow). fixture reached|1751554800",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("classifies loose limit markers from stderr", () => {
+    assert.equal(
+      classifyClaudeFailure({ stderr: "HTTP 429 from Claude API" })?.kind,
+      "claude_rate_limit"
+    );
+    assert.equal(
+      classifyClaudeFailure({ stderr: "rate_limit exceeded" })?.kind,
+      "claude_rate_limit"
+    );
+  });
+
+  it("ignores loose rate-limit markers from final model output", () => {
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Implemented 429 retry handling for rate limiting responses.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Implemented rate-limit retry handling.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+  });
+
+  it("ignores non-limit failures", () => {
+    assert.equal(classifyClaudeFailure({ stderr: "syntax error" }), null);
+  });
+});
+
+describe("runClaudeTurn", () => {
+  it("keeps only the newest stderr bytes on failed Claude runs", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      const longStderr = `DROP-ME\n${"x".repeat(MAX_STDERR_BYTES + 32)}\nKEEP-ME`;
+      const fakeClaude = path.join(tmpDir, "fake-claude.mjs");
+      fs.writeFileSync(
+        fakeClaude,
+        `process.stderr.write(${JSON.stringify(longStderr)}, () => process.exit(1));\n`
+      );
+
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          path.join(tmpDir, "claude.cmd"),
+          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs" %*\r\n`
+        );
+      } else {
+        const launcher = path.join(tmpDir, "claude");
+        fs.writeFileSync(
+          launcher,
+          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs" "$@"\n`
+        );
+        fs.chmodSync(launcher, 0o755);
+      }
+
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "prompt");
+
+      assert.equal(result.status, "failed");
+      assert.ok(Buffer.byteLength(result.stderr, "utf8") <= MAX_STDERR_BYTES);
+      assert.ok(result.stderr.endsWith("KEEP-ME"));
+      assert.ok(!result.stderr.includes("DROP-ME"));
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ===========================================================================
+// areModelIdsEquivalent
+// ===========================================================================
+
+describe("areModelIdsEquivalent", () => {
+  it("treats dated model snapshots as equivalent to their stable alias target", () => {
+    assert.equal(
+      areModelIdsEquivalent("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+      true
+    );
+  });
+
+  it("treats Claude CLI aliases as equivalent to concrete family ids", () => {
+    assert.equal(areModelIdsEquivalent("fable", "claude-fable-5"), true);
+    assert.equal(areModelIdsEquivalent("fable", "claude-fable-5[1m]"), true);
+  });
+
+  it("ignores bracketed context-window suffixes for comparison", () => {
+    assert.equal(
+      areModelIdsEquivalent("claude-sonnet-5[1m]", "claude-sonnet-5"),
+      true
+    );
+  });
+
+  it("does not treat different model families as equivalent", () => {
+    assert.equal(areModelIdsEquivalent("claude-opus-4-8", "claude-sonnet-5"), false);
+  });
+});
+
 // ===========================================================================
 // validateTurnCompletion
 // ===========================================================================
@@ -427,8 +964,8 @@ describe("validateTurnCompletion", () => {
 // ===========================================================================
 
 describe("resolveModel", () => {
-  it("maps 'sonnet' to the 1M variant 'claude-sonnet-4-6[1m]'", () => {
-    assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6[1m]");
+  it("maps 'sonnet' to 'claude-sonnet-5'", () => {
+    assert.equal(resolveModel("sonnet"), "claude-sonnet-5");
   });
 
   it("maps 'haiku' to 'claude-haiku-4-5'", () => {
@@ -448,15 +985,20 @@ describe("resolveModel", () => {
     assert.equal(resolveModel(""), undefined);
   });
 
-  it("maps 'opus' to the 1M variant 'claude-opus-4-7[1m]'", () => {
-    assert.equal(resolveModel("opus"), "claude-opus-4-7[1m]");
+  it("maps 'opus' to 'claude-opus-4-8'", () => {
+    assert.equal(resolveModel("opus"), "claude-opus-4-8");
+  });
+
+  it("maps 'fable' to the 1M-context Claude Fable 5 id", () => {
+    assert.equal(resolveModel("fable"), "claude-fable-5[1m]");
   });
 
   it("MODEL_ALIASES map has expected entries", () => {
-    assert.equal(MODEL_ALIASES.size, 3);
+    assert.equal(MODEL_ALIASES.size, 4);
     assert.ok(MODEL_ALIASES.has("opus"));
     assert.ok(MODEL_ALIASES.has("sonnet"));
     assert.ok(MODEL_ALIASES.has("haiku"));
+    assert.ok(MODEL_ALIASES.has("fable"));
   });
 });
 
@@ -475,7 +1017,7 @@ describe("resolveDefaultModel", () => {
   it("passes through an explicit model", () => {
     assert.equal(resolveDefaultModel("sonnet"), "sonnet");
     assert.equal(resolveDefaultModel("haiku"), "haiku");
-    assert.equal(resolveDefaultModel("claude-opus-4-7"), "claude-opus-4-7");
+    assert.equal(resolveDefaultModel("claude-opus-4-8"), "claude-opus-4-8");
   });
 
   it("exposes DEFAULT_MODEL constant as 'opus'", () => {
@@ -484,22 +1026,25 @@ describe("resolveDefaultModel", () => {
 });
 
 describe("resolveDefaultEffort", () => {
-  it("defaults to xhigh for opus alias and resolved id (including 1M variant)", () => {
+  it("defaults to xhigh for opus alias and resolved id", () => {
     assert.equal(resolveDefaultEffort("opus", null), "xhigh");
-    assert.equal(resolveDefaultEffort("claude-opus-4-7", null), "xhigh");
-    assert.equal(resolveDefaultEffort("claude-opus-4-7[1m]", null), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-4-8", null), "xhigh");
     assert.equal(resolveDefaultEffort("OPUS", undefined), "xhigh");
   });
 
-  it("defaults to high for sonnet alias and resolved id (including 1M variant)", () => {
+  it("defaults to high for sonnet alias and resolved id", () => {
     assert.equal(resolveDefaultEffort("sonnet", null), "high");
-    assert.equal(resolveDefaultEffort("claude-sonnet-4-6", null), "high");
-    assert.equal(resolveDefaultEffort("claude-sonnet-4-6[1m]", null), "high");
+    assert.equal(resolveDefaultEffort("claude-sonnet-5", null), "high");
   });
 
   it("returns undefined for haiku (no effort default)", () => {
     assert.equal(resolveDefaultEffort("haiku", null), undefined);
     assert.equal(resolveDefaultEffort("claude-haiku-4-5", undefined), undefined);
+  });
+
+  it("returns undefined for fable (no hidden effort default)", () => {
+    assert.equal(resolveDefaultEffort("fable", null), undefined);
+    assert.equal(resolveDefaultEffort("claude-fable-5[1m]", undefined), undefined);
   });
 
   it("returns undefined for unknown model when effort not provided", () => {
@@ -520,11 +1065,9 @@ describe("resolveDefaultEffort", () => {
 
   it("DEFAULT_EFFORT_BY_MODEL contains the expected entries", () => {
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("opus"), "xhigh");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-7"), "xhigh");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-7[1m]"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-8"), "xhigh");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("sonnet"), "high");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-4-6"), "high");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-4-6[1m]"), "high");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-5"), "high");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.has("haiku"), false);
   });
 });
@@ -643,7 +1186,7 @@ describe("buildArgs", () => {
     const args = buildArgs("p", { model: "sonnet" });
     const idx = args.indexOf("--model");
     assert.ok(idx >= 0);
-    assert.equal(args[idx + 1], "claude-sonnet-4-6[1m]");
+    assert.equal(args[idx + 1], "claude-sonnet-5");
   });
 
   it("includes --effort with resolved effort", () => {

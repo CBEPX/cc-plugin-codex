@@ -6,8 +6,11 @@ export default [
     ignores: [
       ".claude/**",
       ".githooks/**",
+      ".stryker-tmp/**",
       "assets/*.png",
       "node_modules/**",
+      "reports/**",
+      "stryker.log",
     ],
   },
   js.configs.recommended,

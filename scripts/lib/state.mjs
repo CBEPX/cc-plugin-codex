@@ -37,6 +37,7 @@ const TURN_BASELINE_FILE_PREFIX = "turn-baseline";
 const MAX_TERMINAL_JOBS_PER_SESSION = 100;
 export const MAX_STOP_REVIEW_HISTORY_ENTRIES = 200;
 const REAP_GRACE_MS = 2_000;
+const QUEUED_WITHOUT_PID_REAP_GRACE_MS = 30_000;
 const RESERVED_JOB_FILE_MAX_AGE_MS = 60 * 60 * 1000;
 export const JOB_RESERVATION_SUFFIX = ".reserve";
 export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
@@ -395,7 +396,7 @@ function partitionJobsForRetention(jobs) {
   return { retained, pruned };
 }
 
-const REAPABLE_STATUSES = new Set(["running", "cancelling"]);
+const REAPABLE_STATUSES = new Set(["queued", "running", "cancelling"]);
 
 function mostRecentJobTimestamp(job) {
   const candidates = [job.updatedAt, job.startedAt, job.createdAt]
@@ -407,9 +408,9 @@ function mostRecentJobTimestamp(job) {
   return Math.max(...candidates);
 }
 
-function isWithinReapGracePeriod(job, now = Date.now()) {
+function isWithinReapGracePeriod(job, now = Date.now(), graceMs = REAP_GRACE_MS) {
   const timestamp = mostRecentJobTimestamp(job);
-  return Number.isFinite(timestamp) && now - timestamp < REAP_GRACE_MS;
+  return Number.isFinite(timestamp) && now - timestamp < graceMs;
 }
 
 /**
@@ -418,8 +419,31 @@ function isWithinReapGracePeriod(job, now = Date.now()) {
  */
 export function reapStaleJobs(cwd, jobs) {
   return jobs.map((job) => {
-    if (!REAPABLE_STATUSES.has(job.status) || !job.pid) return job;
     if (isWithinReapGracePeriod(job)) return job;
+    if (!REAPABLE_STATUSES.has(job.status)) return job;
+    if (!job.pid) {
+      if (job.status !== "queued") return job;
+      const current = readJobFile(cwd, job.id) ?? job;
+      if (
+        current.status !== "queued" ||
+        current.pid ||
+        isWithinReapGracePeriod(current, Date.now(), QUEUED_WITHOUT_PID_REAP_GRACE_MS)
+      ) {
+        return current;
+      }
+      try {
+        transitionJob(cwd, job.id, ["queued"], "failed", {
+          errorMessage: "Worker did not start before the startup grace period elapsed. Auto-reaped.",
+          completedAt: nowIso(),
+          pid: null,
+          pidIdentity: null,
+          phase: "failed",
+        });
+        return readJobFile(cwd, job.id) ?? job;
+      } catch {
+        return job;
+      }
+    }
 
     // Use pidIdentity if available (PID-reuse safe), otherwise fall back to isProcessAlive
     const alive = job.pidIdentity
@@ -427,14 +451,17 @@ export function reapStaleJobs(cwd, jobs) {
       : isProcessAlive(job.pid);
     if (alive) return job;
 
-    // Process is dead — transition to failed via CAS
+    // Process is dead — transition via CAS
     try {
-      const transitioned = transitionJob(cwd, job.id, [job.status], "failed", {
-        errorMessage: `Process ${job.pid} died without completing. Auto-reaped.`,
+      const nextStatus = job.status === "cancelling" ? "cancelled" : "failed";
+      const transitioned = transitionJob(cwd, job.id, [job.status], nextStatus, {
+        errorMessage: job.status === "cancelling"
+          ? "Cancelled by user. Auto-reaped after process exit."
+          : `Process ${job.pid} died without completing. Auto-reaped.`,
         completedAt: nowIso(),
         pid: null,
         pidIdentity: null,
-        phase: "failed",
+        phase: nextStatus === "cancelled" ? "cancelled" : "failed",
       });
       if (transitioned.transitioned) {
         return readJobFile(cwd, job.id) ?? job;

@@ -56,6 +56,11 @@ describe("validateReviewResultShape", () => {
     assert.ok(validateReviewResultShape(data)?.includes("summary"));
   });
 
+  it("rejects blank summary", () => {
+    const data = { verdict: "ok", summary: "  ", findings: [], next_steps: [] };
+    assert.ok(validateReviewResultShape(data)?.includes("summary"));
+  });
+
   it("rejects missing findings array", () => {
     const data = { verdict: "ok", summary: "ok", next_steps: [] };
     assert.ok(validateReviewResultShape(data)?.includes("findings"));
@@ -284,6 +289,27 @@ describe("renderReviewResult", () => {
     assert.ok(highIdx < lowIdx);
   });
 
+  it("sorts medium findings between high and low", () => {
+    const parsed = {
+      parsed: {
+        verdict: "reject",
+        summary: "Issues found.",
+        findings: [
+          { severity: "low", title: "Style", body: "x", file: "a.js" },
+          { severity: "medium", title: "Risk", body: "y", file: "b.js" },
+          { severity: "high", title: "Bug", body: "z", file: "c.js" },
+        ],
+        next_steps: [],
+      },
+    };
+    const output = renderReviewResult(parsed, meta);
+    const highIdx = output.indexOf("[high]");
+    const mediumIdx = output.indexOf("[medium]");
+    const lowIdx = output.indexOf("[low]");
+    assert.ok(highIdx < mediumIdx);
+    assert.ok(mediumIdx < lowIdx);
+  });
+
   it("formats line ranges correctly", () => {
     const parsed = {
       parsed: {
@@ -301,6 +327,48 @@ describe("renderReviewResult", () => {
     assert.ok(output.includes("f.js:5-10"));
     assert.ok(output.includes("g.js:3)"));
     assert.ok(output.includes("h.js)"));
+  });
+
+  it("normalizes malformed findings before rendering", () => {
+    const parsed = {
+      parsed: {
+        verdict: " approve ",
+        summary: " Review summary. ",
+        findings: [
+          null,
+          {
+            severity: " high ",
+            title: "  Trimmed title  ",
+            body: "  Body text  ",
+            file: "  src/file.js  ",
+            line_start: 0,
+            line_end: -1,
+            recommendation: "  Fix it.  ",
+          },
+          {
+            severity: "medium",
+            title: "Range fallback",
+            body: "End before start.",
+            file: "src/range.js",
+            line_start: 9,
+            line_end: 3,
+          },
+        ],
+        next_steps: ["  Ship carefully.  ", "", 42],
+      },
+    };
+
+    const output = renderReviewResult(parsed, meta);
+
+    assert.ok(output.includes("Verdict: approve"));
+    assert.ok(output.includes("Review summary."));
+    assert.ok(output.includes("[low] Finding 1 (unknown)"));
+    assert.ok(output.includes("No details provided."));
+    assert.ok(output.includes("[high] Trimmed title (src/file.js)"));
+    assert.ok(output.includes("  Recommendation: Fix it."));
+    assert.ok(output.includes("[medium] Range fallback (src/range.js:9)"));
+    assert.ok(output.includes("- Ship carefully."));
+    assert.ok(!output.includes("- 42"));
   });
 });
 
@@ -320,6 +388,20 @@ describe("renderTaskResult", () => {
   it("returns failure message when no rawOutput", () => {
     const output = renderTaskResult({ failureMessage: "timeout" });
     assert.equal(output, "timeout\n");
+  });
+
+  it("renders Claude usage limits with reset text", () => {
+    const output = renderTaskResult({
+      failure: {
+        kind: "claude_rate_limit",
+        message: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+        resetText: "4:50pm (Europe/Moscow)",
+      },
+    });
+
+    assert.match(output, /Claude usage limit reached/i);
+    assert.match(output, /Retry after 4:50pm \(Europe\/Moscow\)/);
+    assert.match(output, /You've hit your session limit/);
   });
 
   it("returns default message when nothing provided", () => {
@@ -495,6 +577,28 @@ describe("renderJobStatusReport", () => {
     assert.ok(output.includes("| Elapsed | 5s |"));
     assert.ok(output.includes("| Cancel | `$cc:cancel j2` |"));
   });
+
+  it("shows model fallback history", () => {
+    const job = {
+      id: "j3",
+      status: "running",
+      phase: "model_fallback",
+      kindLabel: "rescue",
+      startedAt: "2026-04-02T19:00:00.000Z",
+      elapsed: "5s",
+      modelFallbacks: [
+        {
+          fromModel: "claude-opus-4-8",
+          toModel: "claude-sonnet-5",
+          reason: "capacity",
+        },
+      ],
+    };
+
+    const output = renderJobStatusReport(job);
+
+    assert.ok(output.includes("| Model fallback | claude-opus-4-8 -> claude-sonnet-5 (capacity) |"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -553,6 +657,55 @@ describe("renderStoredJobResult", () => {
     const stored = { result: { codex: { stdout: "Review body." } } };
     const output = renderStoredJobResult(job, stored);
     assert.equal(output, "Review body.\n");
+  });
+
+  it("returns string stored result payloads", () => {
+    const job = { id: "j1", status: "completed", title: "Claude Code Task" };
+    const stored = { result: "Plain stored task output." };
+    const output = renderStoredJobResult(job, stored);
+    assert.equal(output, "Plain stored task output.\n");
+  });
+
+  it("appends model fallback history to stored output", () => {
+    const job = { id: "j1", status: "completed", title: "Claude Code Task" };
+    const stored = {
+      result: {
+        rawOutput: "Task output.",
+        modelFallbacks: [
+          {
+            fromModel: "claude-opus-4-8",
+            toModel: "claude-sonnet-5",
+            reason: "capacity",
+          },
+        ],
+      },
+    };
+
+    const output = renderStoredJobResult(job, stored);
+
+    assert.ok(output.includes("Task output."));
+    assert.ok(output.includes("Model fallback:\n- claude-opus-4-8 -> claude-sonnet-5 (capacity)"));
+  });
+
+  it("does not duplicate a model fallback block already present in rendered output", () => {
+    const job = { id: "j1", status: "completed", title: "Claude Code Task" };
+    const stored = {
+      rendered:
+        "Task output.\n\nModel fallback:\n- claude-opus-4-8 -> claude-sonnet-5 (capacity)\n",
+      result: {
+        modelFallbacks: [
+          {
+            fromModel: "claude-opus-4-8",
+            toModel: "claude-sonnet-5",
+            reason: "capacity",
+          },
+        ],
+      },
+    };
+
+    const output = renderStoredJobResult(job, stored);
+
+    assert.equal(output.split("Model fallback:").length - 1, 1);
   });
 
   it("recovers a structured adversarial review from rawOutput with prose preamble", () => {

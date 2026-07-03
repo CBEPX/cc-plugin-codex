@@ -10,20 +10,21 @@
  *
  * Adapted from codex-companion.mjs:
  * - Uses claude-cli.mjs instead of app-server/broker
- * - MODEL_ALIASES: opus -> claude-opus-4-7[1m], sonnet -> claude-sonnet-4-6[1m], haiku -> claude-haiku-4-5
+ * - MODEL_ALIASES: opus -> claude-opus-4-8, sonnet -> claude-sonnet-5, haiku -> claude-haiku-4-5, fable -> claude-fable-5[1m]
  * - Default model when --model is unset: opus
- * - Default effort by model: opus -> xhigh, sonnet -> high, haiku -> unset
+ * - Default effort by model: opus -> xhigh, sonnet -> high, haiku/fable -> unset
  * - Claude CLI effort values: low, medium, high, xhigh, max
  * - Legacy effort aliases: none|minimal -> low
  * - Review gate matches upstream setup semantics: Stop hook runs when enabled
  *
  * Subcommands:
  *   setup, review, adversarial-review, task, task-worker,
- *   status, result, cancel, task-resume-candidate
+ *   transfer, status, result, cancel, task-resume-candidate
  */
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -42,6 +43,7 @@ import {
   resolveDefaultModel,
   resolveDefaultEffort,
   SANDBOX_READ_ONLY_TOOLS,
+  SANDBOX_REVIEW_TOOLS,
   createSandboxSettings,
   cleanupSandboxSettings,
   createReviewMcpConfig,
@@ -61,6 +63,10 @@ import {
 } from "./lib/git.mjs";
 import { binaryAvailable, getProcessIdentity } from "./lib/process.mjs";
 import { callCodexAppServer } from "./lib/codex-app-server.mjs";
+import {
+  importExternalAgentSession,
+  resolveClaudeSessionPath
+} from "./lib/claude-session-transfer.mjs";
 import {
   ensureNativePluginHooksEnabled,
   nativePluginHooksStatus,
@@ -98,6 +104,7 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  createWorkerLogStdio,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
@@ -116,7 +123,9 @@ import {
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
+const DEFAULT_FOREGROUND_TASK_WAIT_TIMEOUT_MS = 1800000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
+const USER_MCP_TOOL_RE = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
@@ -129,12 +138,14 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>]",
-      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [prompt]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
+      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--timeout-ms <ms>] [prompt]",
+      "  node scripts/claude-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
+      "  node scripts/claude-companion.mjs mcp-diagnose [--cwd <path>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [--json]",
       "  node scripts/claude-companion.mjs session-routing-context [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs task-resume-candidate [--json]",
@@ -315,6 +326,77 @@ function firstMeaningfulLine(text, fallback) {
     .map((value) => value.trim())
     .find(Boolean);
   return line ?? fallback;
+}
+
+function formatClaudeFailureSummary(failure, fallback) {
+  if (failure?.kind !== "claude_rate_limit") {
+    return fallback;
+  }
+  return failure.resetText
+    ? `Claude usage limit reached; retry after ${failure.resetText}.`
+    : "Claude usage limit reached.";
+}
+
+function normalizeModelFallbacks(events) {
+  if (!Array.isArray(events)) {
+    return [];
+  }
+  return events
+    .map((event) => {
+      if (!event || typeof event !== "object" || Array.isArray(event)) {
+        return null;
+      }
+      const fromModel =
+        typeof event.fromModel === "string" && event.fromModel.trim()
+          ? event.fromModel.trim()
+          : null;
+      const toModel =
+        typeof event.toModel === "string" && event.toModel.trim()
+          ? event.toModel.trim()
+          : null;
+      if (!fromModel && !toModel) {
+        return null;
+      }
+      return {
+        fromModel,
+        toModel,
+        reason:
+          typeof event.reason === "string" && event.reason.trim()
+            ? event.reason.trim()
+            : null,
+        source:
+          typeof event.source === "string" && event.source.trim()
+            ? event.source.trim()
+            : null,
+        timestamp:
+          typeof event.timestamp === "string" && event.timestamp.trim()
+            ? event.timestamp.trim()
+            : nowIso(),
+      };
+    })
+    .filter(Boolean);
+}
+
+function formatModelFallback(event) {
+  const from = event.fromModel ?? "unknown";
+  const to = event.toModel ?? "unknown";
+  const reason = event.reason ? ` (${event.reason})` : "";
+  return `${from} -> ${to}${reason}`;
+}
+
+function appendModelFallbackSummary(rendered, events) {
+  const modelFallbacks = normalizeModelFallbacks(events);
+  if (modelFallbacks.length === 0) {
+    return rendered;
+  }
+  const lines = [
+    String(rendered ?? "").trimEnd(),
+    "",
+    "Model fallback:",
+    ...modelFallbacks.map((event) => `- ${formatModelFallback(event)}`),
+    "",
+  ];
+  return lines.join("\n");
 }
 
 function resolveClaudeExitStatus(result) {
@@ -668,6 +750,269 @@ function buildReviewPrompt(context) {
   ].join("\n");
 }
 
+function normalizeUserMcpTools(values = []) {
+  const tools = Array.isArray(values) ? values : [values];
+  const normalized = [];
+  for (const value of tools) {
+    const tool = String(value ?? "").trim();
+    if (!tool) {
+      continue;
+    }
+    if (!USER_MCP_TOOL_RE.test(tool)) {
+      throw new Error(
+        `Invalid --user-mcp-tool value "${value}". Use a Claude MCP tool name like mcp__server__tool.`
+      );
+    }
+    if (!normalized.includes(tool)) {
+      normalized.push(tool);
+    }
+  }
+  return normalized;
+}
+
+function parsePositiveMilliseconds(value, optionName) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${optionName} must be a positive number of milliseconds.`);
+  }
+  return parsed;
+}
+
+function readJsonConfig(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function mergeMcpServers(target, source, options = {}) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return;
+  }
+  for (const [name, value] of Object.entries(source)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if (!options.override && Object.prototype.hasOwnProperty.call(target, name)) {
+        continue;
+      }
+      target[name] = value;
+      if (options.sources && options.source) {
+        options.sources[name] = options.source;
+      }
+    }
+  }
+}
+
+function collectConfiguredMcpServers(cwd, options = {}) {
+  const available = {};
+  const sources = {};
+  const userConfigPath = path.join(os.homedir(), ".claude.json");
+  const userConfig = readJsonConfig(userConfigPath);
+  if (userConfig) {
+    mergeMcpServers(available, userConfig.mcpServers, {
+      sources,
+      source: "user",
+    });
+
+    const resolvedCwd = path.resolve(cwd);
+    const projects = userConfig.projects && typeof userConfig.projects === "object"
+      ? userConfig.projects
+      : {};
+    for (const [projectKey, projectConfig] of Object.entries(projects)) {
+      const projectMatches =
+        projectKey === resolvedCwd ||
+        projectConfig?.cwd === resolvedCwd ||
+        projectConfig?.path === resolvedCwd;
+      if (projectMatches) {
+        mergeMcpServers(available, projectConfig?.mcpServers, {
+          override: true,
+          sources,
+          source: "user-project",
+        });
+      }
+    }
+  }
+
+  const projectConfigPath = options.allowProjectMcpServers
+    ? path.join(cwd, ".mcp.json")
+    : null;
+  if (projectConfigPath) {
+    mergeMcpServers(available, readJsonConfig(projectConfigPath)?.mcpServers, {
+      sources,
+      source: "project",
+    });
+  }
+  const ignoredProjectConfigPath =
+    !options.allowProjectMcpServers && fs.existsSync(path.join(cwd, ".mcp.json"))
+      ? path.join(cwd, ".mcp.json")
+      : null;
+  return { available, sources, userConfigPath, projectConfigPath, ignoredProjectConfigPath };
+}
+
+function parseUserMcpToolName(tool, availableServerNames = []) {
+  const body = tool.slice("mcp__".length);
+  const matchingServer = [...availableServerNames]
+    .filter((serverName) => body.startsWith(`${serverName}__`))
+    .sort((left, right) => right.length - left.length)[0];
+  if (matchingServer) {
+    return {
+      serverName: matchingServer,
+      toolName: body.slice(matchingServer.length + 2),
+    };
+  }
+
+  const separator = body.indexOf("__");
+  return {
+    serverName: separator === -1 ? body : body.slice(0, separator),
+    toolName: separator === -1 ? "" : body.slice(separator + 2),
+  };
+}
+
+function loadUserMcpServers(tools, cwd, options = {}) {
+  const normalizedTools = normalizeUserMcpTools(tools);
+  if (normalizedTools.length === 0) {
+    return {};
+  }
+
+  const { available, userConfigPath, projectConfigPath } =
+    collectConfiguredMcpServers(cwd, options);
+  const selected = {};
+  for (const tool of normalizedTools) {
+    const { serverName } = parseUserMcpToolName(tool, Object.keys(available));
+    if (serverName === "gitReview") {
+      continue;
+    }
+    const serverConfig = available[serverName];
+    if (!serverConfig || typeof serverConfig !== "object") {
+      const sources = projectConfigPath
+        ? `${userConfigPath} or ${projectConfigPath}`
+        : `${userConfigPath}. Project .mcp.json is ignored unless --allow-project-mcp-servers is set`;
+      throw new Error(
+        `Claude MCP server "${serverName}" was not found in ${sources}.`
+      );
+    }
+    selected[serverName] = JSON.parse(JSON.stringify(serverConfig));
+  }
+  return selected;
+}
+
+function buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile) {
+  const userMcpTools = normalizeUserMcpTools(request.userMcpTools);
+  return {
+    model: request.model,
+    effort: request.effort,
+    onProgress: request.onProgress,
+    onSpawn: request.onSpawn,
+    permissionMode: "dontAsk",
+    settingsFile: sandboxSettingsFile,
+    mcpConfigFile,
+    strictMcpConfig: true,
+    allowedTools: userMcpTools.length > 0
+      ? [...SANDBOX_REVIEW_TOOLS, ...userMcpTools]
+      : SANDBOX_REVIEW_TOOLS,
+  };
+}
+
+function buildMcpDiagnostic(cwd, options = {}) {
+  const userMcpTools = normalizeUserMcpTools(options.userMcpTools);
+  const {
+    available,
+    sources,
+    userConfigPath,
+    projectConfigPath,
+    ignoredProjectConfigPath,
+  } = collectConfiguredMcpServers(cwd, {
+    allowProjectMcpServers: Boolean(options.allowProjectMcpServers),
+  });
+  const availableServerNames = Object.keys(available).sort();
+  const selectedServers = new Set();
+  const requestedTools = userMcpTools.map((tool) => {
+    const { serverName, toolName } = parseUserMcpToolName(tool, availableServerNames);
+    const bundled = serverName === "gitReview";
+    const found = bundled || Object.prototype.hasOwnProperty.call(available, serverName);
+    if (found && !bundled) {
+      selectedServers.add(serverName);
+    }
+    const reason = found
+      ? null
+      : ignoredProjectConfigPath
+        ? `Claude MCP server "${serverName}" was not found. Project .mcp.json is ignored unless --allow-project-mcp-servers is set.`
+        : `Claude MCP server "${serverName}" was not found.`;
+    return {
+      tool,
+      valid: true,
+      serverName,
+      toolName,
+      found,
+      selected: found && !bundled,
+      source: bundled ? "bundled" : (sources[serverName] ?? null),
+      reason,
+    };
+  });
+  const allowedUserTools = requestedTools
+    .filter((tool) => tool.found)
+    .map((tool) => tool.tool);
+  return {
+    cwd: path.resolve(cwd),
+    userConfigPath,
+    projectConfigPath,
+    ignoredProjectConfigPath,
+    projectMcpServersEnabled: Boolean(options.allowProjectMcpServers),
+    availableServers: availableServerNames.map((name) => ({
+      name,
+      source: sources[name] ?? null,
+    })),
+    selectedServers: [...selectedServers].sort(),
+    requestedTools,
+    allowedTools: userMcpTools.length > 0
+      ? [...SANDBOX_REVIEW_TOOLS, ...allowedUserTools]
+      : SANDBOX_REVIEW_TOOLS,
+  };
+}
+
+function renderMcpDiagnostic(report) {
+  const lines = ["# Claude MCP Diagnostics", ""];
+  lines.push(`CWD: ${report.cwd}`);
+  lines.push(`User config: ${report.userConfigPath}`);
+  if (report.projectConfigPath) {
+    lines.push(`Project config: ${report.projectConfigPath}`);
+  } else if (report.ignoredProjectConfigPath) {
+    lines.push(
+      `Project config: ignored (${report.ignoredProjectConfigPath}; pass --allow-project-mcp-servers to enable)`
+    );
+  } else {
+    lines.push("Project config: disabled");
+  }
+  lines.push("");
+  lines.push("Available servers:");
+  if (report.availableServers.length === 0) {
+    lines.push("- none");
+  } else {
+    for (const server of report.availableServers) {
+      lines.push(`- ${server.name} (${server.source ?? "unknown"})`);
+    }
+  }
+  lines.push("");
+  lines.push("Requested tools:");
+  if (report.requestedTools.length === 0) {
+    lines.push("- none");
+  } else {
+    for (const tool of report.requestedTools) {
+      const status = tool.found
+        ? `selected from ${tool.source}`
+        : `missing: ${tool.reason}`;
+      lines.push(`- ${tool.tool}: ${status}`);
+    }
+  }
+  lines.push("");
+  lines.push(`Selected servers: ${report.selectedServers.join(", ") || "none"}`);
+  lines.push("");
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
 // ---------------------------------------------------------------------------
 // Review execution
 // ---------------------------------------------------------------------------
@@ -695,20 +1040,19 @@ async function executeReviewRun(request) {
     let result;
     const sandboxSettingsFile = createSandboxSettings("read-only");
     try {
-      const isolation = createReviewIsolation(request.cwd, target, { label: "review" });
+        const isolation = createReviewIsolation(request.cwd, target, { label: "review" });
       try {
-        const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
+        const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot, {
+          extraMcpServers: loadUserMcpServers(request.userMcpTools, request.cwd, {
+            allowProjectMcpServers: request.allowProjectMcpServers,
+          }),
+        });
         try {
-          result = await runClaudeReview(isolation.cwd, prompt, {
-            model: request.model,
-            effort: request.effort,
-            onProgress: request.onProgress,
-            onSpawn: request.onSpawn,
-            permissionMode: "dontAsk",
-            settingsFile: sandboxSettingsFile,
-            mcpConfigFile,
-            strictMcpConfig: true,
-          });
+          result = await runClaudeReview(
+            isolation.cwd,
+            prompt,
+            buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile)
+          );
         } finally {
           cleanupReviewMcpConfig(mcpConfigFile);
         }
@@ -719,6 +1063,7 @@ async function executeReviewRun(request) {
       cleanupSandboxSettings(sandboxSettingsFile);
     }
 
+    const modelFallbacks = normalizeModelFallbacks(result.modelEvents);
     const payload = {
       review: reviewName,
       target,
@@ -727,17 +1072,24 @@ async function executeReviewRun(request) {
         status: result.status,
         warning: result.warning ?? null,
         stderr: result.stderr,
-        stdout: result.result
+        failure: result.failure ?? null,
+        stdout: result.result,
+        requestedModel: result.requestedModel ?? null,
+        finalModel: result.finalModel ?? null,
+        modelFallbacks
       }
     };
-    const rendered = [
-      `# Claude Code ${reviewName}`,
-      "",
-      `Target: ${target.label}`,
-      "",
-      typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
-      ""
-    ].join("\n");
+    const rendered = appendModelFallbackSummary(
+      [
+        `# Claude Code ${reviewName}`,
+        "",
+        `Target: ${target.label}`,
+        "",
+        typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
+        ""
+      ].join("\n"),
+      modelFallbacks
+    );
 
     return {
       exitStatus: resolveClaudeExitStatus(result),
@@ -745,9 +1097,12 @@ async function executeReviewRun(request) {
       turnId: null,
       payload,
       rendered,
-      summary: firstMeaningfulLine(
-        typeof result.result === "string" ? result.result : "",
-        `${reviewName} completed.`
+      summary: formatClaudeFailureSummary(
+        result.failure,
+        firstMeaningfulLine(
+          typeof result.result === "string" ? result.result : "",
+          `${reviewName} completed.`
+        )
       ),
       jobTitle: `Claude Code ${reviewName}`,
       jobClass: "review",
@@ -766,22 +1121,17 @@ async function executeReviewRun(request) {
       label: "adversarial-review",
     });
     try {
-      const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
+      const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot, {
+        extraMcpServers: loadUserMcpServers(request.userMcpTools, request.cwd, {
+          allowProjectMcpServers: request.allowProjectMcpServers,
+        }),
+      });
       try {
         result = await runClaudeAdversarialReview(
           isolation.cwd,
           prompt,
           schema,
-          {
-            model: request.model,
-            effort: request.effort,
-            onProgress: request.onProgress,
-            onSpawn: request.onSpawn,
-            permissionMode: "dontAsk",
-            settingsFile: sandboxSettingsFile,
-            mcpConfigFile,
-            strictMcpConfig: true,
-          }
+          buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile)
         );
       } finally {
         cleanupReviewMcpConfig(mcpConfigFile);
@@ -815,6 +1165,7 @@ async function executeReviewRun(request) {
     }
   }
 
+  const modelFallbacks = normalizeModelFallbacks(result.modelEvents);
   const payload = {
     review: reviewName,
     target,
@@ -828,7 +1179,11 @@ async function executeReviewRun(request) {
       status: result.status,
       warning: result.warning ?? null,
       stderr: result.stderr,
-      stdout: typeof result.result === "string" ? result.result : JSON.stringify(result.result)
+      failure: result.failure ?? null,
+      stdout: typeof result.result === "string" ? result.result : JSON.stringify(result.result),
+      requestedModel: result.requestedModel ?? null,
+      finalModel: result.finalModel ?? null,
+      modelFallbacks
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
@@ -840,16 +1195,21 @@ async function executeReviewRun(request) {
     threadId: result.sessionId,
     turnId: null,
     payload,
-    rendered: renderReviewResult(parsed, {
-      reviewLabel: reviewName,
-      targetLabel: context.target.label,
-      reasoningSummary: null
-    }),
-    summary:
+    rendered: appendModelFallbackSummary(
+      renderReviewResult(parsed, {
+        reviewLabel: reviewName,
+        targetLabel: context.target.label,
+        reasoningSummary: null
+      }),
+      modelFallbacks
+    ),
+    summary: formatClaudeFailureSummary(
+      result.failure,
       parsed.parsed?.summary ??
-      firstMeaningfulLine(
-        typeof result.result === "string" ? result.result : "",
-        parsed.parseError ?? `${reviewName} finished.`
+        firstMeaningfulLine(
+          typeof result.result === "string" ? result.result : "",
+          parsed.parseError ?? `${reviewName} finished.`
+        )
       ),
     jobTitle: `Claude Code ${reviewName}`,
     jobClass: "review",
@@ -933,15 +1293,24 @@ async function executeTaskRun(request) {
   const rawOutput =
     typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.stderr ?? "";
-  const rendered = renderTaskResult({
-      rawOutput,
-      failureMessage
-    }
+  const modelFallbacks = normalizeModelFallbacks(result.modelEvents);
+  const rendered = appendModelFallbackSummary(
+    renderTaskResult({
+        rawOutput,
+        failureMessage,
+        failure: result.failure ?? null
+      }
+    ),
+    modelFallbacks
   );
   const payload = {
     status: result.status,
     warning: result.warning ?? null,
     sessionId: result.sessionId,
+    requestedModel: result.requestedModel ?? null,
+    finalModel: result.finalModel ?? null,
+    modelFallbacks,
+    failure: result.failure ?? null,
     rawOutput,
     touchedFiles: Array.isArray(result.touchedFiles)
       ? result.touchedFiles
@@ -957,11 +1326,14 @@ async function executeTaskRun(request) {
     turnId: null,
     payload,
     rendered,
-    summary: firstMeaningfulLine(
-      rawOutput,
+    summary: formatClaudeFailureSummary(
+      result.failure,
       firstMeaningfulLine(
-        failureMessage,
-        `${taskMetadata.title} finished.`
+        rawOutput,
+        firstMeaningfulLine(
+          failureMessage,
+          `${taskMetadata.title} finished.`
+        )
       )
     ),
     jobTitle: taskMetadata.title,
@@ -1075,24 +1447,54 @@ function buildReviewRequest({
   effort,
   focusText,
   reviewName,
+  userMcpTools,
+  allowProjectMcpServers,
   markViewedOnSuccess
 }) {
-  return { cwd, base, scope, model, effort, focusText, reviewName, markViewedOnSuccess };
+  return {
+    cwd,
+    base,
+    scope,
+    model,
+    effort,
+    focusText,
+    reviewName,
+    userMcpTools: normalizeUserMcpTools(userMcpTools),
+    allowProjectMcpServers: Boolean(allowProjectMcpServers),
+    markViewedOnSuccess
+  };
 }
 
-function spawnDetachedReviewWorker(cwd, jobId) {
+function spawnDetachedReviewWorker(cwd, jobId, workspaceRoot, logFile = null) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "review-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
+  const workerLog = createWorkerLogStdio(logFile);
+  let child;
+  try {
+    child = spawn(
+      process.execPath,
+      [scriptPath, "review-worker", "--cwd", cwd, "--job-id", jobId],
+      {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: workerLog.stdio,
+        windowsHide: true
+      }
+    );
+  } finally {
+    workerLog.close();
+  }
+  child.on("error", (error) => {
+    try {
+      transitionJob(workspaceRoot, jobId, ["queued"], "failed", {
+        errorMessage: `Failed to start review worker: ${error.message}`,
+        completedAt: nowIso(),
+        pid: null,
+        pidIdentity: null,
+        phase: "failed",
+      });
+    } catch {}
+  });
   child.unref();
   return child;
 }
@@ -1111,7 +1513,7 @@ function enqueueBackgroundReview(cwd, job, request) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedReviewWorker(cwd, job.id);
+  const child = spawnDetachedReviewWorker(cwd, job.id, job.workspaceRoot, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {
@@ -1176,6 +1578,33 @@ function buildTaskRequest({
     resumeSessionId,
     jobId,
     markViewedOnSuccess
+  };
+}
+
+function renderTransferResult(payload) {
+  const lines = [
+    "Transferred the Claude session into a Codex thread with visible turn history.",
+    `Codex session ID: ${payload.threadId}`,
+    `Resume in Codex: ${payload.resumeCommand}`
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+async function executeTransfer(cwd, options = {}) {
+  const sourcePath = resolveClaudeSessionPath(cwd, {
+    source: options.source
+  });
+  const result = await importExternalAgentSession(cwd, { sourcePath });
+  const payload = {
+    threadId: result.threadId,
+    resumeCommand: `codex resume ${result.threadId}`,
+    sourcePath,
+    sessionId: path.basename(sourcePath, ".jsonl")
+  };
+
+  return {
+    payload,
+    rendered: renderTransferResult(payload)
   };
 }
 
@@ -1289,26 +1718,49 @@ async function runForegroundCommand(job, runner, options = {}) {
 // Background task spawning
 // ---------------------------------------------------------------------------
 
-function spawnDetachedTaskWorker(cwd, jobId) {
+function spawnDetachedTaskWorker(cwd, jobId, workspaceRoot, logFile = null) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
+  const workerLog = createWorkerLogStdio(logFile);
+  let child;
+  try {
+    child = spawn(
+      process.execPath,
+      [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId],
+      {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: workerLog.stdio,
+        windowsHide: true
+      }
+    );
+  } finally {
+    workerLog.close();
+  }
+  child.on("error", (error) => {
+    try {
+      transitionJob(workspaceRoot, jobId, ["queued"], "failed", {
+        errorMessage: `Failed to start task worker: ${error.message}`,
+        completedAt: nowIso(),
+        pid: null,
+        pidIdentity: null,
+        phase: "failed",
+      });
+    } catch {}
+  });
   child.unref();
   return child;
 }
 
 function enqueueBackgroundTask(cwd, job, request) {
+  return enqueueDetachedTask(cwd, job, request, {
+    queuedMessage: "Queued for background execution."
+  });
+}
+
+function enqueueDetachedTask(cwd, job, request, options = {}) {
   const { logFile } = createTrackedProgress(job);
-  appendLogLine(logFile, "Queued for background execution.");
+  appendLogLine(logFile, options.queuedMessage ?? "Queued for execution.");
 
   const queuedRecord = {
     ...job,
@@ -1320,7 +1772,7 @@ function enqueueBackgroundTask(cwd, job, request) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  const child = spawnDetachedTaskWorker(cwd, job.id, job.workspaceRoot, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {
@@ -1344,6 +1796,163 @@ function enqueueBackgroundTask(cwd, job, request) {
   };
 }
 
+function buildStoredTaskPayload(job) {
+  if (job?.result && typeof job.result === "object") {
+    return job.result;
+  }
+  return {
+    status: job?.status === "completed" ? "completed" : "failed",
+    jobStatus: job?.status ?? null,
+    warning: null,
+    sessionId: job?.threadId ?? job?.sessionId ?? null,
+    resultMissing: true,
+    requestedModel: null,
+    finalModel: null,
+    modelFallbacks: [],
+    rawOutput: "",
+    touchedFiles: [],
+    ...(job?.errorMessage ? { errorMessage: job.errorMessage } : {})
+  };
+}
+
+function renderForegroundTaskStillRunning(payload, job) {
+  return [
+    `${payload.title} is still running as ${payload.jobId}.`,
+    `Check $cc:status ${payload.jobId} for progress.`,
+    `Open the result later with $cc:result ${payload.jobId}.`,
+    job?.phase ? `Current phase: ${job.phase}.` : null,
+    ""
+  ].filter(Boolean).join("\n");
+}
+
+function renderForegroundTaskProgress(job) {
+  const status = job?.status ?? "unknown";
+  const phase = job?.phase && job.phase !== status ? ` (${job.phase})` : "";
+  return `${job?.title ?? "Claude Code Task"}: ${status}${phase}`;
+}
+
+function renderForegroundTaskInterrupt(payload, signal) {
+  return [
+    `${payload.title} continues as ${payload.jobId} after ${signal}.`,
+    `Check $cc:status ${payload.jobId} for progress.`,
+    `Cancel it with $cc:cancel ${payload.jobId}.`,
+    ""
+  ].join("\n");
+}
+
+function installForegroundTaskSignalHandlers(payload) {
+  const handlers = new Map();
+  for (const { signal, exitCode } of [
+    { signal: "SIGINT", exitCode: 130 },
+    { signal: "SIGTERM", exitCode: 143 },
+  ]) {
+    const handler = () => {
+      process.stderr.write(renderForegroundTaskInterrupt(payload, signal));
+      process.exit(exitCode);
+    };
+    handlers.set(signal, handler);
+    process.once(signal, handler);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) {
+      process.removeListener(signal, handler);
+    }
+  };
+}
+
+async function runForegroundDetachedTask(cwd, job, request, options = {}) {
+  const { payload } = enqueueDetachedTask(cwd, job, request, {
+    queuedMessage: "Queued for foreground execution."
+  });
+  const removeSignalHandlers = installForegroundTaskSignalHandlers(payload);
+  let lastProgressLine = null;
+  const emitProgress = (snapshot) => {
+    if (options.json || options.quietProgress) {
+      return;
+    }
+    const line = renderForegroundTaskProgress(snapshot.job);
+    if (line === lastProgressLine) {
+      return;
+    }
+    lastProgressLine = line;
+    process.stderr.write(`${line}\n`);
+  };
+  let snapshot;
+  try {
+    snapshot = await waitForSingleJobSnapshot(cwd, job.id, {
+      timeoutMs: options.timeoutMs ?? DEFAULT_FOREGROUND_TASK_WAIT_TIMEOUT_MS,
+      pollIntervalMs: options.pollIntervalMs,
+      onSnapshot: emitProgress,
+    });
+  } finally {
+    removeSignalHandlers();
+  }
+  let storedJob = snapshot.job;
+  const persistedJob = readStoredJob(job.workspaceRoot, job.id);
+  if (
+    persistedJob &&
+    (persistedJob.status === storedJob.status ||
+      !isActiveJobStatus(persistedJob.status))
+  ) {
+    storedJob = persistedJob;
+  }
+
+  if (storedJob.status === "cancelling") {
+    const terminalSnapshot = await waitForSingleJobSnapshot(cwd, job.id, {
+      timeoutMs: 2_000,
+      pollIntervalMs: options.pollIntervalMs,
+    });
+    storedJob = terminalSnapshot.job;
+    const terminalJob = readStoredJob(job.workspaceRoot, job.id);
+    if (
+      terminalJob &&
+      (terminalJob.status === storedJob.status ||
+        !isActiveJobStatus(terminalJob.status))
+    ) {
+      storedJob = terminalJob;
+    }
+  }
+
+  if (isActiveJobStatus(storedJob.status)) {
+    const timeoutPayload = {
+      ...payload,
+      status: storedJob.status,
+      waitTimedOut: true,
+      timeoutMs: snapshot.timeoutMs
+    };
+    outputCommandResult(
+      timeoutPayload,
+      renderForegroundTaskStillRunning(timeoutPayload, storedJob),
+      options.json
+    );
+    process.exitCode = 124;
+    return {
+      exitStatus: 124,
+      payload: timeoutPayload,
+      rendered: renderForegroundTaskStillRunning(timeoutPayload, storedJob)
+    };
+  }
+
+  if (storedJob.status === "completed" && options.markViewedOnSuccess) {
+    storedJob = patchJob(job.workspaceRoot, job.id, {
+      resultViewedAt: nowIso(),
+    }) ?? storedJob;
+  }
+
+  const resultPayload = buildStoredTaskPayload(storedJob);
+  const rendered = storedJob.rendered ?? renderStoredJobResult(storedJob, storedJob);
+  outputResult(options.json ? resultPayload : rendered, options.json);
+  const exitStatus = storedJob.status === "completed" ? 0 : 1;
+  if (exitStatus !== 0) {
+    process.exitCode = exitStatus;
+  }
+  return {
+    exitStatus,
+    payload: resultPayload,
+    rendered
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Wait for job completion (polling)
 // ---------------------------------------------------------------------------
@@ -1359,12 +1968,14 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   );
   const deadline = Date.now() + timeoutMs;
   let snapshot = buildSingleJobSnapshot(cwd, reference);
+  options.onSnapshot?.(snapshot);
 
   while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
     await sleep(
       Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()))
     );
     snapshot = buildSingleJobSnapshot(cwd, reference);
+    options.onSnapshot?.(snapshot);
   }
 
   return {
@@ -1431,8 +2042,19 @@ async function resolveLatestResumableSession(cwd, options = {}) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "effort", "cwd", "view-state", "job-id", "owner-session-id"],
-    booleanOptions: ["json", "background", "wait"],
+    valueOptions: [
+      "base",
+      "scope",
+      "model",
+      "effort",
+      "cwd",
+      "view-state",
+      "job-id",
+      "owner-session-id",
+      "user-mcp-tool"
+    ],
+    repeatableOptions: ["user-mcp-tool"],
+    booleanOptions: ["json", "background", "wait", "allow-project-mcp-servers"],
     aliasMap: {
       m: "model"
     }
@@ -1460,6 +2082,17 @@ async function handleReviewCommand(argv, config) {
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     // Validate inside the reservation guard so failures do not leak markers.
     config.validateRequest?.(target, focusText);
+    const userMcpTools = normalizeUserMcpTools(options["user-mcp-tool"]);
+    if (userMcpTools.length > 0) {
+      process.stderr.write(
+        "Warning: --user-mcp-tool runs selected Claude MCP tools as auto-approved external processes; use only trusted read-only user-scope tools for untrusted diffs.\n"
+      );
+      if (options["allow-project-mcp-servers"]) {
+        process.stderr.write(
+          "Warning: --allow-project-mcp-servers also trusts MCP server definitions from this repository's .mcp.json for this run.\n"
+        );
+      }
+    }
     const metadata = buildReviewJobMetadata(config.reviewName, target);
     alignCurrentSessionToOwner(workspaceRoot, ownerSessionId);
 
@@ -1483,6 +2116,8 @@ async function handleReviewCommand(argv, config) {
         effort: resolvedEffort,
         focusText,
         reviewName: config.reviewName,
+        userMcpTools,
+        allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
         markViewedOnSuccess
       });
       const { payload } = enqueueBackgroundReview(cwd, job, request);
@@ -1505,6 +2140,8 @@ async function handleReviewCommand(argv, config) {
           effort: resolvedEffort,
           focusText,
           reviewName: config.reviewName,
+          userMcpTools,
+          allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
           onProgress: progress,
           onSpawn,
         }),
@@ -1534,9 +2171,33 @@ async function handleAdversarialReview(argv) {
   });
 }
 
+function handleMcpDiagnose(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "user-mcp-tool"],
+    repeatableOptions: ["user-mcp-tool"],
+    booleanOptions: ["json", "allow-project-mcp-servers"],
+  });
+  const cwd = resolveCommandCwd(options);
+  const payload = buildMcpDiagnostic(cwd, {
+    userMcpTools: options["user-mcp-tool"],
+    allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
+  });
+  outputCommandResult(payload, renderMcpDiagnostic(payload), options.json);
+}
+
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "view-state", "owner-session-id", "job-id"],
+    valueOptions: [
+      "model",
+      "effort",
+      "cwd",
+      "prompt-file",
+      "view-state",
+      "owner-session-id",
+      "job-id",
+      "timeout-ms",
+      "poll-interval-ms",
+    ],
     booleanOptions: [
       "json",
       "quiet-progress",
@@ -1559,6 +2220,10 @@ async function handleTask(argv) {
   const resolvedEffort = resolveDefaultEffort(model, options.effort);
   const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
+  const foregroundTimeoutMs = parsePositiveMilliseconds(
+    options["timeout-ms"],
+    "--timeout-ms"
+  );
   const markViewedOnSuccess = resolveMarkViewedOnSuccess(
     options["view-state"],
     Boolean(options.background)
@@ -1630,28 +2295,43 @@ async function handleTask(argv) {
       return;
     }
 
-    await runForegroundCommand(
+    const request = buildTaskRequest({
+      cwd,
+      model,
+      effort,
+      prompt,
+      write,
+      resumeLast,
+      resumeSessionId,
+      jobId: job.id,
+      markViewedOnSuccess
+    });
+    await runForegroundDetachedTask(
+      cwd,
       job,
-      (progress, onSpawn) =>
-        executeTaskRun({
-          cwd,
-          model,
-          effort,
-          prompt,
-          write,
-          resumeLast,
-          resumeSessionId,
-          onSpawn,
-          jobId: job.id,
-          onProgress: progress
-        }),
+      request,
       {
         json: options.json,
+        quietProgress: Boolean(options["quiet-progress"]),
         markViewedOnSuccess,
-        quietProgress: Boolean(options["quiet-progress"])
+        timeoutMs: foregroundTimeoutMs,
+        pollIntervalMs: options["poll-interval-ms"],
       }
     );
   });
+}
+
+async function handleTransfer(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "source"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const result = await executeTransfer(cwd, {
+    source: options.source
+  });
+  outputCommandResult(result.payload, result.rendered, options.json);
 }
 
 async function handleTaskWorker(argv) {
@@ -1989,8 +2669,9 @@ async function handleCancel(argv) {
   const finalStatus = cancelResult.cancelled ? "cancelled" : "cancel_failed";
 
   // CAS: cancelling → cancelled/cancel_failed
+  let finalTransition = null;
   if (finalStatus === "cancelled") {
-    transitionJob(workspaceRoot, job.id, ["cancelling"], "cancelled", {
+    finalTransition = transitionJob(workspaceRoot, job.id, ["cancelling", "running", "failed"], "cancelled", {
       completedAt,
       errorMessage: "Cancelled by user.",
       pid: null,
@@ -1998,7 +2679,7 @@ async function handleCancel(argv) {
     });
   } else {
     // cancel_failed: PRESERVE PID/PGID for manual cleanup
-    transitionJob(workspaceRoot, job.id, ["cancelling"], "cancel_failed", {
+    finalTransition = transitionJob(workspaceRoot, job.id, ["cancelling"], "cancel_failed", {
       completedAt,
       errorMessage: `Cancel failed: ${cancelResult.note ?? "process group still alive"}`,
       note: cancelResult.note ?? null,
@@ -2007,13 +2688,17 @@ async function handleCancel(argv) {
     });
   }
 
-  appendLogLine(jobLogFile, `Cancel result: ${finalStatus}`);
+  const effectiveStatus = finalTransition?.transitioned
+    ? finalStatus
+    : (finalTransition?.job?.status ?? finalStatus);
+
+  appendLogLine(jobLogFile, `Cancel result: ${effectiveStatus}`);
   cleanupOldJobs(workspaceRoot);
 
-  const nextJob = { ...job, status: finalStatus, phase: finalStatus };
+  const nextJob = { ...job, status: effectiveStatus, phase: effectiveStatus };
   const payload = {
     jobId: job.id,
-    status: finalStatus,
+    status: effectiveStatus,
     title: job.title,
     note: cancelResult.note,
   };
@@ -2045,6 +2730,9 @@ async function main() {
     case "task":
       await handleTask(argv);
       break;
+    case "transfer":
+      await handleTransfer(argv);
+      break;
     case "task-worker":
       await handleTaskWorker(argv);
       break;
@@ -2074,6 +2762,9 @@ async function main() {
       break;
     case "cancel":
       await handleCancel(argv);
+      break;
+    case "mcp-diagnose":
+      handleMcpDiagnose(argv);
       break;
     case "mcp-git":
       await handleMcpGit(argv);

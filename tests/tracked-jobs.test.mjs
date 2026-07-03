@@ -17,6 +17,8 @@ import {
   appendLogLine,
   appendLogBlock,
   createJobLogFile,
+  createWorkerLogStdio,
+  createJobProgressUpdater,
   createJobRecord,
   runTrackedJob,
 } from "../scripts/lib/tracked-jobs.mjs";
@@ -171,6 +173,31 @@ describe("appendLogBlock", () => {
   });
 });
 
+describe("createWorkerLogStdio", () => {
+  it("appends detached worker stdout and stderr to the job log", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-log-"));
+    const logFile = path.join(tmpDir, "worker.log");
+    fs.writeFileSync(logFile, "", "utf8");
+
+    const workerLog = createWorkerLogStdio(logFile);
+    try {
+      const result = spawnSync(
+        process.execPath,
+        ["-e", "process.stdout.write('worker out\\n'); process.stderr.write('worker err\\n')"],
+        { stdio: workerLog.stdio }
+      );
+      assert.equal(result.status, 0);
+    } finally {
+      workerLog.close();
+    }
+
+    const content = fs.readFileSync(logFile, "utf8");
+    assert.match(content, /worker out/);
+    assert.match(content, /worker err/);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // createJobLogFile
 // ---------------------------------------------------------------------------
@@ -263,6 +290,56 @@ describe("createJobRecord", () => {
       assert.equal(record.sessionId, "owner-session");
     } finally {
       clearCurrentSession(repoDir);
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createJobProgressUpdater
+// ---------------------------------------------------------------------------
+
+describe("createJobProgressUpdater", () => {
+  it("persists model fallback progress on the running job", () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-model-fallback-job",
+      workspaceRoot: repoDir,
+      status: "running",
+      phase: "running",
+      title: "model fallback",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      const updateProgress = createJobProgressUpdater(repoDir, job.id);
+      updateProgress({
+        phase: "model_fallback",
+        modelFallback: {
+          fromModel: "claude-opus-4-8",
+          toModel: "claude-sonnet-5",
+          reason: "capacity",
+          source: "model_fallback",
+        },
+      });
+      updateProgress({
+        phase: "model_fallback",
+        modelFallback: {
+          fromModel: "claude-opus-4-8",
+          toModel: "claude-sonnet-5",
+          reason: "capacity",
+          source: "model_fallback",
+        },
+      });
+
+      const saved = readJobFile(repoDir, job.id);
+      assert.equal(saved.phase, "model_fallback");
+      assert.equal(saved.modelFallbacks.length, 1);
+      assert.equal(saved.modelFallbacks[0].fromModel, "claude-opus-4-8");
+      assert.equal(saved.modelFallbacks[0].toModel, "claude-sonnet-5");
+    } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
   });

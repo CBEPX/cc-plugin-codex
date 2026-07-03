@@ -467,20 +467,23 @@ function formatSse(events) {
     .join("");
 }
 
+function flattenTools(tools) {
+  if (!Array.isArray(tools)) {
+    return [];
+  }
+  return tools.flatMap((tool) => [tool, ...flattenTools(tool.tools)]);
+}
+
 function getToolNames(body) {
-  return Array.isArray(body.tools)
-    ? body.tools
+  return flattenTools(body.tools)
         .map((tool) => tool.name || tool.function?.name || tool.type)
-        .filter(Boolean)
-    : [];
+        .filter(Boolean);
 }
 
 function getToolParameterDescription(body, toolName, parameterName) {
-  return Array.isArray(body.tools)
-    ? body.tools
+  return flattenTools(body.tools)
         .find((tool) => (tool.name || tool.function?.name || tool.type) === toolName)
-        ?.parameters?.properties?.[parameterName]?.description ?? null
-    : null;
+        ?.parameters?.properties?.[parameterName]?.description ?? null;
 }
 
 function extractRoleBlock(description, roleName) {

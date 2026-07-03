@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Code Transfer"
+  short_description: "Args: [--source <claude-jsonl>]. Transfer the current Claude transcript into a resumable Codex thread."
+policy:
+  allow_implicit_invocation: false

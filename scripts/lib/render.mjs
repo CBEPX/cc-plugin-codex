@@ -139,6 +139,102 @@ function formatJobTimestamp(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function normalizeModelFallbacks(value) {
+  return Array.isArray(value)
+    ? value
+        .map((event) => {
+          if (!event || typeof event !== "object" || Array.isArray(event)) {
+            return null;
+          }
+          const fromModel =
+            typeof event.fromModel === "string" && event.fromModel.trim()
+              ? event.fromModel.trim()
+              : null;
+          const toModel =
+            typeof event.toModel === "string" && event.toModel.trim()
+              ? event.toModel.trim()
+              : null;
+          if (!fromModel && !toModel) {
+            return null;
+          }
+          return {
+            fromModel,
+            toModel,
+            reason:
+              typeof event.reason === "string" && event.reason.trim()
+                ? event.reason.trim()
+                : null,
+            source:
+              typeof event.source === "string" && event.source.trim()
+                ? event.source.trim()
+                : null,
+          };
+        })
+        .filter(Boolean)
+    : [];
+}
+
+function modelFallbackKey(event) {
+  return JSON.stringify([
+    event.fromModel ?? "",
+    event.toModel ?? "",
+    event.reason ?? "",
+    event.source ?? "",
+  ]);
+}
+
+function collectModelFallbacks(job, storedJob = null) {
+  const merged = [];
+  const seen = new Set();
+  for (const source of [
+    job?.modelFallbacks,
+    job?.result?.modelFallbacks,
+    job?.result?.codex?.modelFallbacks,
+    storedJob?.modelFallbacks,
+    storedJob?.result?.modelFallbacks,
+    storedJob?.result?.codex?.modelFallbacks,
+  ]) {
+    for (const event of normalizeModelFallbacks(source)) {
+      const key = modelFallbackKey(event);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(event);
+    }
+  }
+  return merged;
+}
+
+function formatModelFallback(event) {
+  const from = event.fromModel ?? "unknown";
+  const to = event.toModel ?? "unknown";
+  const reason = event.reason ? ` (${event.reason})` : "";
+  return `${from} -> ${to}${reason}`;
+}
+
+function formatModelFallbacks(events) {
+  const normalized = normalizeModelFallbacks(events);
+  if (normalized.length === 0) {
+    return "";
+  }
+  return normalized.map((event) => formatModelFallback(event)).join("; ");
+}
+
+function appendModelFallbackSuffix(suffix, events, output = "") {
+  const normalized = normalizeModelFallbacks(events);
+  if (normalized.length === 0 || String(output).includes("\nModel fallback:\n")) {
+    return suffix;
+  }
+  let next = suffix;
+  if (next && !next.endsWith("\n")) next += "\n";
+  next += "Model fallback:\n";
+  for (const event of normalized) {
+    next += `- ${formatModelFallback(event)}\n`;
+  }
+  return next;
+}
+
 function isPendingJob(job) {
   return job?.status === "queued" || job?.status === "running";
 }
@@ -292,6 +388,17 @@ export function renderReviewResult(parsedResult, meta) {
 }
 
 export function renderTaskResult(parsedResult) {
+  if (parsedResult?.failure?.kind === "claude_rate_limit") {
+    const reset = parsedResult.failure.resetText
+      ? ` Retry after ${parsedResult.failure.resetText}.`
+      : "";
+    const original = String(parsedResult.failure.message ?? "").trim();
+    return [
+      `Claude usage limit reached.${reset}`,
+      original ? `\nOriginal Claude message:\n${original}` : "",
+      "",
+    ].join("\n");
+  }
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   if (rawOutput) return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Claude Code did not return a final message.";
@@ -326,6 +433,10 @@ export function renderJobStatusReport(job) {
   }
   const resumeCmd = formatClaudeResumeCommand(job);
   if (resumeCmd) pushKeyValueTableRow(lines, "Resume", `\`${resumeCmd}\``, { raw: true });
+  const modelFallbacks = collectModelFallbacks(job);
+  if (modelFallbacks.length > 0) {
+    pushKeyValueTableRow(lines, "Model fallback", formatModelFallbacks(modelFallbacks));
+  }
   if (job.status === "queued" || job.status === "running") {
     pushKeyValueTableRow(lines, "Cancel", `\`${formatClaudeSkillCommand("cancel", job.id)}\``, { raw: true });
   } else {
@@ -346,31 +457,37 @@ export function renderStoredJobResult(job, storedJob) {
   const ownerSessionId = resolveOwningSessionId(job, storedJob);
   const claudeSessionId = resolveClaudeSessionId(job, storedJob);
   const resumeCmd = formatClaudeResumeCommand(job, storedJob);
+  const modelFallbacks = collectModelFallbacks(job, storedJob);
   const recoveredStructuredOutput = normalizeStoredOutput(
     recoverStructuredStoredReviewOutput(job, storedJob)
   );
   if (recoveredStructuredOutput) {
-    if (!claudeSessionId && !ownerSessionId) return recoveredStructuredOutput;
+    if (!claudeSessionId && !ownerSessionId && modelFallbacks.length === 0) return recoveredStructuredOutput;
     let suffix = "";
     if (claudeSessionId) suffix += `\nClaude Code session: ${claudeSessionId}\n`;
     if (ownerSessionId && ownerSessionId !== claudeSessionId) suffix += `Owning Codex session: ${ownerSessionId}\n`;
     if (resumeCmd) suffix += `Resume: ${resumeCmd}\n`;
+    suffix = appendModelFallbackSuffix(suffix, modelFallbacks, recoveredStructuredOutput);
     return `${recoveredStructuredOutput}${suffix}`;
   }
   const storedOutput = normalizeStoredOutput(getStoredJobOutput(storedJob));
   if (storedOutput) {
     const output = storedOutput;
-    if (!claudeSessionId && !ownerSessionId) return output;
+    if (!claudeSessionId && !ownerSessionId && modelFallbacks.length === 0) return output;
     let suffix = "\n";
     if (claudeSessionId) suffix += `Claude Code session: ${claudeSessionId}\n`;
     if (ownerSessionId && ownerSessionId !== claudeSessionId) suffix += `Owning Codex session: ${ownerSessionId}\n`;
     if (resumeCmd) suffix += `Resume: ${resumeCmd}\n`;
+    suffix = appendModelFallbackSuffix(suffix, modelFallbacks, output);
     return `${output}${suffix}`;
   }
   const lines = [`# ${job.title ?? "Claude Code Result"}`, "", `Job: ${job.id}`, `Status: ${job.status}`];
   if (claudeSessionId) lines.push(`Claude Code session: ${claudeSessionId}`);
   if (ownerSessionId && ownerSessionId !== claudeSessionId) lines.push(`Owning Codex session: ${ownerSessionId}`);
   if (resumeCmd) lines.push(`Resume: ${resumeCmd}`);
+  if (modelFallbacks.length > 0) {
+    lines.push(`Model fallback: ${formatModelFallbacks(modelFallbacks)}`);
+  }
   if (job.summary) lines.push(`Summary: ${job.summary}`);
   if (job.errorMessage) lines.push("", job.errorMessage);
   else if (storedJob?.errorMessage) lines.push("", storedJob.errorMessage);

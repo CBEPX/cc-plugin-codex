@@ -80,6 +80,14 @@ async function main() {
     getValue("--session-id") ||
     \`stub-\${sanitize(prompt)}-\${process.pid}\`;
   const emitUnknownNoTerminal = /\\bunknown-no-terminal\\b/.test(prompt);
+  const emitMalformedLine = /\\bmalformed-line\\b/.test(prompt);
+  const emitSessionLimit = /\\bsession-limit\\b/.test(prompt);
+  const failAfterResult = /\\bfail-after-result\\b/.test(prompt);
+  const terminalModelFallback = /\\bterminal-model-fallback\\b/.test(prompt);
+  const terminalModel = process.env.CLAUDE_FAKE_TERMINAL_MODEL;
+  const emitModelFallback =
+    (!terminalModelFallback && /\\bmodel-fallback\\b/.test(prompt)) ||
+    process.env.CLAUDE_FAKE_MODEL_FALLBACK === "1";
   const resultText = \`completed:\${prompt}\`;
   const structuredResult = jsonSchema
     ? {
@@ -103,10 +111,28 @@ async function main() {
     }) + "\\n"
   );
 
+  if (emitModelFallback) {
+    process.stdout.write(
+      JSON.stringify({
+        type: "system",
+        subtype: "model_fallback",
+        session_id: sessionId,
+        from_model: "claude-opus-4-8",
+        to_model: "claude-sonnet-5",
+        reason: "capacity",
+      }) + "\\n"
+    );
+  }
+
   if (process.env.CLAUDE_INVOCATION_FILE) {
+    const mcpConfigPath = getValue("--mcp-config");
+    const mcpConfig =
+      mcpConfigPath && require("node:fs").existsSync(mcpConfigPath)
+        ? JSON.parse(require("node:fs").readFileSync(mcpConfigPath, "utf8"))
+        : null;
     require("node:fs").writeFileSync(
       process.env.CLAUDE_INVOCATION_FILE,
-      JSON.stringify({ args, prompt, sessionId }, null, 2) + "\\n",
+      JSON.stringify({ args, prompt, sessionId, mcpConfig }, null, 2) + "\\n",
       "utf8"
     );
   }
@@ -117,16 +143,40 @@ async function main() {
     return;
   }
 
+  if (emitSessionLimit) {
+    process.stdout.write(
+      JSON.stringify({
+        type: "result",
+        session_id: sessionId,
+        result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+        model: "<synthetic>",
+      }) + "\\n"
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (emitMalformedLine) {
+    process.stdout.write("{not-json\\n");
+  }
+
   process.stdout.write(
     JSON.stringify({
       type: "result",
       session_id: sessionId,
       result: structuredResult ? "" : resultText,
+      ...(terminalModel || terminalModelFallback || emitModelFallback
+        ? { model: terminalModel || "claude-sonnet-5" }
+        : {}),
       ...(structuredResult
         ? { structured_output: structuredResult }
         : {}),
     }) + "\\n"
   );
+  if (failAfterResult) {
+    process.stderr.write("Error: tool crash after terminal result\\n");
+    process.exitCode = 1;
+  }
 }
 
 main().catch((error) => {
@@ -218,6 +268,116 @@ rl.on("line", (line) => {
   return { serverPath, logPath };
 }
 
+function createFakeCodexImportAppServer(testEnv, options = {}) {
+  const serverPath = path.join(testEnv.rootDir, "fake-codex-import-app-server.mjs");
+  const statePath = path.join(testEnv.rootDir, "fake-codex-import-state.json");
+  const logPath = path.join(testEnv.rootDir, "fake-codex-import-app-server.ndjson");
+  fs.writeFileSync(
+    serverPath,
+    `import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import readline from "node:readline";
+
+const [, , codexHome, statePath, logPath] = process.argv;
+const options = ${JSON.stringify(options)};
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function write(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+
+function readJson(filePath, fallback) {
+  return fs.existsSync(filePath)
+    ? JSON.parse(fs.readFileSync(filePath, "utf8"))
+    : fallback;
+}
+
+function writeJson(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\\n", "utf8");
+}
+
+rl.on("line", async (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(logPath, JSON.stringify(message) + "\\n", "utf8");
+  if (message.method === "initialize") {
+    write({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2024-11-05" } });
+    return;
+  }
+  if (message.method === "externalAgentConfig/import") {
+    const session = (message.params?.migrationItems || [])
+      .flatMap((item) => Array.isArray(item.details?.sessions) ? item.details.sessions : [])[0];
+    if (!session) {
+      write({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "missing session" } });
+      return;
+    }
+    const sourcePath = fs.realpathSync(session.path);
+    const contents = fs.readFileSync(sourcePath, "utf8");
+    const contentSha256 = crypto.createHash("sha256").update(contents).digest("hex");
+    const ledgerPath = path.join(codexHome, "external_agent_session_imports.json");
+    const ledger = readJson(ledgerPath, { records: [] });
+    const importedThreadId = options.threadId || "thr_1";
+    const responseMessage = {
+      jsonrpc: "2.0",
+      id: message.id,
+      result: options.resultThreadId ? { threadId: importedThreadId } : {},
+    };
+    if (options.responseBeforeLedger) {
+      write(responseMessage);
+    }
+    if (options.delayLedgerMs) {
+      await sleep(options.delayLedgerMs);
+    }
+    if (!options.skipLedger) {
+      ledger.records.push({
+        source_path: sourcePath,
+        content_sha256: contentSha256,
+        imported_thread_id: importedThreadId,
+        imported_at: options.importedAt || "2026-07-02T00:00:00.000Z",
+        source_modified_at: null,
+      });
+      writeJson(ledgerPath, ledger);
+    }
+    if (options.appendAfterLedger) {
+      fs.appendFileSync(sourcePath, JSON.stringify({ type: "user", message: { content: "later" } }) + "\\n", "utf8");
+    }
+    writeJson(statePath, {
+      sourcePath,
+      cwd: session.cwd,
+      threadId: importedThreadId,
+      messages: contents.split(/\\r?\\n/).filter(Boolean).map((entry) => JSON.parse(entry)),
+    });
+    const notificationParams = options.notificationThreadId
+      ? { threadId: options.notificationThreadId }
+      : {};
+    if (options.notifyBeforeResponse && !options.skipNotification) {
+      write({ jsonrpc: "2.0", method: "externalAgentConfig/import/completed", params: notificationParams });
+    }
+    if (!options.responseBeforeLedger) {
+      write(responseMessage);
+    }
+    if (!options.notifyBeforeResponse && !options.skipNotification) {
+      write({ jsonrpc: "2.0", method: "externalAgentConfig/import/completed", params: notificationParams });
+    }
+    if (options.exitAfterResponse) {
+      process.exit(0);
+    }
+    return;
+  }
+  write({
+    jsonrpc: "2.0",
+    id: message.id,
+    error: { code: -32601, message: "method not found" },
+  });
+});
+`,
+    "utf8"
+  );
+  return { serverPath, statePath, logPath };
+}
+
 function readJsonLines(filePath) {
   return fs
     .readFileSync(filePath, "utf8")
@@ -225,6 +385,16 @@ function readJsonLines(filePath) {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
+}
+
+function optionValues(args, flag) {
+  const values = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === flag) {
+      values.push(args[index + 1]);
+    }
+  }
+  return values;
 }
 
 function cleanupTestEnvironment(testEnv) {
@@ -732,6 +902,357 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("transfer delegates the current Claude transcript to Codex native import", () => {
+    const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexImportAppServer(testEnv);
+
+    try {
+      const codexHome = path.join(testEnv.homeDir, ".codex");
+      const projectDir = path.join(testEnv.homeDir, ".claude", "projects", "-workspace");
+      const sourcePath = path.join(projectDir, "sess-native-transfer.jsonl");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        sourcePath,
+        [
+          { type: "custom-title", customTitle: "Native transfer" },
+          { type: "user", cwd: testEnv.workspaceDir, message: { role: "user", content: "Initial request" } },
+          { type: "assistant", cwd: testEnv.workspaceDir, message: { role: "assistant", content: "Initial answer" } },
+          { type: "user", cwd: testEnv.workspaceDir, message: { role: "user", content: "$cc:transfer" } },
+        ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        ["transfer", "--cwd", testEnv.workspaceDir, "--json"],
+        {
+          env: {
+            ...testEnv.env,
+            CODEX_HOME: codexHome,
+            CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([
+              fakeCodex.serverPath,
+              codexHome,
+              fakeCodex.statePath,
+              fakeCodex.logPath,
+            ]),
+          },
+        }
+      );
+
+      const canonicalSourcePath = fs.realpathSync(sourcePath);
+      assert.equal(payload.threadId, "thr_1");
+      assert.equal(payload.resumeCommand, "codex resume thr_1");
+      assert.equal(payload.sourcePath, canonicalSourcePath);
+      assert.equal(payload.sessionId, "sess-native-transfer");
+
+      const state = JSON.parse(fs.readFileSync(fakeCodex.statePath, "utf8"));
+      assert.equal(state.sourcePath, canonicalSourcePath);
+      assert.equal(state.cwd, testEnv.workspaceDir);
+      assert.deepEqual(
+        state.messages
+          .filter((entry) => entry.type === "user" || entry.type === "assistant")
+          .map((entry) => entry.message.content),
+        ["Initial request", "Initial answer", "$cc:transfer"]
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("transfer recovers the imported thread when the live Claude transcript changes after import", () => {
+    const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexImportAppServer(testEnv, {
+      appendAfterLedger: true,
+      notifyBeforeResponse: true,
+    });
+
+    try {
+      const codexHome = path.join(testEnv.homeDir, ".codex");
+      const projectDir = path.join(testEnv.homeDir, ".claude", "projects", "-workspace");
+      const sourcePath = path.join(projectDir, "sess-live-transfer.jsonl");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        sourcePath,
+        [
+          { type: "user", cwd: testEnv.workspaceDir, message: { role: "user", content: "Initial request" } },
+          { type: "assistant", cwd: testEnv.workspaceDir, message: { role: "assistant", content: "Initial answer" } },
+        ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        ["transfer", "--cwd", testEnv.workspaceDir, "--json", "--source", sourcePath],
+        {
+          env: {
+            ...testEnv.env,
+            CODEX_HOME: codexHome,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([
+              fakeCodex.serverPath,
+              codexHome,
+              fakeCodex.statePath,
+              fakeCodex.logPath,
+            ]),
+          },
+        }
+      );
+
+      assert.equal(payload.threadId, "thr_1");
+      assert.match(fs.readFileSync(sourcePath, "utf8"), /"later"/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("transfer uses a thread id returned by Codex before falling back to the import ledger", () => {
+    const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexImportAppServer(testEnv, {
+      skipLedger: true,
+      resultThreadId: true,
+      threadId: "thr_from_response",
+    });
+
+    try {
+      const codexHome = path.join(testEnv.homeDir, ".codex");
+      const projectDir = path.join(testEnv.homeDir, ".claude", "projects", "-workspace");
+      const sourcePath = path.join(projectDir, "sess-result-transfer.jsonl");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        sourcePath,
+        JSON.stringify({
+          type: "user",
+          cwd: testEnv.workspaceDir,
+          message: { role: "user", content: "Initial request" },
+        }) + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        ["transfer", "--cwd", testEnv.workspaceDir, "--json", "--source", sourcePath],
+        {
+          env: {
+            ...testEnv.env,
+            CODEX_HOME: codexHome,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([
+              fakeCodex.serverPath,
+              codexHome,
+              fakeCodex.statePath,
+              fakeCodex.logPath,
+            ]),
+          },
+        }
+      );
+
+      assert.equal(payload.threadId, "thr_from_response");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("transfer waits for the completion notification before reading a delayed import ledger", () => {
+    const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexImportAppServer(testEnv, {
+      responseBeforeLedger: true,
+      delayLedgerMs: 120,
+      threadId: "thr_delayed_ledger",
+    });
+
+    try {
+      const codexHome = path.join(testEnv.homeDir, ".codex");
+      const projectDir = path.join(testEnv.homeDir, ".claude", "projects", "-workspace");
+      const sourcePath = path.join(projectDir, "sess-delayed-ledger-transfer.jsonl");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        sourcePath,
+        JSON.stringify({
+          type: "user",
+          cwd: testEnv.workspaceDir,
+          message: { role: "user", content: "Initial request" },
+        }) + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        ["transfer", "--cwd", testEnv.workspaceDir, "--json", "--source", sourcePath],
+        {
+          env: {
+            ...testEnv.env,
+            CODEX_HOME: codexHome,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([
+              fakeCodex.serverPath,
+              codexHome,
+              fakeCodex.statePath,
+              fakeCodex.logPath,
+            ]),
+          },
+        }
+      );
+
+      assert.equal(payload.threadId, "thr_delayed_ledger");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("transfer uses the completion notification thread id when the ledger is not written yet", () => {
+    const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexImportAppServer(testEnv, {
+      skipLedger: true,
+      notificationThreadId: "thr_from_notification",
+    });
+
+    try {
+      const codexHome = path.join(testEnv.homeDir, ".codex");
+      const projectDir = path.join(testEnv.homeDir, ".claude", "projects", "-workspace");
+      const sourcePath = path.join(projectDir, "sess-notification-transfer.jsonl");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        sourcePath,
+        [
+          { type: "user", cwd: testEnv.workspaceDir, message: { role: "user", content: "Initial request" } },
+          { type: "assistant", cwd: testEnv.workspaceDir, message: { role: "assistant", content: "Initial answer" } },
+        ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        ["transfer", "--cwd", testEnv.workspaceDir, "--json", "--source", sourcePath],
+        {
+          env: {
+            ...testEnv.env,
+            CODEX_HOME: codexHome,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([
+              fakeCodex.serverPath,
+              codexHome,
+              fakeCodex.statePath,
+              fakeCodex.logPath,
+            ]),
+          },
+        }
+      );
+
+      assert.equal(payload.threadId, "thr_from_notification");
+      assert.equal(payload.resumeCommand, "codex resume thr_from_notification");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("transfer accepts a successful import response even when Codex omits the completion notification", () => {
+    const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexImportAppServer(testEnv, {
+      skipLedger: true,
+      resultThreadId: true,
+      skipNotification: true,
+      threadId: "thr_no_notification",
+    });
+
+    try {
+      const codexHome = path.join(testEnv.homeDir, ".codex");
+      const projectDir = path.join(testEnv.homeDir, ".claude", "projects", "-workspace");
+      const sourcePath = path.join(projectDir, "sess-no-notification-transfer.jsonl");
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        sourcePath,
+        JSON.stringify({
+          type: "user",
+          cwd: testEnv.workspaceDir,
+          message: { role: "user", content: "Initial request" },
+        }) + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        ["transfer", "--cwd", testEnv.workspaceDir, "--json", "--source", sourcePath],
+        {
+          env: {
+            ...testEnv.env,
+            CODEX_HOME: codexHome,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([
+              fakeCodex.serverPath,
+              codexHome,
+              fakeCodex.statePath,
+              fakeCodex.logPath,
+            ]),
+          },
+        }
+      );
+
+      assert.equal(payload.threadId, "thr_no_notification");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("transfer does not report a stale pre-existing ledger thread for changed content", () => {
+    const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexImportAppServer(testEnv, {
+      skipLedger: true,
+    });
+
+    try {
+      const codexHome = path.join(testEnv.homeDir, ".codex");
+      const projectDir = path.join(testEnv.homeDir, ".claude", "projects", "-workspace");
+      const sourcePath = path.join(projectDir, "sess-stale-transfer.jsonl");
+      fs.mkdirSync(projectDir, { recursive: true });
+      const oldContent = JSON.stringify({
+        type: "user",
+        cwd: testEnv.workspaceDir,
+        message: { role: "user", content: "Old request" },
+      }) + "\n";
+      fs.writeFileSync(sourcePath, oldContent, "utf8");
+      const canonicalSourcePath = fs.realpathSync(sourcePath);
+      fs.mkdirSync(codexHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(codexHome, "external_agent_session_imports.json"),
+        JSON.stringify({
+          records: [{
+            source_path: canonicalSourcePath,
+            content_sha256: createHash("sha256").update(oldContent).digest("hex"),
+            imported_thread_id: "thr_stale",
+            imported_at: "2026-07-01T00:00:00.000Z",
+          }],
+        }, null, 2) + "\n",
+        "utf8"
+      );
+      fs.appendFileSync(
+        sourcePath,
+        JSON.stringify({
+          type: "assistant",
+          cwd: testEnv.workspaceDir,
+          message: { role: "assistant", content: "New answer" },
+        }) + "\n",
+        "utf8"
+      );
+
+      const result = runCompanionExpectFailure(
+        ["transfer", "--cwd", testEnv.workspaceDir, "--json", "--source", sourcePath],
+        {
+          env: {
+            ...testEnv.env,
+            CODEX_HOME: codexHome,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([
+              fakeCodex.serverPath,
+              codexHome,
+              fakeCodex.statePath,
+              fakeCodex.logPath,
+            ]),
+          },
+        }
+      );
+
+      assert.match(result.stderr, /did not record an imported thread/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("forwards task model, effort, prompt-file, and write mode to Claude", () => {
     const testEnv = createTestEnvironment();
 
@@ -774,6 +1295,258 @@ describe("claude-companion integration", () => {
       assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
       assert.ok(!args.includes("--allowedTools"));
       assert.ok(!args.includes("--prompt-file"));
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reports task model fallbacks in JSON payloads", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const payload = runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "model-fallback delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(payload.status, "completed");
+      assert.equal(payload.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.finalModel, "claude-sonnet-5");
+      assert.equal(payload.modelFallbacks.length, 1);
+      assert.equal(payload.modelFallbacks[0].fromModel, "claude-opus-4-8");
+      assert.equal(payload.modelFallbacks[0].toModel, "claude-sonnet-5");
+      assert.equal(payload.modelFallbacks[0].reason, "capacity");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reports terminal-only task model fallbacks in JSON payloads", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const payload = runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "terminal-model-fallback delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(payload.status, "completed");
+      assert.equal(payload.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.finalModel, "claude-sonnet-5");
+      assert.equal(payload.modelFallbacks.length, 1);
+      assert.equal(payload.modelFallbacks[0].fromModel, "claude-opus-4-8");
+      assert.equal(payload.modelFallbacks[0].toModel, "claude-sonnet-5");
+      assert.equal(payload.modelFallbacks[0].source, "terminal_result");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not report model fallback when Fable terminal id omits the context suffix", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const payload = runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "--model",
+          "fable",
+          "delay=20",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_FAKE_TERMINAL_MODEL: "claude-fable-5",
+          },
+        }
+      );
+
+      assert.equal(payload.status, "completed");
+      assert.equal(payload.requestedModel, "claude-fable-5[1m]");
+      assert.equal(payload.finalModel, "claude-fable-5");
+      assert.deepEqual(payload.modelFallbacks, []);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not classify completed output that mentions rate limiting as a Claude limit failure", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonPayload = runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(jsonPayload.status, "completed");
+      assert.equal(jsonPayload.failure, null);
+      assert.match(jsonPayload.rawOutput, /completed:document rate limiting and 429 handling/);
+
+      const textResult = runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 0);
+      assert.match(textResult.stdout, /completed:document rate limiting and 429 handling/);
+      assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not classify unknown exit-zero output that mentions rate limiting as a Claude limit failure", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "malformed-line document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const jsonPayload = JSON.parse(jsonResult.stdout);
+
+      assert.equal(jsonPayload.status, "unknown");
+      assert.equal(jsonPayload.failure, null);
+      assert.match(jsonPayload.rawOutput, /completed:malformed-line document rate limiting and 429 handling/);
+
+      const textResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "malformed-line document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 1);
+      assert.match(textResult.stdout, /completed:malformed-line document rate limiting and 429 handling/);
+      assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not classify failed output that only mentions rate limiting in the final message", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "fail-after-result document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const jsonPayload = JSON.parse(jsonResult.stdout);
+
+      assert.equal(jsonPayload.status, "failed");
+      assert.equal(jsonPayload.failure, null);
+      assert.match(
+        jsonPayload.rawOutput,
+        /completed:fail-after-result document rate limiting and 429 handling/
+      );
+
+      const textResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "fail-after-result document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 1);
+      assert.match(
+        textResult.stdout,
+        /completed:fail-after-result document rate limiting and 429 handling/
+      );
+      assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("classifies Claude session limit failures without synthetic model fallback", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "session-limit delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const jsonPayload = JSON.parse(jsonResult.stdout);
+
+      assert.equal(jsonPayload.status, "failed");
+      assert.equal(jsonPayload.failure?.kind, "claude_rate_limit");
+      assert.match(jsonPayload.failure?.message ?? "", /session limit/i);
+      assert.equal(jsonPayload.failure?.resetText, "4:50pm (Europe/Moscow)");
+      assert.deepEqual(jsonPayload.modelFallbacks, []);
+
+      const textResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "session-limit delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 1);
+      assert.match(textResult.stdout, /Claude usage limit reached/i);
+      assert.match(textResult.stdout, /Retry after 4:50pm \(Europe\/Moscow\)/);
+      assert.doesNotMatch(textResult.stdout, /Model fallback/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -881,11 +1654,44 @@ describe("claude-companion integration", () => {
         reviewInvocation.args[reviewInvocation.args.indexOf("--model") + 1],
         "claude-haiku-4-5"
       );
+      assert.ok(reviewInvocation.args.includes("--strict-mcp-config"));
+      assert.ok(reviewInvocation.args.includes("--mcp-config"));
+      assert.ok(
+        optionValues(reviewInvocation.args, "--allowedTools")
+          .includes("mcp__gitReview__diff")
+      );
       assert.match(reviewInvocation.prompt, /working tree diff/i);
       assert.match(reviewResult.stdout, /Claude Code Review/);
 
-      const branchInvocationFile = path.join(testEnv.rootDir, "branch-review-invocation.json");
+      const fableInvocationFile = path.join(testEnv.rootDir, "fable-review-invocation.json");
       runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--model",
+          "fable",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: fableInvocationFile,
+          },
+        }
+      );
+
+      const fableInvocation = JSON.parse(
+        fs.readFileSync(fableInvocationFile, "utf8")
+      );
+      assert.equal(
+        fableInvocation.args[fableInvocation.args.indexOf("--model") + 1],
+        "claude-fable-5[1m]"
+      );
+
+      const branchInvocationFile = path.join(testEnv.rootDir, "branch-review-invocation.json");
+      const result = runCompanion(
         [
           "review",
           "--cwd",
@@ -905,6 +1711,493 @@ describe("claude-companion integration", () => {
         fs.readFileSync(branchInvocationFile, "utf8")
       );
       assert.match(branchInvocation.prompt, /branch diff against main/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reports review model fallbacks in JSON payloads", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+
+      const payload = runCompanionJson(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--json",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_FAKE_MODEL_FALLBACK: "1",
+          },
+        }
+      );
+
+      assert.equal(payload.codex.status, "completed");
+      assert.equal(payload.codex.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.codex.finalModel, "claude-sonnet-5");
+      assert.equal(payload.codex.modelFallbacks.length, 1);
+      assert.equal(payload.codex.modelFallbacks[0].fromModel, "claude-opus-4-8");
+      assert.equal(payload.codex.modelFallbacks[0].toModel, "claude-sonnet-5");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("allows explicit user MCP tools for review without opening every MCP tool", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            context7: { command: "node", args: ["context7-server.mjs"] },
+            serena: { url: "https://serena.example/mcp" },
+            grafana: { command: "node", args: ["grafana-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const invocationFile = path.join(testEnv.rootDir, "review-user-mcp.json");
+      const result = runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--user-mcp-tool",
+          "mcp__context7__resolve-library-id",
+          "--user-mcp-tool=mcp__serena__find__symbol",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+
+      assert.match(result.stderr, /--user-mcp-tool runs selected Claude MCP tools/);
+      const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
+      const allowedTools = optionValues(invocation.args, "--allowedTools");
+      assert.ok(invocation.args.includes("--mcp-config"));
+      assert.ok(invocation.args.includes("--strict-mcp-config"));
+      assert.ok(allowedTools.includes("mcp__gitReview__diff"));
+      assert.ok(allowedTools.includes("mcp__context7__resolve-library-id"));
+      assert.ok(allowedTools.includes("mcp__serena__find__symbol"));
+      assert.equal(
+        allowedTools.filter((tool) => tool.startsWith("mcp__context7__")).length,
+        1
+      );
+      assert.deepEqual(
+        Object.keys(invocation.mcpConfig.mcpServers).sort(),
+        ["context7", "gitReview", "serena"]
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("diagnoses selected and missing MCP tools without exposing server secrets", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            context7: {
+              command: "node",
+              args: ["context7-server.mjs"],
+              env: { CONTEXT7_TOKEN: "SECRET_TOKEN" },
+            },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            localdocs: { command: "node", args: ["localdocs-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        [
+          "mcp-diagnose",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--user-mcp-tool",
+          "mcp__context7__resolve-library-id",
+          "--user-mcp-tool",
+          "mcp__localdocs__search",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(payload.projectMcpServersEnabled, false);
+      assert.equal(payload.userConfigPath, path.join(testEnv.homeDir, ".claude.json"));
+      assert.equal(payload.projectConfigPath, null);
+      assert.equal(payload.ignoredProjectConfigPath, path.join(testEnv.workspaceDir, ".mcp.json"));
+      assert.deepEqual(payload.availableServers.map((server) => server.name), ["context7"]);
+      assert.deepEqual(payload.selectedServers, ["context7"]);
+      assert.ok(payload.allowedTools.includes("mcp__gitReview__diff"));
+      assert.ok(payload.allowedTools.includes("mcp__context7__resolve-library-id"));
+      assert.ok(!payload.allowedTools.includes("mcp__localdocs__search"));
+      assert.deepEqual(
+        payload.requestedTools.map((tool) => ({
+          tool: tool.tool,
+          serverName: tool.serverName,
+          found: tool.found,
+          selected: tool.selected,
+          source: tool.source,
+        })),
+        [
+          {
+            tool: "mcp__context7__resolve-library-id",
+            serverName: "context7",
+            found: true,
+            selected: true,
+            source: "user",
+          },
+          {
+            tool: "mcp__localdocs__search",
+            serverName: "localdocs",
+            found: false,
+            selected: false,
+            source: null,
+          },
+        ]
+      );
+      assert.match(payload.requestedTools[1].reason, /Project \.mcp\.json is ignored/);
+      assert.doesNotMatch(JSON.stringify(payload), /SECRET_TOKEN/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("diagnoses project MCP tools only when project MCP servers are enabled", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            localdocs: { command: "node", args: ["localdocs-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        [
+          "mcp-diagnose",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--allow-project-mcp-servers",
+          "--user-mcp-tool",
+          "mcp__localdocs__search",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(payload.projectMcpServersEnabled, true);
+      assert.equal(payload.projectConfigPath, path.join(testEnv.workspaceDir, ".mcp.json"));
+      assert.deepEqual(payload.availableServers, [
+        { name: "localdocs", source: "project" },
+      ]);
+      assert.deepEqual(payload.selectedServers, ["localdocs"]);
+      assert.deepEqual(payload.requestedTools, [
+        {
+          tool: "mcp__localdocs__search",
+          valid: true,
+          serverName: "localdocs",
+          toolName: "search",
+          found: true,
+          selected: true,
+          source: "project",
+          reason: null,
+        },
+      ]);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects explicit user MCP tools that only exist in project .mcp.json by default", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            localdocs: { command: "node", args: ["localdocs-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const invocationFile = path.join(testEnv.rootDir, "review-project-mcp.json");
+      const result = runCompanionExpectFailure(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--user-mcp-tool",
+          "mcp__localdocs__search__docs",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+
+      assert.match(result.stderr, /Project \.mcp\.json is ignored unless --allow-project-mcp-servers is set/);
+      assert.equal(fs.existsSync(invocationFile), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("loads explicit project MCP tools only when project MCP servers are enabled", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            localdocs: { command: "node", args: ["localdocs-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const invocationFile = path.join(testEnv.rootDir, "review-project-mcp-opt-in.json");
+      const result = runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--allow-project-mcp-servers",
+          "--user-mcp-tool",
+          "mcp__localdocs__search__docs",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+
+      assert.match(result.stderr, /--allow-project-mcp-servers also trusts MCP server definitions/);
+      const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
+      assert.ok(
+        optionValues(invocation.args, "--allowedTools")
+          .includes("mcp__localdocs__search__docs")
+      );
+      assert.deepEqual(Object.keys(invocation.mcpConfig.mcpServers).sort(), [
+        "gitReview",
+        "localdocs",
+      ]);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not let project .mcp.json shadow an explicit user MCP server", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            context7: { command: "node", args: ["trusted-context7-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            context7: { command: "sh", args: ["-c", "echo untrusted"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const invocationFile = path.join(testEnv.rootDir, "review-mcp-shadow.json");
+      runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--user-mcp-tool",
+          "mcp__context7__resolve-library-id",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+
+      const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
+      assert.deepEqual(invocation.mcpConfig.mcpServers.context7, {
+        command: "node",
+        args: ["trusted-context7-server.mjs"],
+      });
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("passes explicit user MCP tools through background review workers", async () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            context7: { command: "node", args: ["context7-server.mjs"] },
+          },
+        }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const invocationFile = path.join(testEnv.rootDir, "background-review-user-mcp.json");
+      const launchResult = await runCompanionAsync(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "--scope",
+          "working-tree",
+          "--user-mcp-tool",
+          "mcp__context7__resolve-library-id",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+      assert.match(launchResult.stderr, /--user-mcp-tool runs selected Claude MCP tools/);
+
+      const launch = JSON.parse(launchResult.stdout);
+      const result = await waitForTerminalResult(testEnv, launch.jobId, testEnv.env);
+      assert.equal(result.job.status, "completed");
+
+      const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
+      assert.ok(invocation.args.includes("--strict-mcp-config"));
+      assert.ok(
+        optionValues(invocation.args, "--allowedTools")
+          .includes("mcp__context7__resolve-library-id")
+      );
+      assert.deepEqual(Object.keys(invocation.mcpConfig.mcpServers).sort(), [
+        "context7",
+        "gitReview",
+      ]);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects invalid user MCP tool names", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+
+      const result = runCompanionExpectFailure(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--user-mcp-tool",
+          "context7.resolve-library-id",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stderr, /Invalid --user-mcp-tool value/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects user MCP tools whose server is not in the Claude user config", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude.json"),
+        JSON.stringify({ mcpServers: {} }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const result = runCompanionExpectFailure(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--user-mcp-tool",
+          "mcp__context7__resolve-library-id",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stderr, /Claude MCP server "context7" was not found/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -1547,6 +2840,192 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("emits foreground task progress unless --quiet-progress is set", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const result = runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "foreground-progress delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stdout, /completed:foreground-progress delay=20/);
+      assert.match(result.stderr, /Claude Code Task: /);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("lets foreground task observation time out without stopping the task", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-foreground-timeout",
+    };
+
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "--timeout-ms",
+          "1",
+          "--poll-interval-ms",
+          "1",
+          "foreground-timeout delay=500",
+        ],
+        { env: sessionEnv, timeoutMs: 10_000 }
+      );
+
+      assert.equal(result.status, 124);
+      const payload = JSON.parse(result.stdout);
+      assert.equal(payload.waitTimedOut, true);
+      assert.equal(payload.timeoutMs, 1);
+      assert.ok(payload.jobId);
+
+      const terminal = await waitForTerminalResult(
+        testEnv,
+        payload.jobId,
+        sessionEnv,
+        { timeoutMs: 6_000 }
+      );
+      assertCompletedTaskPayload(terminal, "foreground-timeout delay=500");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects invalid foreground task timeout values", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      for (const value of ["0", "-1", "not-a-number"]) {
+        const result = runCompanionExpectFailure(
+          [
+            "task",
+            "--cwd",
+            testEnv.workspaceDir,
+            "--timeout-ms",
+            value,
+            "invalid-timeout",
+          ],
+          { env: testEnv.env }
+        );
+        assert.match(result.stderr, /--timeout-ms must be a positive number of milliseconds/);
+      }
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("preserves cancelled job status in synthetic foreground task payloads", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-foreground-cancelled",
+    };
+    let observer = null;
+
+    try {
+      const reserved = runCompanionJson(
+        ["task-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+
+      observer = spawn(
+        process.execPath,
+        [
+          COMPANION_SCRIPT,
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--job-id",
+          reserved.jobId,
+          "--json",
+          "--quiet-progress",
+          "--timeout-ms",
+          "10000",
+          "--poll-interval-ms",
+          "25",
+          "foreground-cancelled delay=2500",
+        ],
+        {
+          cwd: PROJECT_ROOT,
+          env: sessionEnv,
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+
+      let stdout = "";
+      let stderr = "";
+      observer.stdout.setEncoding("utf8");
+      observer.stderr.setEncoding("utf8");
+      observer.stdout.on("data", (chunk) => {
+        stdout += chunk;
+      });
+      observer.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const closed = new Promise((resolve) => {
+        observer.on("close", (code, signal) => resolve({ code, signal }));
+      });
+
+      let runningJob = null;
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        runningJob = listStoredJobs(testEnv).find(
+          (job) =>
+            job.id === reserved.jobId &&
+            job.kind === "task" &&
+            job.summary === "foreground-cancelled delay=2500" &&
+            job.status === "running" &&
+            typeof job.pid === "number"
+        );
+        if (runningJob) {
+          break;
+        }
+        await sleep(25);
+      }
+      assert.ok(runningJob, "expected foreground task job to be persisted");
+
+      const cancel = runCompanionJson(
+        ["cancel", "--cwd", testEnv.workspaceDir, "--json", runningJob.id],
+        { env: sessionEnv }
+      );
+      assert.equal(cancel.status, "cancelled");
+
+      const exit = await closed;
+      observer = null;
+      assert.equal(exit.code, 1, stderr);
+
+      const payload = JSON.parse(stdout);
+      assert.equal(payload.status, "failed");
+
+      const storedJob = readStoredJobById(testEnv, reserved.jobId);
+      assert.equal(storedJob.status, "cancelled");
+      assert.match(storedJob.errorMessage, /Cancelled by user/);
+      if (payload.resultMissing === true) {
+        assert.equal(payload.jobStatus, "cancelled");
+        assert.match(payload.errorMessage, /Cancelled by user/);
+      }
+    } finally {
+      if (observer?.pid) {
+        try {
+          process.kill(observer.pid, "SIGKILL");
+        } catch {}
+      }
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("treats task runs with unknown Claude completion state as failed", async () => {
     const testEnv = createTestEnvironment();
     const sessionEnv = {
@@ -1680,6 +3159,154 @@ describe("claude-companion integration", () => {
         "explicit defer should keep the result unread even when companion ran in foreground"
       );
     } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("keeps a foreground task running when the observing companion process dies", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-foreground-observer-killed",
+    };
+    let observer = null;
+
+    try {
+      observer = spawn(
+        process.execPath,
+        [
+          COMPANION_SCRIPT,
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "observer-survival delay=900",
+        ],
+        {
+          cwd: PROJECT_ROOT,
+          env: sessionEnv,
+          detached: true,
+          stdio: "ignore",
+        }
+      );
+      observer.unref();
+
+      let runningJob = null;
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        runningJob = listStoredJobs(testEnv).find(
+          (job) =>
+            job.kind === "task" &&
+            job.summary === "observer-survival delay=900" &&
+            job.status === "running" &&
+            typeof job.pid === "number"
+        );
+        if (runningJob) {
+          break;
+        }
+        await sleep(25);
+      }
+      assert.ok(runningJob, "expected the foreground task to enter running state");
+
+      process.kill(-observer.pid, "SIGKILL");
+      observer = null;
+
+      const statusPayload = await waitForTerminalStatus(
+        testEnv,
+        runningJob.id,
+        sessionEnv,
+        { timeoutMs: 6_000 }
+      );
+      assert.equal(statusPayload.job.status, "completed");
+
+      const storedJob = readStoredJobById(testEnv, runningJob.id);
+      assert.equal(storedJob.status, "completed");
+      assert.match(storedJob.rendered, /completed:observer-survival delay=900/);
+    } finally {
+      if (observer?.pid) {
+        try {
+          process.kill(-observer.pid, "SIGKILL");
+        } catch {
+          // Process may have already exited.
+        }
+      }
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("prints a continuation hint when a foreground task observer receives SIGTERM", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-foreground-observer-signal",
+    };
+    let observer = null;
+    let stderr = "";
+
+    try {
+      observer = spawn(
+        process.execPath,
+        [
+          COMPANION_SCRIPT,
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "observer-sigterm delay=900",
+        ],
+        {
+          cwd: PROJECT_ROOT,
+          env: sessionEnv,
+          stdio: ["ignore", "ignore", "pipe"],
+        }
+      );
+      observer.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const closed = new Promise((resolve) => {
+        observer.on("close", (code, signal) => resolve({ code, signal }));
+      });
+
+      let runningJob = null;
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        runningJob = listStoredJobs(testEnv).find(
+          (job) =>
+            job.kind === "task" &&
+            job.summary === "observer-sigterm delay=900" &&
+            job.status === "running" &&
+            typeof job.pid === "number"
+        );
+        if (runningJob) {
+          break;
+        }
+        await sleep(25);
+      }
+      assert.ok(runningJob, "expected the foreground task to enter running state");
+
+      process.kill(observer.pid, "SIGTERM");
+      observer = null;
+      const exit = await closed;
+
+      assert.equal(exit.code, 143);
+      assert.match(stderr, new RegExp(`continues as ${runningJob.id} after SIGTERM`));
+      assert.match(stderr, new RegExp(`\\$cc:cancel ${runningJob.id}`));
+
+      const result = await waitForTerminalResult(
+        testEnv,
+        runningJob.id,
+        sessionEnv,
+        { timeoutMs: 6_000 }
+      );
+      assert.equal(result.job.status, "completed");
+    } finally {
+      if (observer?.pid) {
+        try {
+          process.kill(observer.pid, "SIGKILL");
+        } catch {
+          // Process may have already exited.
+        }
+      }
       cleanupTestEnvironment(testEnv);
     }
   });

@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased]
+
+## v1.3.0
+
+### Added
+
+- Add `$cc:transfer` to import the current Claude transcript into a resumable Codex thread.
+- Add explicit `--user-mcp-tool` opt-in for review and adversarial-review runs, with project `.mcp.json` servers gated behind `--allow-project-mcp-servers`.
+- Add `$cc:mcp-diagnose` to explain which Claude MCP servers and requested tools the plugin can see for review commands without exposing raw server configs or secrets.
+- Add the `fable` Claude model alias for review, adversarial-review, and rescue/task commands, resolving to `claude-fable-5[1m]` without adding a hidden effort default.
+
+### Changed
+
+- Track Claude model fallback events in task and review results, including terminal-only model changes.
+- Harden foreground task observation, cancellation races, long/untracked review context handling, and Codex app-server waits.
+- Update the built-in Claude model aliases to `claude-opus-4-8` and `claude-sonnet-5`.
+
+### Fixed
+
+- Classify Claude usage-limit failures separately from generic Claude failures without creating synthetic model fallback history.
+- Preserve detached background worker stdout/stderr in job logs so auto-reaped review/task failures keep useful diagnostics.
+- Keep successful Claude runs intact when their final output mentions rate limiting or `429` handling.
+- Avoid usage-limit summaries for failed turns whose model output only discusses `429`, rate-limit handling, or quoted limit prose without Claude's terminal limit signal.
+- Scope usage-limit reset extraction to canonical Claude limit lines so unrelated `reset` prose or fixture epoch fragments do not leak into user-facing summaries.
+- Avoid usage-limit summaries for exit-zero `unknown` turns that produced a terminal result plus parse-error noise.
+- Stop synthesizing model fallback warnings when a terminal model id only omits the Claude CLI `[1m]` context suffix.
+
 ## v1.2.1
 
 - Switch marketplace installs to Codex native plugin hooks: bundled hooks now load from `hooks/hooks.json` in the active plugin cache with `$PLUGIN_ROOT` instead of writing managed global hook commands into `~/.codex/hooks.json`.

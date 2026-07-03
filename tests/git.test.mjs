@@ -103,6 +103,105 @@ describe("collectReviewContext", () => {
     assert.match(context.content, /tracked-link[\s\S]*skipped: symlink/);
   });
 
+  it("bounds aggregate untracked file context for large dirty trees", () => {
+    const repo = createRepo();
+    const body = "x".repeat(6 * 1024);
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "tracked\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "tracked"]);
+
+    for (let index = 0; index < 220; index += 1) {
+      fs.writeFileSync(
+        path.join(repo, `untracked-${String(index).padStart(3, "0")}.txt`),
+        body,
+        "utf8"
+      );
+    }
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.ok(Buffer.byteLength(context.content, "utf8") < 128 * 1024);
+    assert.match(context.content, /Omitted untracked files/);
+    assert.match(context.content, /git ls-files --others --exclude-standard/);
+  });
+
+  it("continues inlining small untracked files after skipping a large untracked file", () => {
+    const repo = createRepo();
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "tracked\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "tracked"]);
+
+    fs.writeFileSync(path.join(repo, "aaa-large.txt"), "x".repeat(30 * 1024), "utf8");
+    fs.writeFileSync(
+      path.join(repo, "zzz-small.js"),
+      "export const reviewed = true;\n",
+      "utf8"
+    );
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.match(context.content, /### zzz-small\.js[\s\S]*export const reviewed = true;/);
+    assert.match(context.content, /aaa-large\.txt/);
+    assert.match(context.content, /skipped: 30720 bytes exceeds 24576 byte limit/);
+  });
+
+  it("inlines a single medium-sized untracked file up to the per-file cap", () => {
+    const repo = createRepo();
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "tracked\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "tracked"]);
+
+    fs.writeFileSync(
+      path.join(repo, "new-module.js"),
+      `export const body = "${"x".repeat(18 * 1024)}";\n`,
+      "utf8"
+    );
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.match(context.content, /### new-module\.js/);
+    assert.match(context.content, /export const body =/);
+    assert.doesNotMatch(context.content, /Omitted untracked files/);
+  });
+
+  it("inlines a single untracked file exactly at the per-file cap despite markdown overhead", () => {
+    const repo = createRepo();
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "tracked\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "tracked"]);
+
+    fs.writeFileSync(
+      path.join(repo, "boundary.js"),
+      "x".repeat(24 * 1024),
+      "utf8"
+    );
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.match(context.content, /### boundary\.js/);
+    assert.doesNotMatch(context.content, /Omitted untracked files/);
+  });
+
   it("omits very large working-tree diffs and tells the reviewer to inspect git directly", () => {
     const repo = createRepo();
     const largeText = `${"x".repeat(200)}\n`.repeat(500);
