@@ -27,6 +27,13 @@ export const SANDBOX_TEMP_DIR = normalizePathSlashes(path.resolve(os.tmpdir()));
 
 const MODEL_FALLBACK_RE = /\bmodel[_ -]?(?:fallback|switch|switched|downgrade|downgraded)\b/i;
 const SYNTHETIC_MODEL_IDS = new Set(["<synthetic>"]);
+const MODEL_FIELD_NAMES = [
+  "model",
+  "actual_model",
+  "actualModel",
+  "selected_model",
+  "selectedModel",
+];
 
 function pushBoundedTail(list, value, maxEntries) {
   list.push(value);
@@ -132,9 +139,28 @@ function firstModelUsageKey(value) {
   return keys.length === 1 ? keys[0] : null;
 }
 
+function collectModelUsageSources(value) {
+  return collectEventModelSources(value)
+    .map((source) => source.modelUsage)
+    .filter((modelUsage) => modelUsage && typeof modelUsage === "object" && !Array.isArray(modelUsage));
+}
+
 function isSyntheticModelId(model) {
   const normalized = typeof model === "string" ? model.trim() : "";
   return Boolean(normalized && SYNTHETIC_MODEL_IDS.has(normalized.toLowerCase()));
+}
+
+function hasSyntheticModelSignal(value) {
+  for (const source of collectEventModelSources(value)) {
+    for (const name of MODEL_FIELD_NAMES) {
+      if (isSyntheticModelId(source[name])) {
+        return true;
+      }
+    }
+  }
+  return collectModelUsageSources(value).some((modelUsage) =>
+    Object.keys(modelUsage).some((key) => isSyntheticModelId(key))
+  );
 }
 
 function normalizeObservedModel(model) {
@@ -147,13 +173,8 @@ function normalizeObservedModel(model) {
 
 function extractRawObservedModel(value) {
   return (
-    firstStringFieldFromSources(collectEventModelSources(value), [
-      "model",
-      "actual_model",
-      "actualModel",
-      "selected_model",
-      "selectedModel",
-    ]) ?? firstModelUsageKey(value)
+    firstStringFieldFromSources(collectEventModelSources(value), MODEL_FIELD_NAMES) ??
+    firstModelUsageKey(value)
   );
 }
 
@@ -162,7 +183,17 @@ function extractObservedModel(value) {
 }
 
 function extractClaudeLimitResetText(text) {
-  const match = String(text ?? "").match(/\bresets(?:\s+at)?\s+([^\r\n.]+)/i);
+  const normalized = String(text ?? "");
+  const epochMatch = normalized.match(/\|\s*(\d{10,13})\b/);
+  if (epochMatch) {
+    const rawEpoch = epochMatch[1];
+    const epochMs = Number(rawEpoch.length === 13 ? rawEpoch : `${rawEpoch}000`);
+    const resetDate = new Date(epochMs);
+    if (Number.isFinite(epochMs) && !Number.isNaN(resetDate.getTime())) {
+      return resetDate.toISOString();
+    }
+  }
+  const match = normalized.match(/\bresets(?:\s+at)?\s+([^\r\n.]+)/i);
   return match?.[1]?.trim() ?? null;
 }
 
@@ -170,6 +201,20 @@ const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b.{0,120}\bresets(?:\s+at)?\b|\b(?:session|usage)\s+limit\s+reached\b/i;
 const CLAUDE_ERROR_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i;
+const CLAUDE_USAGE_LIMIT_EPOCH_RE =
+  /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|\d{10,13}\b/i;
+
+function extractClaudeLimitResetTextFromError(text) {
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    if (CLAUDE_ERROR_LIMIT_RE.test(line)) {
+      const resetText = extractClaudeLimitResetText(line);
+      if (resetText) {
+        return resetText;
+      }
+    }
+  }
+  return null;
+}
 
 export function classifyClaudeFailure(value = {}) {
   const finalMessage = typeof value.finalMessage === "string" ? value.finalMessage.trim() : "";
@@ -179,7 +224,7 @@ export function classifyClaudeFailure(value = {}) {
     return null;
   }
   const finalMessageLimit = Boolean(
-    value.finalMessageHasSyntheticModel &&
+    value.finalMessageHasLimitSignal &&
       finalMessage &&
       CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(finalMessage)
   );
@@ -188,13 +233,12 @@ export function classifyClaudeFailure(value = {}) {
     return null;
   }
   const limitSource = finalMessageLimit ? finalMessage : stderr;
-  const resetFallbackSource = finalMessageLimit ? stderr : "";
   return {
     kind: "claude_rate_limit",
     message,
     resetText:
       extractClaudeLimitResetText(limitSource) ??
-      extractClaudeLimitResetText(resetFallbackSource),
+      (finalMessageLimit ? extractClaudeLimitResetTextFromError(stderr) : null),
   };
 }
 
@@ -357,7 +401,7 @@ export class StreamParser {
       touchedFiles: [],
       modelEvents: [],
       finalModel: null,
-      terminalResultHasSyntheticModel: false,
+      hasTerminalLimitSignal: false,
     };
   }
 
@@ -387,6 +431,9 @@ export class StreamParser {
       if (event.session_id && !this.state.sessionId) {
         this.state.sessionId = event.session_id;
       }
+      if (hasSyntheticModelSignal(event)) {
+        this.state.hasTerminalLimitSignal = true;
+      }
       const modelEvent = compactModelEvent(event);
       if (modelEvent) {
         this.state.finalModel = modelEvent.toModel ?? this.state.finalModel;
@@ -414,9 +461,6 @@ export class StreamParser {
           this.state.receivedTerminalEvent = true;
           {
             const terminalModel = extractRawObservedModel(event);
-            if (isSyntheticModelId(terminalModel)) {
-              this.state.terminalResultHasSyntheticModel = true;
-            }
             this.state.finalModel = normalizeObservedModel(terminalModel) ?? this.state.finalModel;
           }
           if (event.result) {
@@ -424,6 +468,9 @@ export class StreamParser {
               this.state.finalMessage,
               event.result
             );
+            if (CLAUDE_USAGE_LIMIT_EPOCH_RE.test(event.result)) {
+              this.state.hasTerminalLimitSignal = true;
+            }
           }
           if (Object.prototype.hasOwnProperty.call(event, "structured_output")) {
             this.state.structuredOutput = event.structured_output ?? null;
@@ -1024,7 +1071,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         validation.status === "failed"
           ? classifyClaudeFailure({
               finalMessage: parser.state.finalMessage,
-              finalMessageHasSyntheticModel: parser.state.terminalResultHasSyntheticModel,
+              finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
               stderr,
             })
           : null;

@@ -86,7 +86,39 @@ describe("StreamParser", () => {
     parser.feed(resultEvent + "\n");
 
     assert.equal(parser.state.finalModel, null);
-    assert.equal(parser.state.terminalResultHasSyntheticModel, true);
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+  });
+
+  it("detects Claude synthetic model ids in multi-model usage payloads", () => {
+    const parser = new StreamParser();
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "Claude AI usage limit reached|1751554800",
+      modelUsage: {
+        "claude-opus-4-8": { input_tokens: 10 },
+        "<synthetic>": { input_tokens: 0 },
+      },
+      session_id: "sess-limit",
+    });
+
+    parser.feed(resultEvent + "\n");
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+  });
+
+  it("detects Claude synthetic model ids on assistant events", () => {
+    const parser = new StreamParser();
+    const assistantEvent = JSON.stringify({
+      type: "assistant",
+      message: { model: "<synthetic>" },
+      session_id: "sess-limit",
+    });
+
+    parser.feed(assistantEvent + "\n");
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
   });
 
   it("does not overwrite accumulated deltas with a shorter terminal suffix", () => {
@@ -601,7 +633,7 @@ describe("classifyClaudeFailure", () => {
   it("classifies strong Claude limit messages from final output", () => {
     const failure = classifyClaudeFailure({
       finalMessage: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
-      finalMessageHasSyntheticModel: true,
+      finalMessageHasLimitSignal: true,
     });
 
     assert.equal(failure.kind, "claude_rate_limit");
@@ -629,23 +661,34 @@ describe("classifyClaudeFailure", () => {
   it("classifies usage-limit-reached final output when Claude marks it synthetic", () => {
     const failure = classifyClaudeFailure({
       finalMessage: "Claude AI usage limit reached|1751554800",
-      finalMessageHasSyntheticModel: true,
+      finalMessageHasLimitSignal: true,
     });
 
     assert.equal(failure.kind, "claude_rate_limit");
     assert.match(failure.message, /usage limit reached/);
-    assert.equal(failure.resetText, null);
+    assert.equal(failure.resetText, "2025-07-03T15:00:00.000Z");
   });
 
   it("extracts reset text from stderr when final output has the limit signal", () => {
     const failure = classifyClaudeFailure({
-      finalMessage: "Claude AI usage limit reached|1751554800",
-      finalMessageHasSyntheticModel: true,
-      stderr: "resets at 4:50pm (Europe/Moscow).",
+      finalMessage: "Claude AI usage limit reached",
+      finalMessageHasLimitSignal: true,
+      stderr: "APIErrorStatus: 429; resets at 4:50pm (Europe/Moscow).",
     });
 
     assert.equal(failure.kind, "claude_rate_limit");
     assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("does not extract unrelated reset prose from stderr", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached",
+      finalMessageHasLimitSignal: true,
+      stderr: "watchdog resets the connection after 30 seconds",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, null);
   });
 
   it("classifies loose limit markers from stderr", () => {
