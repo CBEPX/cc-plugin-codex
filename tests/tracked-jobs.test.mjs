@@ -17,6 +17,7 @@ import {
   appendLogLine,
   appendLogBlock,
   createJobLogFile,
+  createWorkerLogStdio,
   createJobProgressUpdater,
   createJobRecord,
   runTrackedJob,
@@ -169,6 +170,31 @@ describe("appendLogBlock", () => {
     const content = fs.readFileSync(logFile, "utf8");
     assert.ok(Buffer.byteLength(content, "utf8") <= MAX_JOB_LOG_BYTES);
     assert.ok(content.includes("latest-body"));
+  });
+});
+
+describe("createWorkerLogStdio", () => {
+  it("appends detached worker stdout and stderr to the job log", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-log-"));
+    const logFile = path.join(tmpDir, "worker.log");
+    fs.writeFileSync(logFile, "", "utf8");
+
+    const workerLog = createWorkerLogStdio(logFile);
+    try {
+      const result = spawnSync(
+        process.execPath,
+        ["-e", "process.stdout.write('worker out\\n'); process.stderr.write('worker err\\n')"],
+        { stdio: workerLog.stdio }
+      );
+      assert.equal(result.status, 0);
+    } finally {
+      workerLog.close();
+    }
+
+    const content = fs.readFileSync(logFile, "utf8");
+    assert.match(content, /worker out/);
+    assert.match(content, /worker err/);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });
 

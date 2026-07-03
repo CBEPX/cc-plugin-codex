@@ -222,6 +222,23 @@ export function createJobLogFile(workspaceRoot, jobId, title) {
   return logFile;
 }
 
+/**
+ * @param {string | null} logFile
+ * @returns {{ stdio: import("node:child_process").StdioOptions, close: () => void }}
+ */
+export function createWorkerLogStdio(logFile) {
+  if (!logFile) {
+    return { stdio: ["ignore", "ignore", "ignore"], close() {} };
+  }
+  const fd = fs.openSync(logFile, "a");
+  return {
+    stdio: ["ignore", fd, fd],
+    close() {
+      try { fs.closeSync(fd); } catch {}
+    },
+  };
+}
+
 export function createJobRecord(base, options = {}) {
   const env = options.env ?? process.env;
   const sessionId =

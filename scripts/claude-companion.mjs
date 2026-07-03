@@ -104,6 +104,7 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  createWorkerLogStdio,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
@@ -1464,19 +1465,25 @@ function buildReviewRequest({
   };
 }
 
-function spawnDetachedReviewWorker(cwd, jobId, workspaceRoot) {
+function spawnDetachedReviewWorker(cwd, jobId, workspaceRoot, logFile = null) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "review-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
+  const workerLog = createWorkerLogStdio(logFile);
+  let child;
+  try {
+    child = spawn(
+      process.execPath,
+      [scriptPath, "review-worker", "--cwd", cwd, "--job-id", jobId],
+      {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: workerLog.stdio,
+        windowsHide: true
+      }
+    );
+  } finally {
+    workerLog.close();
+  }
   child.on("error", (error) => {
     try {
       transitionJob(workspaceRoot, jobId, ["queued"], "failed", {
@@ -1506,7 +1513,7 @@ function enqueueBackgroundReview(cwd, job, request) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedReviewWorker(cwd, job.id, job.workspaceRoot);
+  const child = spawnDetachedReviewWorker(cwd, job.id, job.workspaceRoot, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {
@@ -1711,19 +1718,25 @@ async function runForegroundCommand(job, runner, options = {}) {
 // Background task spawning
 // ---------------------------------------------------------------------------
 
-function spawnDetachedTaskWorker(cwd, jobId, workspaceRoot) {
+function spawnDetachedTaskWorker(cwd, jobId, workspaceRoot, logFile = null) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
+  const workerLog = createWorkerLogStdio(logFile);
+  let child;
+  try {
+    child = spawn(
+      process.execPath,
+      [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId],
+      {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: workerLog.stdio,
+        windowsHide: true
+      }
+    );
+  } finally {
+    workerLog.close();
+  }
   child.on("error", (error) => {
     try {
       transitionJob(workspaceRoot, jobId, ["queued"], "failed", {
@@ -1759,7 +1772,7 @@ function enqueueDetachedTask(cwd, job, request, options = {}) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedTaskWorker(cwd, job.id, job.workspaceRoot);
+  const child = spawnDetachedTaskWorker(cwd, job.id, job.workspaceRoot, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {
