@@ -18,7 +18,7 @@
   <a href="#background-jobs"><strong>Background Jobs</strong></a> ·
   <a href="#review-gate"><strong>Review Gate</strong></a> ·
   <a href="#how-this-differs-from-upstream"><strong>vs Upstream</strong></a> ·
-  <a href="https://github.com/sendbird/cc-plugin-codex/issues"><strong>Issues</strong></a>
+  <a href="https://github.com/CBEPX/cc-plugin-codex/issues"><strong>Issues</strong></a>
 </p>
 
 ---
@@ -46,7 +46,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.3.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.3.2
 codex plugin add cc@cbepx
 ```
 
@@ -59,8 +59,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.3.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.3.1/cc-plugin-codex-1.3.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.3.2 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.3.2/cc-plugin-codex-1.3.2.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -326,7 +326,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.3.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.3.2
 codex plugin add cc@cbepx
 ```
 
@@ -338,22 +338,17 @@ $cc:setup
 
 Marketplace/plugin install places the plugin under Codex's plugin cache. `$cc:setup` verifies Claude Code, confirms `[features].hooks = true` plus `[features].plugin_hooks = true`, and trusts the current `hooks/hooks.json` hook hashes from the active plugin cache.
 
-### Sendbird marketplace (upstream)
+### Upstream Sendbird build
 
-```bash
-codex plugin marketplace add sendbird/codex-marketplace
-codex plugin add cc@sendbird
-```
-
-Then run `$cc:setup`.
+This fork does not install from the upstream Sendbird marketplace. Use the CBEPX marketplace commands above when you want this fork.
 
 ### npx helper
 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.3.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.3.1/cc-plugin-codex-1.3.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.3.2 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.3.2/cc-plugin-codex-1.3.2.tgz install
 ```
 
 After install, run:
@@ -366,10 +361,10 @@ The helper adds the configured marketplace, installs `cc` through Codex app-serv
 
 ### Shell script (POSIX-only)
 
-Use this only for the upstream Sendbird build:
+Install the fork from the current `CBEPX/cc-plugin-codex` `main` branch:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/sendbird/cc-plugin-codex/main/scripts/install.sh" | bash
+curl -fsSL "https://raw.githubusercontent.com/CBEPX/cc-plugin-codex/main/scripts/install.sh" | bash
 ```
 
 After install, run:
@@ -380,16 +375,17 @@ $cc:setup
 
 ### Update
 
-Re-run the marketplace update/install flow or the `npx` helper — both are idempotent.
+Re-run the fork marketplace install flow, pinned to the release you want:
 
 ```bash
-npx cc-plugin-codex update
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.3.2
+codex plugin add cc@cbepx
 ```
 
 ### Uninstall
 
 ```bash
-npx cc-plugin-codex uninstall
+codex plugin remove cc@cbepx
 ```
 
 ## Troubleshooting

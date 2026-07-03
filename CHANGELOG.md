@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v1.3.2
+
+### Fixed
+
+- Replace stale upstream install, issue tracker, package metadata, installer defaults, and rendered asset links with CBEPX fork targets.
+
 ## v1.3.1
 
 ### Fixed

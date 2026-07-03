@@ -96,6 +96,6 @@
   </g>
 
   <!-- Bottom branding -->
-  <text x="60" y="615" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="14" fill="#444460">Sendbird</text>
-  <text x="1220" y="615" text-anchor="end" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="14" fill="#444460">github.com/sendbird/cc-plugin-codex</text>
+  <text x="60" y="615" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="14" fill="#444460">CBEPX fork</text>
+  <text x="1220" y="615" text-anchor="end" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="14" fill="#444460">github.com/CBEPX/cc-plugin-codex</text>
 </svg>

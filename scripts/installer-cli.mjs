@@ -31,8 +31,8 @@ const HOME_DIR = os.homedir();
 const CODEX_CONFIG_FILE = path.join(CODEX_HOME, "config.toml");
 const LEGACY_INSTALL_DIR = path.join(CODEX_HOME, "plugins", PLUGIN_NAME);
 const PERSONAL_MARKETPLACE_FILE = path.join(HOME_DIR, ".agents", "plugins", "marketplace.json");
-const DEFAULT_MARKETPLACE_NAME = "sendbird";
-const DEFAULT_MARKETPLACE_SOURCE = "sendbird/codex-marketplace";
+const DEFAULT_MARKETPLACE_NAME = "cbepx";
+const DEFAULT_MARKETPLACE_SOURCE = "CBEPX/cc-plugin-codex";
 
 function usage() {
   console.error("Usage: cc-plugin-codex <install|update|uninstall>");

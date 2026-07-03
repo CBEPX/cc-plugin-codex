@@ -241,8 +241,8 @@
 
   <!-- ============ FOOTER ============ -->
   <text x="64" y="870" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="15" fill="#555570">Built by</text>
-  <text x="132" y="870" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="15" font-weight="600" fill="#8888AA">Sendbird</text>
+  <text x="132" y="870" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="15" font-weight="600" fill="#8888AA">CBEPX fork</text>
   <text x="220" y="870" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="15" fill="#333348">|</text>
-  <text x="240" y="870" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="15" fill="#555570">github.com/sendbird/cc-plugin-codex</text>
+  <text x="240" y="870" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="15" fill="#555570">github.com/CBEPX/cc-plugin-codex</text>
   <text x="1376" y="870" text-anchor="end" font-family="Inter, SF Pro Display, -apple-system, system-ui, sans-serif" font-size="15" fill="#555570">Apache-2.0</text>
 </svg>

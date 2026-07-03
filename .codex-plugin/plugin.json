@@ -1,14 +1,13 @@
 {
   "name": "cc",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Claude Code Plugin for Codex. Delegate code reviews, investigations, tracked tasks, and transcript transfers from inside Codex.",
   "author": {
-    "name": "Sendbird, Inc.",
-    "email": "jin.ku@sendbird.com",
-    "url": "https://sendbird.com/"
+    "name": "CBEPX",
+    "url": "https://github.com/CBEPX"
   },
-  "homepage": "https://github.com/sendbird/cc-plugin-codex",
-  "repository": "https://github.com/sendbird/cc-plugin-codex",
+  "homepage": "https://github.com/CBEPX/cc-plugin-codex",
+  "repository": "https://github.com/CBEPX/cc-plugin-codex",
   "license": "Apache-2.0",
   "keywords": [
     "claude-code",
@@ -23,15 +22,13 @@
     "displayName": "Claude Code",
     "shortDescription": "Claude Code Plugin for Codex",
     "longDescription": "Use Claude Code from inside Codex to run read-only reviews, adversarial design reviews, tracked rescue tasks, and transcript transfers through a Claude-backed runtime with job status and result retrieval.",
-    "developerName": "Sendbird, Inc.",
+    "developerName": "CBEPX",
     "category": "Coding",
     "capabilities": [
       "Interactive",
       "Write"
     ],
-    "websiteURL": "https://sendbird.com/",
-    "privacyPolicyURL": "https://sendbird.com/privacy-notice",
-    "termsOfServiceURL": "https://sendbird.com/terms-of-service",
+    "websiteURL": "https://github.com/CBEPX/cc-plugin-codex",
     "defaultPrompt": [
       "Use Claude Code to review my current changes through $cc:review",
       "Use Claude Code to challenge this implementation through $cc:adversarial-review",

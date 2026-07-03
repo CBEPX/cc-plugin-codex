@@ -16,7 +16,7 @@ require_cmd curl
 require_cmd tar
 require_cmd node
 
-REPO_TARBALL_URL="${CC_PLUGIN_CODEX_TARBALL_URL:-https://github.com/sendbird/cc-plugin-codex/archive/refs/heads/main.tar.gz}"
+REPO_TARBALL_URL="${CC_PLUGIN_CODEX_TARBALL_URL:-https://github.com/CBEPX/cc-plugin-codex/archive/refs/heads/main.tar.gz}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
