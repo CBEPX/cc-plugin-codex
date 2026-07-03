@@ -121,6 +121,36 @@ describe("StreamParser", () => {
     assert.equal(parser.state.hasTerminalLimitSignal, false);
   });
 
+  it("treats assistant synthetic limit text as a terminal limit signal", () => {
+    const parser = new StreamParser();
+    const assistantEvent = JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        content: [
+          { type: "text", text: "You've hit your session limit · resets 4:50pm (Europe/Moscow)" },
+        ],
+      },
+      session_id: "sess-limit",
+    });
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      session_id: "sess-limit",
+    });
+
+    parser.feed(assistantEvent + "\n" + resultEvent + "\n");
+    const failure = classifyClaudeFailure({
+      finalMessage: parser.state.finalMessage,
+      finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
+    });
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
   it("does not overwrite accumulated deltas with a shorter terminal suffix", () => {
     const parser = new StreamParser();
     const delta = JSON.stringify({
@@ -698,6 +728,27 @@ describe("classifyClaudeFailure", () => {
 
     assert.equal(failure.kind, "claude_rate_limit");
     assert.equal(failure.resetText, null);
+  });
+
+  it("does not extract unrelated reset prose from same-line stderr-classified failures", () => {
+    const failure = classifyClaudeFailure({
+      stderr: "HTTP 429 from Claude API; watchdog resets the connection after 30 seconds",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, null);
+  });
+
+  it("uses reset prose that follows the terminal limit text in final output", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage:
+        "the watchdog resets the connection after 30 seconds. " +
+        "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
   });
 
   it("only extracts epochs from canonical usage-limit text", () => {

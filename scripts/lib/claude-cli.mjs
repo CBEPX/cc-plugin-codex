@@ -193,8 +193,7 @@ function extractClaudeLimitResetText(text) {
       return resetDate.toISOString();
     }
   }
-  const match = normalized.match(/\bresets(?:\s+at)?\s+([^\r\n.]+)/i);
-  return match?.[1]?.trim() ?? null;
+  return lastCapturedMatch(CLAUDE_LIMIT_RESET_TEXT_RE, normalized);
 }
 
 const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
@@ -203,11 +202,28 @@ const CLAUDE_ERROR_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
+const CLAUDE_LIMIT_RESET_TEXT_RE =
+  /(?:(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+[^\r\n.]*?limit|\b(?:session|usage)\s+limit(?:\s+reached)?\b)[^\r\n.]*?\bresets(?:\s+at)?\s+([^\r\n.]+)/gi;
+const CLAUDE_ERROR_RESET_TEXT_RE =
+  /(?:rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b)[^\r\n.]{0,120}?\bresets\s+at\s+([^\r\n.]+)/gi;
+
+function lastCapturedMatch(regex, text) {
+  regex.lastIndex = 0;
+  let last = null;
+  let match = regex.exec(text);
+  while (match) {
+    last = match[1]?.trim() || last;
+    match = regex.exec(text);
+  }
+  return last;
+}
 
 function extractClaudeLimitResetTextFromError(text) {
   for (const line of String(text ?? "").split(/\r?\n/)) {
     if (CLAUDE_ERROR_LIMIT_RE.test(line)) {
-      const resetText = extractClaudeLimitResetText(line);
+      const resetText =
+        extractClaudeLimitResetText(line) ??
+        lastCapturedMatch(CLAUDE_ERROR_RESET_TEXT_RE, line);
       if (resetText) {
         return resetText;
       }
@@ -241,6 +257,27 @@ export function classifyClaudeFailure(value = {}) {
     message,
     resetText,
   };
+}
+
+function collectStringValues(value, strings = []) {
+  if (typeof value === "string") {
+    strings.push(value);
+    return strings;
+  }
+  if (!value || typeof value !== "object") {
+    return strings;
+  }
+  const values = Array.isArray(value) ? value : Object.values(value);
+  for (const item of values) {
+    collectStringValues(item, strings);
+  }
+  return strings;
+}
+
+function hasClaudeLimitText(value) {
+  return collectStringValues(value).some(
+    (text) => CLAUDE_USAGE_LIMIT_EPOCH_RE.test(text) || CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(text)
+  );
 }
 
 function compactModelEvent(value) {
@@ -450,6 +487,13 @@ export class StreamParser {
         };
       }
       this.state.finalModel = extractObservedModel(event) ?? this.state.finalModel;
+      if (
+        event.type === "assistant" &&
+        hasSyntheticModelSignal(event) &&
+        hasClaudeLimitText(event)
+      ) {
+        this.state.hasTerminalLimitSignal = true;
+      }
       switch (event.type) {
         case "stream_event":
           return this._handleStreamEvent(event);
