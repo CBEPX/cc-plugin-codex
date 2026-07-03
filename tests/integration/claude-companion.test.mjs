@@ -80,6 +80,7 @@ async function main() {
     getValue("--session-id") ||
     \`stub-\${sanitize(prompt)}-\${process.pid}\`;
   const emitUnknownNoTerminal = /\\bunknown-no-terminal\\b/.test(prompt);
+  const emitMalformedLine = /\\bmalformed-line\\b/.test(prompt);
   const emitSessionLimit = /\\bsession-limit\\b/.test(prompt);
   const terminalModelFallback = /\\bterminal-model-fallback\\b/.test(prompt);
   const terminalModel = process.env.CLAUDE_FAKE_TERMINAL_MODEL;
@@ -152,6 +153,10 @@ async function main() {
     );
     process.exitCode = 1;
     return;
+  }
+
+  if (emitMalformedLine) {
+    process.stdout.write("{not-json\\n");
   }
 
   process.stdout.write(
@@ -1410,6 +1415,45 @@ describe("claude-companion integration", () => {
       );
       assert.equal(textResult.status, 0);
       assert.match(textResult.stdout, /completed:document rate limiting and 429 handling/);
+      assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not classify unknown exit-zero output that mentions rate limiting as a Claude limit failure", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "malformed-line document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const jsonPayload = JSON.parse(jsonResult.stdout);
+
+      assert.equal(jsonPayload.status, "unknown");
+      assert.equal(jsonPayload.failure, null);
+      assert.match(jsonPayload.rawOutput, /completed:malformed-line document rate limiting and 429 handling/);
+
+      const textResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "malformed-line document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 1);
+      assert.match(textResult.stdout, /completed:malformed-line document rate limiting and 429 handling/);
       assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
     } finally {
       cleanupTestEnvironment(testEnv);

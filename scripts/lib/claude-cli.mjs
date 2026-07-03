@@ -993,12 +993,12 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       const modelEvents = [...parser.state.modelEvents];
       const finalModel = parser.state.finalModel;
       const failure =
-        validation.status === "completed"
-          ? null
-          : classifyClaudeFailure({
+        validation.status === "failed"
+          ? classifyClaudeFailure({
               finalMessage: parser.state.finalMessage,
               stderr,
-            });
+            })
+          : null;
       if (
         requestedModel &&
         finalModel &&
