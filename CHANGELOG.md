@@ -23,6 +23,7 @@
 - Preserve detached background worker stdout/stderr in job logs so auto-reaped review/task failures keep useful diagnostics.
 - Keep successful Claude runs intact when their final output mentions rate limiting or `429` handling.
 - Avoid usage-limit summaries for failed turns whose model output only discusses `429`, rate-limit handling, or quoted limit prose without Claude's terminal limit signal.
+- Scope usage-limit reset extraction to canonical Claude limit lines so unrelated `reset` prose or fixture epoch fragments do not leak into user-facing summaries.
 - Avoid usage-limit summaries for exit-zero `unknown` turns that produced a terminal result plus parse-error noise.
 - Stop synthesizing model fallback warnings when a terminal model id only omits the Claude CLI `[1m]` context suffix.
 

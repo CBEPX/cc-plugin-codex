@@ -107,7 +107,7 @@ describe("StreamParser", () => {
     assert.equal(parser.state.hasTerminalLimitSignal, true);
   });
 
-  it("detects Claude synthetic model ids on assistant events", () => {
+  it("does not treat unrelated assistant synthetic model ids as terminal limit signals", () => {
     const parser = new StreamParser();
     const assistantEvent = JSON.stringify({
       type: "assistant",
@@ -118,7 +118,7 @@ describe("StreamParser", () => {
     parser.feed(assistantEvent + "\n");
 
     assert.equal(parser.state.finalModel, null);
-    assert.equal(parser.state.hasTerminalLimitSignal, true);
+    assert.equal(parser.state.hasTerminalLimitSignal, false);
   });
 
   it("does not overwrite accumulated deltas with a shorter terminal suffix", () => {
@@ -689,6 +689,25 @@ describe("classifyClaudeFailure", () => {
 
     assert.equal(failure.kind, "claude_rate_limit");
     assert.equal(failure.resetText, null);
+  });
+
+  it("does not extract unrelated reset prose from stderr-classified failures", () => {
+    const failure = classifyClaudeFailure({
+      stderr: "HTTP 429 from Claude API\nwatchdog resets the connection after 30 seconds",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, null);
+  });
+
+  it("only extracts epochs from canonical usage-limit text", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached; resets 4:50pm (Europe/Moscow). fixture reached|1751554800",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
   });
 
   it("classifies loose limit markers from stderr", () => {

@@ -184,7 +184,7 @@ function extractObservedModel(value) {
 
 function extractClaudeLimitResetText(text) {
   const normalized = String(text ?? "");
-  const epochMatch = normalized.match(/\|\s*(\d{10,13})\b/);
+  const epochMatch = normalized.match(CLAUDE_USAGE_LIMIT_EPOCH_RE);
   if (epochMatch) {
     const rawEpoch = epochMatch[1];
     const epochMs = Number(rawEpoch.length === 13 ? rawEpoch : `${rawEpoch}000`);
@@ -202,7 +202,7 @@ const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
 const CLAUDE_ERROR_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
-  /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|\d{10,13}\b/i;
+  /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
 
 function extractClaudeLimitResetTextFromError(text) {
   for (const line of String(text ?? "").split(/\r?\n/)) {
@@ -233,12 +233,13 @@ export function classifyClaudeFailure(value = {}) {
     return null;
   }
   const limitSource = finalMessageLimit ? finalMessage : stderr;
+  const resetText = finalMessageLimit
+    ? extractClaudeLimitResetText(limitSource) ?? extractClaudeLimitResetTextFromError(stderr)
+    : extractClaudeLimitResetTextFromError(stderr);
   return {
     kind: "claude_rate_limit",
     message,
-    resetText:
-      extractClaudeLimitResetText(limitSource) ??
-      (finalMessageLimit ? extractClaudeLimitResetTextFromError(stderr) : null),
+    resetText,
   };
 }
 
@@ -431,9 +432,6 @@ export class StreamParser {
       if (event.session_id && !this.state.sessionId) {
         this.state.sessionId = event.session_id;
       }
-      if (hasSyntheticModelSignal(event)) {
-        this.state.hasTerminalLimitSignal = true;
-      }
       const modelEvent = compactModelEvent(event);
       if (modelEvent) {
         this.state.finalModel = modelEvent.toModel ?? this.state.finalModel;
@@ -461,6 +459,9 @@ export class StreamParser {
           this.state.receivedTerminalEvent = true;
           {
             const terminalModel = extractRawObservedModel(event);
+            if (hasSyntheticModelSignal(event)) {
+              this.state.hasTerminalLimitSignal = true;
+            }
             this.state.finalModel = normalizeObservedModel(terminalModel) ?? this.state.finalModel;
           }
           if (event.result) {
