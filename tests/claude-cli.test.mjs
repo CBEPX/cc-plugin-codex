@@ -151,6 +151,38 @@ describe("StreamParser", () => {
     assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
   });
 
+  it("treats stream wrapper synthetic limit text as a terminal limit signal", () => {
+    const parser = new StreamParser();
+    const streamEvent = JSON.stringify({
+      type: "stream_event",
+      event: {
+        type: "message_start",
+        message: {
+          model: "<synthetic>",
+          content: [
+            { type: "text", text: "You've hit your session limit · resets 4:50pm (Europe/Moscow)" },
+          ],
+        },
+      },
+      session_id: "sess-limit",
+    });
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      session_id: "sess-limit",
+    });
+
+    parser.feed(streamEvent + "\n" + resultEvent + "\n");
+    const failure = classifyClaudeFailure({
+      finalMessage: parser.state.finalMessage,
+      finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
+    });
+
+    assert.equal(parser.state.hasTerminalLimitSignal, true);
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
   it("does not overwrite accumulated deltas with a shorter terminal suffix", () => {
     const parser = new StreamParser();
     const delta = JSON.stringify({
@@ -749,6 +781,30 @@ describe("classifyClaudeFailure", () => {
 
     assert.equal(failure.kind, "claude_rate_limit");
     assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("uses the last terminal reset when earlier output quotes canonical epoch fixtures", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage:
+        "quoted fixture: Claude AI usage limit reached|1751554800. " +
+        "You've hit your session limit · resets 6:00pm (Europe/Moscow)",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "6:00pm (Europe/Moscow)");
+  });
+
+  it("uses the last canonical epoch when multiple canonical limit epochs are present", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage:
+        "quoted fixture: Claude AI usage limit reached|1751554800. " +
+        "Claude AI usage limit reached|1751558400",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "2025-07-03T16:00:00.000Z");
   });
 
   it("only extracts epochs from canonical usage-limit text", () => {

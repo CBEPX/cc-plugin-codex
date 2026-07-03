@@ -184,16 +184,21 @@ function extractObservedModel(value) {
 
 function extractClaudeLimitResetText(text) {
   const normalized = String(text ?? "");
-  const epochMatch = normalized.match(CLAUDE_USAGE_LIMIT_EPOCH_RE);
-  if (epochMatch) {
-    const rawEpoch = epochMatch[1];
-    const epochMs = Number(rawEpoch.length === 13 ? rawEpoch : `${rawEpoch}000`);
-    const resetDate = new Date(epochMs);
-    if (Number.isFinite(epochMs) && !Number.isNaN(resetDate.getTime())) {
-      return resetDate.toISOString();
+  const candidates = [];
+  for (const match of normalized.matchAll(CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE)) {
+    const resetText = formatClaudeLimitEpoch(match[1]);
+    if (resetText) {
+      candidates.push({ index: match.index ?? 0, resetText });
     }
   }
-  return lastCapturedMatch(CLAUDE_LIMIT_RESET_TEXT_RE, normalized);
+  for (const match of normalized.matchAll(CLAUDE_LIMIT_RESET_TEXT_RE)) {
+    const resetText = match[1]?.trim();
+    if (resetText) {
+      candidates.push({ index: match.index ?? 0, resetText });
+    }
+  }
+  candidates.sort((left, right) => left.index - right.index);
+  return candidates.at(-1)?.resetText ?? null;
 }
 
 const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
@@ -202,10 +207,22 @@ const CLAUDE_ERROR_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
+const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
+  /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/gi;
 const CLAUDE_LIMIT_RESET_TEXT_RE =
   /(?:(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+[^\r\n.]*?limit|\b(?:session|usage)\s+limit(?:\s+reached)?\b)[^\r\n.]*?\bresets(?:\s+at)?\s+([^\r\n.]+)/gi;
 const CLAUDE_ERROR_RESET_TEXT_RE =
   /(?:rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b)[^\r\n.]{0,120}?\bresets\s+at\s+([^\r\n.]+)/gi;
+
+function formatClaudeLimitEpoch(rawEpoch) {
+  const epoch = String(rawEpoch ?? "");
+  const epochMs = Number(epoch.length === 13 ? epoch : `${epoch}000`);
+  const resetDate = new Date(epochMs);
+  if (Number.isFinite(epochMs) && !Number.isNaN(resetDate.getTime())) {
+    return resetDate.toISOString();
+  }
+  return null;
+}
 
 function lastCapturedMatch(regex, text) {
   regex.lastIndex = 0;
@@ -487,11 +504,7 @@ export class StreamParser {
         };
       }
       this.state.finalModel = extractObservedModel(event) ?? this.state.finalModel;
-      if (
-        event.type === "assistant" &&
-        hasSyntheticModelSignal(event) &&
-        hasClaudeLimitText(event)
-      ) {
+      if (hasSyntheticModelSignal(event) && hasClaudeLimitText(event)) {
         this.state.hasTerminalLimitSignal = true;
       }
       switch (event.type) {
