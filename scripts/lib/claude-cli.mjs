@@ -132,16 +132,21 @@ function firstModelUsageKey(value) {
   return keys.length === 1 ? keys[0] : null;
 }
 
+function isSyntheticModelId(model) {
+  const normalized = typeof model === "string" ? model.trim() : "";
+  return Boolean(normalized && SYNTHETIC_MODEL_IDS.has(normalized.toLowerCase()));
+}
+
 function normalizeObservedModel(model) {
   const normalized = typeof model === "string" ? model.trim() : "";
-  if (!normalized || SYNTHETIC_MODEL_IDS.has(normalized.toLowerCase())) {
+  if (!normalized || isSyntheticModelId(normalized)) {
     return null;
   }
   return normalized;
 }
 
-function extractObservedModel(value) {
-  return normalizeObservedModel(
+function extractRawObservedModel(value) {
+  return (
     firstStringFieldFromSources(collectEventModelSources(value), [
       "model",
       "actual_model",
@@ -150,6 +155,10 @@ function extractObservedModel(value) {
       "selectedModel",
     ]) ?? firstModelUsageKey(value)
   );
+}
+
+function extractObservedModel(value) {
+  return normalizeObservedModel(extractRawObservedModel(value));
 }
 
 function extractClaudeLimitResetText(text) {
@@ -169,16 +178,23 @@ export function classifyClaudeFailure(value = {}) {
   if (!message) {
     return null;
   }
-  const finalMessageLimit = Boolean(finalMessage && CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(finalMessage));
+  const finalMessageLimit = Boolean(
+    value.finalMessageHasSyntheticModel &&
+      finalMessage &&
+      CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(finalMessage)
+  );
   const stderrLimit = Boolean(stderr && CLAUDE_ERROR_LIMIT_RE.test(stderr));
   if (!finalMessageLimit && !stderrLimit) {
     return null;
   }
   const limitSource = finalMessageLimit ? finalMessage : stderr;
+  const resetFallbackSource = finalMessageLimit ? stderr : "";
   return {
     kind: "claude_rate_limit",
     message,
-    resetText: extractClaudeLimitResetText(limitSource),
+    resetText:
+      extractClaudeLimitResetText(limitSource) ??
+      extractClaudeLimitResetText(resetFallbackSource),
   };
 }
 
@@ -341,6 +357,7 @@ export class StreamParser {
       touchedFiles: [],
       modelEvents: [],
       finalModel: null,
+      terminalResultHasSyntheticModel: false,
     };
   }
 
@@ -395,6 +412,13 @@ export class StreamParser {
           return this._handleSystemEvent(event);
         case "result":
           this.state.receivedTerminalEvent = true;
+          {
+            const terminalModel = extractRawObservedModel(event);
+            if (isSyntheticModelId(terminalModel)) {
+              this.state.terminalResultHasSyntheticModel = true;
+            }
+            this.state.finalModel = normalizeObservedModel(terminalModel) ?? this.state.finalModel;
+          }
           if (event.result) {
             this.state.finalMessage = mergeTerminalResultText(
               this.state.finalMessage,
@@ -405,7 +429,6 @@ export class StreamParser {
             this.state.structuredOutput = event.structured_output ?? null;
           }
           if (event.session_id) this.state.sessionId = event.session_id;
-          this.state.finalModel = extractObservedModel(event) ?? this.state.finalModel;
           return { kind: "result", data: event };
         default:
           pushBoundedTail(this.state.unknownEvents, {
@@ -1001,6 +1024,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         validation.status === "failed"
           ? classifyClaudeFailure({
               finalMessage: parser.state.finalMessage,
+              finalMessageHasSyntheticModel: parser.state.terminalResultHasSyntheticModel,
               stderr,
             })
           : null;

@@ -86,6 +86,7 @@ describe("StreamParser", () => {
     parser.feed(resultEvent + "\n");
 
     assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.terminalResultHasSyntheticModel, true);
   });
 
   it("does not overwrite accumulated deltas with a shorter terminal suffix", () => {
@@ -600,10 +601,50 @@ describe("classifyClaudeFailure", () => {
   it("classifies strong Claude limit messages from final output", () => {
     const failure = classifyClaudeFailure({
       finalMessage: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+      finalMessageHasSyntheticModel: true,
     });
 
     assert.equal(failure.kind, "claude_rate_limit");
     assert.match(failure.message, /session limit/);
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("ignores strong-looking limit prose from final output without a synthetic model signal", () => {
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Added session limit enforcement; the counter resets every hour.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Documented the fixture: You've hit your session limit · resets 4:50pm.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+  });
+
+  it("classifies usage-limit-reached final output when Claude marks it synthetic", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached|1751554800",
+      finalMessageHasSyntheticModel: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.match(failure.message, /usage limit reached/);
+    assert.equal(failure.resetText, null);
+  });
+
+  it("extracts reset text from stderr when final output has the limit signal", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Claude AI usage limit reached|1751554800",
+      finalMessageHasSyntheticModel: true,
+      stderr: "resets at 4:50pm (Europe/Moscow).",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
     assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
   });
 
