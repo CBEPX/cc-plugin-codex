@@ -82,6 +82,7 @@ async function main() {
   const emitUnknownNoTerminal = /\\bunknown-no-terminal\\b/.test(prompt);
   const emitMalformedLine = /\\bmalformed-line\\b/.test(prompt);
   const emitSessionLimit = /\\bsession-limit\\b/.test(prompt);
+  const failAfterResult = /\\bfail-after-result\\b/.test(prompt);
   const terminalModelFallback = /\\bterminal-model-fallback\\b/.test(prompt);
   const terminalModel = process.env.CLAUDE_FAKE_TERMINAL_MODEL;
   const emitModelFallback =
@@ -172,6 +173,10 @@ async function main() {
         : {}),
     }) + "\\n"
   );
+  if (failAfterResult) {
+    process.stderr.write("Error: tool crash after terminal result\\n");
+    process.exitCode = 1;
+  }
 }
 
 main().catch((error) => {
@@ -1454,6 +1459,51 @@ describe("claude-companion integration", () => {
       );
       assert.equal(textResult.status, 1);
       assert.match(textResult.stdout, /completed:malformed-line document rate limiting and 429 handling/);
+      assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not classify failed output that only mentions rate limiting in the final message", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "fail-after-result document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const jsonPayload = JSON.parse(jsonResult.stdout);
+
+      assert.equal(jsonPayload.status, "failed");
+      assert.equal(jsonPayload.failure, null);
+      assert.match(
+        jsonPayload.rawOutput,
+        /completed:fail-after-result document rate limiting and 429 handling/
+      );
+
+      const textResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "fail-after-result document rate limiting and 429 handling delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(textResult.status, 1);
+      assert.match(
+        textResult.stdout,
+        /completed:fail-after-result document rate limiting and 429 handling/
+      );
       assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
     } finally {
       cleanupTestEnvironment(testEnv);

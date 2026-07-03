@@ -597,6 +597,44 @@ describe("classifyClaudeFailure", () => {
     assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
   });
 
+  it("classifies strong Claude limit messages from final output", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "You've hit your session limit · resets 4:50pm (Europe/Moscow)",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.match(failure.message, /session limit/);
+    assert.equal(failure.resetText, "4:50pm (Europe/Moscow)");
+  });
+
+  it("classifies loose limit markers from stderr", () => {
+    assert.equal(
+      classifyClaudeFailure({ stderr: "HTTP 429 from Claude API" })?.kind,
+      "claude_rate_limit"
+    );
+    assert.equal(
+      classifyClaudeFailure({ stderr: "rate_limit exceeded" })?.kind,
+      "claude_rate_limit"
+    );
+  });
+
+  it("ignores loose rate-limit markers from final model output", () => {
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Implemented 429 retry handling for rate limiting responses.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Implemented rate-limit retry handling.",
+        stderr: "Error: cancellation signal interrupted the tool call.",
+      }),
+      null
+    );
+  });
+
   it("ignores non-limit failures", () => {
     assert.equal(classifyClaudeFailure({ stderr: "syntax error" }), null);
   });

@@ -157,23 +157,28 @@ function extractClaudeLimitResetText(text) {
   return match?.[1]?.trim() ?? null;
 }
 
+const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
+  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b.{0,120}\bresets(?:\s+at)?\b|\b(?:session|usage)\s+limit\s+reached\b/i;
+const CLAUDE_ERROR_LIMIT_RE =
+  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i;
+
 export function classifyClaudeFailure(value = {}) {
-  const message = [value.finalMessage, value.stderr]
-    .filter((part) => typeof part === "string" && part.trim())
-    .join("\n")
-    .trim();
+  const finalMessage = typeof value.finalMessage === "string" ? value.finalMessage.trim() : "";
+  const stderr = typeof value.stderr === "string" ? value.stderr.trim() : "";
+  const message = [finalMessage, stderr].filter(Boolean).join("\n").trim();
   if (!message) {
     return null;
   }
-  if (
-    !/you'?ve hit your .*limit|session limit|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i.test(message)
-  ) {
+  const finalMessageLimit = Boolean(finalMessage && CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(finalMessage));
+  const stderrLimit = Boolean(stderr && CLAUDE_ERROR_LIMIT_RE.test(stderr));
+  if (!finalMessageLimit && !stderrLimit) {
     return null;
   }
+  const limitSource = finalMessageLimit ? finalMessage : stderr;
   return {
     kind: "claude_rate_limit",
     message,
-    resetText: extractClaudeLimitResetText(message),
+    resetText: extractClaudeLimitResetText(limitSource),
   };
 }
 
