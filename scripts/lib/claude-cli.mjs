@@ -57,13 +57,18 @@ export function resolveClaudeBin(options = {}) {
     if (seenRoots.has(rootKey)) continue;
     seenRoots.add(rootKey);
 
-    const candidate = pathApi.join(resolvedRoot, ...CLAUDE_PACKAGE_EXE_PARTS);
-    try {
-      if (existsSync(candidate)) {
-        return candidate;
+    const candidates = [
+      pathApi.join(resolvedRoot, "claude.exe"),
+      pathApi.join(resolvedRoot, ...CLAUDE_PACKAGE_EXE_PARTS),
+    ];
+    for (const candidate of candidates) {
+      try {
+        if (existsSync(candidate)) {
+          return candidate;
+        }
+      } catch {
+        // Continue to the next candidate, then fall back to normal PATH lookup.
       }
-    } catch {
-      // Continue to the next candidate, then fall back to normal PATH lookup.
     }
   }
   return "claude";

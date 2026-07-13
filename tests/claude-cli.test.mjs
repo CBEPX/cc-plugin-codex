@@ -633,6 +633,19 @@ describe("resolveClaudeBin", () => {
     );
   });
 
+  it("finds a native Claude executable directly on PATH", () => {
+    const expected = "D:\\tools\\claude.exe";
+    assert.equal(
+      resolveClaudeBin({
+        env: { PATH: "C:\\Windows;D:\\tools" },
+        platform: "win32",
+        homedir: "C:\\Users\\demo",
+        existsSync: (candidate) => candidate === expected,
+      }),
+      expected
+    );
+  });
+
   it("uses APPDATA when the npm prefix is not present in PATH", () => {
     const expected =
       "R:\\Profile\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
@@ -670,10 +683,10 @@ describe("resolveClaudeBin", () => {
         return false;
       },
     });
-    assert.equal(checked.length, 2);
+    assert.equal(checked.length, 4);
     assert.equal(
       checked[0].toLowerCase(),
-      "c:\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"
+      "c:\\npm\\claude.exe"
     );
   });
 });
