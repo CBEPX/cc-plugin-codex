@@ -67,6 +67,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readStdin() {
+  let body = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    body += chunk;
+  }
+  return body;
+}
+
 async function main() {
   if (args[0] === "--version") {
     process.stdout.write("2.1.90 (Claude Code)\\n");
@@ -85,7 +94,7 @@ async function main() {
   }
 
   const promptIndex = args.lastIndexOf("--");
-  const prompt = promptIndex >= 0 ? args.slice(promptIndex + 1).join(" ") : "";
+  const prompt = promptIndex >= 0 ? args.slice(promptIndex + 1).join(" ") : await readStdin();
   const delayMatch = prompt.match(/\\bdelay=(\\d+)\\b/);
   const delay = delayMatch ? Number(delayMatch[1]) : 25;
   const sessionId =

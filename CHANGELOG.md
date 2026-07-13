@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Send Claude prompts through stdin instead of command-line arguments so large working-tree reviews no longer fail with `spawn ENAMETOOLONG` on Windows, and fail closed if prompt delivery itself errors.
+- Resolve the native npm-installed `claude.exe` on Windows, while retaining an explicit `CC_PLUGIN_CODEX_CLAUDE_BIN` override.
+
 ## v1.2.1
 
 - Switch marketplace installs to Codex native plugin hooks: bundled hooks now load from `hooks/hooks.json` in the active plugin cache with `$PLUGIN_ROOT` instead of writing managed global hook commands into `~/.codex/hooks.json`.

@@ -562,6 +562,10 @@ describe("resolveEffort", () => {
     assert.equal(resolveEffort("max"), "max");
   });
 
+  it("maps the ultracode compatibility alias to max", () => {
+    assert.equal(resolveEffort("ultracode"), "max");
+  });
+
   it("normalizes canonical effort values to lowercase", () => {
     assert.equal(resolveEffort("HIGH"), "high");
     assert.equal(resolveEffort("XHIGH"), "xhigh");
@@ -588,10 +592,11 @@ describe("resolveEffort", () => {
     assert.equal(VALID_EFFORTS.size, 5);
   });
 
-  it("EFFORT_ALIASES only contains legacy compatibility mappings", () => {
+  it("EFFORT_ALIASES contains compatibility mappings", () => {
     assert.deepEqual(EFFORT_ALIASES, {
       none: "low",
       minimal: "low",
+      ultracode: "max",
     });
   });
 });
@@ -606,12 +611,11 @@ describe("buildArgs", () => {
     assert.equal(args[0], "-p");
   });
 
-  it("ends with -- separator followed by prompt", () => {
-    const args = buildArgs("my prompt");
-    const dashDashIdx = args.indexOf("--");
-    assert.ok(dashDashIdx >= 0);
-    assert.equal(args[dashDashIdx + 1], "my prompt");
-    assert.equal(args[args.length - 1], "my prompt");
+  it("keeps the prompt out of argv so it can be sent through stdin", () => {
+    const prompt = "x".repeat(70_000);
+    const args = buildArgs(prompt);
+    assert.ok(!args.includes("--"));
+    assert.ok(!args.includes(prompt));
   });
 
   it("defaults output format to json", () => {
