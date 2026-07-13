@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Use the Claude CLI-compatible JSON Schema Draft-07 dialect for adversarial review structured output.
+
 ## v1.3.2
 
 ### Fixed

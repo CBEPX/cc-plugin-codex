@@ -1235,7 +1235,13 @@ describe("buildArgs", () => {
   });
 
   it("includes --json-schema as stringified JSON", () => {
-    const schema = { type: "object", properties: { x: { type: "string" } } };
+    const schema = JSON.parse(
+      fs.readFileSync(
+        new URL("../schemas/review-output.schema.json", import.meta.url),
+        "utf8"
+      )
+    );
+    assert.equal(schema.$schema, "http://json-schema.org/draft-07/schema#");
     const args = buildArgs("p", { jsonSchema: schema });
     const idx = args.indexOf("--json-schema");
     assert.ok(idx >= 0);
