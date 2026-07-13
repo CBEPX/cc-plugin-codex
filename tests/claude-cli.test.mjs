@@ -563,10 +563,6 @@ describe("resolveEffort", () => {
     assert.equal(resolveEffort("max"), "max");
   });
 
-  it("maps the ultracode compatibility alias to max", () => {
-    assert.equal(resolveEffort("ultracode"), "max");
-  });
-
   it("normalizes canonical effort values to lowercase", () => {
     assert.equal(resolveEffort("HIGH"), "high");
     assert.equal(resolveEffort("XHIGH"), "xhigh");
@@ -593,11 +589,10 @@ describe("resolveEffort", () => {
     assert.equal(VALID_EFFORTS.size, 5);
   });
 
-  it("EFFORT_ALIASES contains compatibility mappings", () => {
+  it("EFFORT_ALIASES only contains legacy compatibility mappings", () => {
     assert.deepEqual(EFFORT_ALIASES, {
       none: "low",
       minimal: "low",
-      ultracode: "max",
     });
   });
 });

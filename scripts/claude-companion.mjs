@@ -14,7 +14,7 @@
  * - Default model when --model is unset: opus
  * - Default effort by model: opus -> xhigh, sonnet -> high, haiku -> unset
  * - Claude CLI effort values: low, medium, high, xhigh, max
- * - Effort aliases: ultracode -> max; legacy none|minimal -> low
+ * - Legacy effort aliases: none|minimal -> low
  * - Review gate matches upstream setup semantics: Stop hook runs when enabled
  *
  * Subcommands:
@@ -129,9 +129,9 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max|ultracode>]",
-      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max|ultracode>] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max|ultracode>] [prompt]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>]",
+      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [focus text]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [prompt]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",

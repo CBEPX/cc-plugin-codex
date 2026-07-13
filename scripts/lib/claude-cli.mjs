@@ -648,7 +648,6 @@ export const MODEL_ALIASES = new Map([
 export const EFFORT_ALIASES = {
   none: "low",
   minimal: "low",
-  ultracode: "max",
 };
 
 export const VALID_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
