@@ -16,24 +16,54 @@ import { fileURLToPath } from "node:url";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
-function resolveClaudeBin() {
-  if (process.env.CC_PLUGIN_CODEX_CLAUDE_BIN) {
-    return process.env.CC_PLUGIN_CODEX_CLAUDE_BIN;
+const CLAUDE_PACKAGE_EXE_PARTS = [
+  "node_modules",
+  "@anthropic-ai",
+  "claude-code",
+  "bin",
+  "claude.exe",
+];
+
+/** @visibleForTesting */
+export function resolveClaudeBin(options = {}) {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const homedir = options.homedir ?? os.homedir();
+  const existsSync = options.existsSync ?? fs.existsSync;
+  const override = String(env.CC_PLUGIN_CODEX_CLAUDE_BIN ?? "").trim();
+
+  if (override) {
+    return override;
   }
-  if (process.platform === "win32") {
-    const npmClaudeExe = path.join(
-      os.homedir(),
-      "AppData",
-      "Roaming",
-      "npm",
-      "node_modules",
-      "@anthropic-ai",
-      "claude-code",
-      "bin",
-      "claude.exe"
-    );
-    if (fs.existsSync(npmClaudeExe)) {
-      return npmClaudeExe;
+  if (platform !== "win32") {
+    return "claude";
+  }
+
+  const pathApi = path.win32;
+  const searchRoots = [];
+  const pathValue = env.PATH ?? env.Path ?? env.path ?? "";
+  for (const entry of String(pathValue).split(pathApi.delimiter)) {
+    const normalized = entry.trim().replace(/^"|"$/g, "");
+    if (normalized) searchRoots.push(normalized);
+  }
+  if (env.npm_config_prefix) searchRoots.push(String(env.npm_config_prefix));
+  if (env.APPDATA) searchRoots.push(pathApi.join(String(env.APPDATA), "npm"));
+  searchRoots.push(pathApi.join(homedir, "AppData", "Roaming", "npm"));
+
+  const seenRoots = new Set();
+  for (const root of searchRoots) {
+    const resolvedRoot = pathApi.resolve(root);
+    const rootKey = resolvedRoot.toLowerCase();
+    if (seenRoots.has(rootKey)) continue;
+    seenRoots.add(rootKey);
+
+    const candidate = pathApi.join(resolvedRoot, ...CLAUDE_PACKAGE_EXE_PARTS);
+    try {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Continue to the next candidate, then fall back to normal PATH lookup.
     }
   }
   return "claude";
