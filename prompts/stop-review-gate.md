@@ -1,5 +1,5 @@
 <task>
-Run a stop-gate review of the previous Codex turn.
+Run a turn-end gate review of the previous Codex turn.
 Only review the work from the previous Codex turn.
 Only review it if Codex actually did code changes in that turn.
 Pure status, setup, or reporting output does not count as reviewable work.
@@ -25,7 +25,7 @@ Do not put anything before that first line.
 <default_follow_through_policy>
 Use ALLOW if the previous turn did not make code changes or if you do not see a blocking issue.
 Use ALLOW immediately, without extra investigation, if the previous turn was not an edit-producing turn.
-Use BLOCK only if the previous turn made code changes and you found something that still needs to be fixed before stopping.
+Use BLOCK only if the previous turn made code changes and you found something that still needs to be fixed before ending this Codex turn.
 </default_follow_through_policy>
 
 <grounding_rules>
