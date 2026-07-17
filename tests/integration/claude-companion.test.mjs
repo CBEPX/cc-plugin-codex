@@ -925,7 +925,7 @@ describe("claude-companion integration", () => {
     try {
       setupGitWorkspace(testEnv.workspaceDir);
       fs.writeFileSync(
-        path.join(testEnv.workspaceDir, "large-review-input.txt"),
+        path.join(testEnv.workspaceDir, "app.js"),
         "review-line\n".repeat(3_500),
         "utf8"
       );
@@ -944,6 +944,7 @@ describe("claude-companion integration", () => {
       const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
       assert.ok(Buffer.byteLength(invocation.prompt, "utf8") > 32_767);
       assert.match(invocation.prompt, /review-line/);
+      assert.equal(invocation.args.includes("--"), false);
       assert.ok(!invocation.args.includes(invocation.prompt));
       assert.match(result.stdout, /Claude Code Review/);
     } finally {

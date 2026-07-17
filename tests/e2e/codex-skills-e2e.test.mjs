@@ -458,13 +458,14 @@ function eventAssistantMessage(id, text) {
   };
 }
 
-function eventFunctionCall(callId, name, args) {
+function eventFunctionCall(callId, name, args, namespace = null) {
   return {
     type: "response.output_item.done",
     item: {
       type: "function_call",
       call_id: callId,
       name,
+      ...(namespace ? { namespace } : {}),
       arguments: JSON.stringify(args),
     },
   };
@@ -476,20 +477,40 @@ function formatSse(events) {
     .join("");
 }
 
+function getToolEntries(body) {
+  if (!Array.isArray(body.tools)) {
+    return [];
+  }
+
+  return body.tools.flatMap((tool) => [
+    { tool, namespace: null },
+    ...(tool.type === "namespace" && Array.isArray(tool.tools)
+      ? tool.tools.map((child) => ({ tool: child, namespace: tool.name }))
+      : []),
+  ]);
+}
+
+function findTool(body, toolName) {
+  return getToolEntries(body).find(
+    ({ tool }) => (tool.name || tool.function?.name || tool.type) === toolName
+  );
+}
+
 function getToolNames(body) {
-  return Array.isArray(body.tools)
-    ? body.tools
-        .map((tool) => tool.name || tool.function?.name || tool.type)
-        .filter(Boolean)
-    : [];
+  return getToolEntries(body)
+    .map(({ tool }) => tool.name || tool.function?.name || tool.type)
+    .filter(Boolean);
 }
 
 function getToolParameterDescription(body, toolName, parameterName) {
-  return Array.isArray(body.tools)
-    ? body.tools
-        .find((tool) => (tool.name || tool.function?.name || tool.type) === toolName)
-        ?.parameters?.properties?.[parameterName]?.description ?? null
-    : null;
+  return (
+    findTool(body, toolName)?.tool?.parameters?.properties?.[parameterName]
+      ?.description ?? null
+  );
+}
+
+function getToolNamespace(body, toolName) {
+  return findTool(body, toolName)?.namespace ?? null;
 }
 
 function extractRoleBlock(description, roleName) {
@@ -875,6 +896,12 @@ function startMockProvider({
             getToolNames(body).includes("spawn_agent"),
             "spawn_agent should be available in the parent turn"
           );
+          const spawnNamespace = getToolNamespace(body, "spawn_agent");
+          assert.equal(
+            spawnNamespace,
+            "multi_agent_v1",
+            "spawn_agent should be exposed under the multi_agent_v1 namespace"
+          );
           const agentTypeDescription = getToolParameterDescription(body, "spawn_agent", "agent_type");
           if (mode === "builtin-alias") {
             assert.ok(
@@ -921,7 +948,12 @@ function startMockProvider({
           };
           events = [
             eventCreated("resp-parent-1"),
-            eventFunctionCall(spawnCallId, "spawn_agent", spawnArgs),
+            eventFunctionCall(
+              spawnCallId,
+              "spawn_agent",
+              spawnArgs,
+              spawnNamespace
+            ),
             eventCompleted("resp-parent-1"),
           ];
         } else if (responseIndex === 2) {
@@ -1014,6 +1046,15 @@ function startMockProvider({
           const hasNotification = bodyText.includes("<subagent_notification>");
           if (toolNames.includes("wait_agent") || toolNames.includes("wait")) {
             phases.push("parent-wait");
+            const waitTool = toolNames.includes("wait_agent")
+              ? "wait_agent"
+              : "wait";
+            const waitNamespace = getToolNamespace(body, waitTool);
+            assert.equal(
+              waitNamespace,
+              "multi_agent_v1",
+              `${waitTool} should be exposed under the multi_agent_v1 namespace`
+            );
             const agentId = extractAgentIdFromSpawnOutput(body, spawnCallId);
             assert.ok(
               agentId,
@@ -1023,10 +1064,11 @@ function startMockProvider({
               eventCreated("resp-parent-2"),
               eventFunctionCall(
                 waitCallId,
-                toolNames.includes("wait_agent") ? "wait_agent" : "wait",
-                toolNames.includes("wait_agent")
+                waitTool,
+                waitTool === "wait_agent"
                   ? { targets: [agentId], timeout_ms: 1000 }
-                  : { ids: [agentId], timeout_ms: 1000 }
+                  : { ids: [agentId], timeout_ms: 1000 },
+                waitNamespace
               ),
               eventCompleted("resp-parent-2"),
             ];
