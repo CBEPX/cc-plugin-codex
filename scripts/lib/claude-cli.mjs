@@ -403,15 +403,6 @@ export const SANDBOX_READ_ONLY_BASH_TOOLS = [
   "Bash(git config --get:*)",
 ];
 
-export const SANDBOX_STOP_REVIEW_TOOLS = [
-  "Read",
-  "Glob",
-  "Grep",
-  "Bash(git log:*)",
-  "Bash(git diff:*)",
-  "Bash(git show:*)",
-];
-
 /** read-only: file reading + read-only git + web + read-only agents. No writes, MCP, or skills. */
 export const SANDBOX_READ_ONLY_TOOLS = [
   "Read",
@@ -442,6 +433,13 @@ export const REVIEW_MCP_TOOL_NAMES = [
 export const REVIEW_MCP_ALLOWED_TOOLS = REVIEW_MCP_TOOL_NAMES.map(
   (name) => `mcp__${REVIEW_MCP_SERVER_NAME}__${name}`
 );
+
+export const SANDBOX_STOP_REVIEW_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  ...REVIEW_MCP_ALLOWED_TOOLS,
+];
 
 /**
  * Tools exposed to review/adversarial-review runs. Bash is intentionally absent —

@@ -2101,7 +2101,7 @@ describe("Codex direct-skill E2E", () => {
       assert.match(finalMessage, /review gate: enabled/i);
       assert.match(
         finalMessage,
-        new RegExp(`Enabled the stop-time review gate for ${PROJECT_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)
+        new RegExp(`Enabled the turn-end review gate for ${PROJECT_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)
       );
     } finally {
       await provider.close();
@@ -2180,7 +2180,7 @@ describe("Codex direct-skill E2E", () => {
       assert.match(finalMessage, /Status: ready/i);
       assert.match(finalMessage, /hooks: native Codex plugin hooks enabled/i);
       assert.match(finalMessage, /review gate: enabled/i);
-      assert.match(finalMessage, /Enabled the stop-time review gate/i);
+      assert.match(finalMessage, /Enabled the turn-end review gate/i);
 
       const hooksFile = path.join(testEnv.codexHome, "hooks.json");
       const config = fs.readFileSync(path.join(testEnv.codexHome, "config.toml"), "utf8");

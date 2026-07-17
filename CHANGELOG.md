@@ -11,6 +11,7 @@
 - Remove the local checkout/stable-root install path from the supported install flow. The installer now uses `marketplace/add` + `plugin/install`, cleans stale `~/.codex/plugins/cc` state, and enables `[features].hooks` plus `[features].plugin_hooks`.
 - Update public skills to resolve the active plugin root from their `SKILL.md` path, so marketplace cache installs run the matching companion code after plugin updates.
 - Refresh README, setup, installer, and E2E coverage around the marketplace/cache-only install path, native hook feature-gate repair, and `$cc:setup` trust repair for this plugin's hook hashes.
+- Clarify the optional review gate as a turn-end blocking review of the previous Codex turn and document that gate runs keep the user's Claude Code default model and effort settings.
 
 ## v1.2.0
 
