@@ -46,7 +46,8 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install from the Sendbird marketplace:
 
 ```bash
-codex marketplace add sendbird/codex-marketplace
+codex plugin marketplace add sendbird/codex-marketplace
+codex plugin add cc@sendbird
 ```
 
 Then install `cc` from the Sendbird marketplace inside Codex, and run `$cc:setup` once.

@@ -314,22 +314,13 @@ describe("SANDBOX_REVIEW_TOOLS", () => {
 });
 
 describe("SANDBOX_STOP_REVIEW_TOOLS", () => {
-  it("uses read tools plus bundled git MCP tools without Bash", () => {
-    for (const t of ["Read", "Glob", "Grep"]) {
-      assert.ok(SANDBOX_STOP_REVIEW_TOOLS.includes(t), `missing ${t}`);
-    }
-    for (const t of SANDBOX_STOP_REVIEW_TOOLS) {
-      assert.ok(
-        !/^Bash(\(|$)/.test(t),
-        `stop review allowlist must not contain Bash: ${t}`
-      );
-    }
-    for (const expected of REVIEW_MCP_ALLOWED_TOOLS) {
-      assert.ok(
-        SANDBOX_STOP_REVIEW_TOOLS.includes(expected),
-        `missing MCP tool entry: ${expected}`
-      );
-    }
+  it("uses exactly the read tools plus bundled git MCP tools", () => {
+    assert.deepEqual(SANDBOX_STOP_REVIEW_TOOLS, [
+      "Read",
+      "Glob",
+      "Grep",
+      ...REVIEW_MCP_ALLOWED_TOOLS,
+    ]);
   });
 });
 
