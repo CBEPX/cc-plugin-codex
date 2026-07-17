@@ -2,10 +2,10 @@
 
 Use this document only inside the rescue forwarding worker spawned by `$cc:rescue` as defined in `../../skills/rescue/SKILL.md`.
 This is an internal execution contract, not a public skill. It owns execution and routing. It does not own prompt rewriting beyond deciding when to consult the prompt-shaping reference.
-The public rescue skill already resolved the installed plugin root. Reuse that installed copy path here. Do not derive a new runtime path from this document, any cache directory, or the current working tree.
+The public rescue skill already resolved the active plugin root from its `SKILL.md` path. Reuse that path here. Do not derive a new runtime path from this document or the current working tree.
 
 Primary helper:
-- `node "<installed-plugin-root>/scripts/claude-companion.mjs" task ...`
+- `node "<plugin-root>/scripts/claude-companion.mjs" task ...`
 
 Execution rules:
 - The rescue subagent is a forwarder, not an operator. Launch exactly one `task` command and return that stdout unchanged.
@@ -24,8 +24,7 @@ Command selection:
 
 Routing controls:
 - Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
-- Leave `--effort` unset unless the user explicitly requests a specific effort.
-- Leave model unset by default. Add `--model` only when the user explicitly asks for one.
+- Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku.
 - `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.

@@ -72,6 +72,7 @@ jobs:
           rsync -a --delete "$RUNNER_TEMP/marketplace-snapshot/cc/" marketplace/plugins/cc/
 
       - name: Create marketplace pull request
+        id: create_pr
         env:
           GH_TOKEN: ${{ secrets.SENDBIRD_CODEX_MARKETPLACE_PUSH_TOKEN }}
           REF_NAME: ${{ github.event.release.tag_name || inputs.ref || github.ref_name }}
@@ -80,6 +81,7 @@ jobs:
 
           if git diff --quiet -- plugins/cc; then
             echo "Marketplace snapshot already matches $REF_NAME"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -91,20 +93,45 @@ jobs:
           git commit -m "Update cc plugin snapshot to $REF_NAME"
           git push --force-with-lease origin "$BRANCH_NAME"
 
-          EXISTING_PR_NUMBER=$(gh pr list \
+          PR_NUMBER=$(gh pr list \
             --repo "$MARKETPLACE_REPO" \
             --head "$BRANCH_NAME" \
             --json number \
             --jq '.[0].number // empty')
 
-          if [ -n "$EXISTING_PR_NUMBER" ]; then
-            echo "Marketplace PR already exists: #$EXISTING_PR_NUMBER"
-            exit 0
+          if [ -z "$PR_NUMBER" ]; then
+            gh pr create \
+              --repo "$MARKETPLACE_REPO" \
+              --base main \
+              --head "$BRANCH_NAME" \
+              --title "Update cc plugin snapshot to $REF_NAME" \
+              --body "Update \`plugins/cc\` in the Sendbird Codex marketplace to \`$REF_NAME\` from \`sendbird/cc-plugin-codex\`."
+            PR_NUMBER=$(gh pr list \
+              --repo "$MARKETPLACE_REPO" \
+              --head "$BRANCH_NAME" \
+              --json number \
+              --jq '.[0].number // empty')
+          else
+            echo "Marketplace PR already exists: #$PR_NUMBER"
           fi
 
-          gh pr create \
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Merge marketplace pull request
+        if: steps.create_pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.SENDBIRD_CODEX_MARKETPLACE_PUSH_TOKEN }}
+          PR_NUMBER: ${{ steps.create_pr.outputs.pr_number }}
+        run: |
+          # Auto-snapshot PRs are deterministic from the source tag and need to
+          # land without a human in the loop, otherwise releases ship to npm but
+          # never reach the marketplace. We bypass branch protection here on
+          # purpose; if the token does not have admin rights on the marketplace
+          # repo, this step will fail loudly and the open PR remains for manual
+          # merge — which is strictly better than silently leaving v1.x.0 stuck
+          # in PR limbo.
+          gh pr merge "$PR_NUMBER" \
             --repo "$MARKETPLACE_REPO" \
-            --base main \
-            --head "$BRANCH_NAME" \
-            --title "Update cc plugin snapshot to $REF_NAME" \
-            --body "Update \`plugins/cc\` in the Sendbird Codex marketplace to \`$REF_NAME\` from \`sendbird/cc-plugin-codex\`."
+            --squash \
+            --admin \
+            --delete-branch

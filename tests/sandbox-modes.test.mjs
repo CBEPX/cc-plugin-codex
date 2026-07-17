@@ -12,10 +12,17 @@ import {
   buildArgs,
   SANDBOX_READ_ONLY_BASH_TOOLS,
   SANDBOX_READ_ONLY_TOOLS,
+  SANDBOX_REVIEW_TOOLS,
+  SANDBOX_STOP_REVIEW_TOOLS,
   SANDBOX_TEMP_DIR,
   SANDBOX_SETTINGS,
+  REVIEW_MCP_SERVER_NAME,
+  REVIEW_MCP_TOOL_NAMES,
+  REVIEW_MCP_ALLOWED_TOOLS,
   createSandboxSettings,
   cleanupSandboxSettings,
+  createReviewMcpConfig,
+  cleanupReviewMcpConfig,
 } from "../scripts/lib/claude-cli.mjs";
 import { resolvePluginRuntimeRoot } from "../scripts/lib/codex-paths.mjs";
 
@@ -202,12 +209,15 @@ describe("sandbox settings lifecycle", () => {
 // ---------------------------------------------------------------------------
 
 describe("sandbox settings content", () => {
-  it("read-only: sandbox enabled, allowWrite temp dir only, no network", () => {
+  it("read-only: sandbox enabled, allowWrite temp dir only, network unrestricted", () => {
     const s = SANDBOX_SETTINGS["read-only"];
     assert.equal(s.sandbox.enabled, true);
-    assert.equal(s.sandbox.autoAllowBashIfSandboxed, true);
+    assert.equal(s.sandbox.autoAllowBashIfSandboxed, false);
     assert.deepEqual(s.sandbox.filesystem.allowWrite, [SANDBOX_TEMP_DIR]);
-    assert.deepEqual(s.sandbox.network.allowedDomains, []);
+    // network block intentionally omitted: review/adversarial-review need network
+    // for WebFetch/WebSearch and the Claude CLI's own API access. Mutation
+    // surfaces are closed off by removing Bash from the allowlist instead.
+    assert.equal(s.sandbox.network, undefined);
   });
 
   it("workspace-write: sandbox enabled, allowWrite cwd+temp dir, no network", () => {
@@ -223,7 +233,9 @@ describe("sandbox settings content", () => {
       SANDBOX_SETTINGS["read-only"].sandbox.filesystem,
       SANDBOX_SETTINGS["workspace-write"].sandbox.filesystem
     );
-    assert.deepEqual(
+    // read-only deliberately leaves network unset (allowed) while workspace-write
+    // explicitly closes outbound network from Bash. The two modes diverge here.
+    assert.notDeepEqual(
       SANDBOX_SETTINGS["read-only"].sandbox.network,
       SANDBOX_SETTINGS["workspace-write"].sandbox.network
     );
@@ -254,5 +266,115 @@ describe("mode consistency", () => {
   it("workspace-write mode uses no allowedTools (verified via buildArgs)", () => {
     const args = buildArgs("p", { permissionMode: "bypassPermissions" });
     assert.equal(argsAllowedTools(args).length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Review tool surface — MCP-only git access, no Bash
+// ---------------------------------------------------------------------------
+
+describe("SANDBOX_REVIEW_TOOLS", () => {
+  it("includes Read, Glob, Grep, WebSearch, WebFetch", () => {
+    for (const t of ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]) {
+      assert.ok(SANDBOX_REVIEW_TOOLS.includes(t), `missing ${t}`);
+    }
+  });
+
+  it("does NOT include any Bash entry (Bash patterns are not strictly enforced)", () => {
+    for (const t of SANDBOX_REVIEW_TOOLS) {
+      assert.ok(
+        !/^Bash(\(|$)/.test(t),
+        `review allowlist must not contain Bash: ${t}`
+      );
+    }
+  });
+
+  it("does NOT include Write/Edit/MultiEdit/NotebookEdit/Task", () => {
+    for (const t of ["Write", "Edit", "MultiEdit", "NotebookEdit", "Task"]) {
+      assert.ok(!SANDBOX_REVIEW_TOOLS.includes(t), `${t} must not be allowed`);
+    }
+  });
+
+  it("exposes the bundled git MCP tools as mcp__<server>__<tool> entries", () => {
+    for (const name of REVIEW_MCP_TOOL_NAMES) {
+      const expected = `mcp__${REVIEW_MCP_SERVER_NAME}__${name}`;
+      assert.ok(
+        SANDBOX_REVIEW_TOOLS.includes(expected),
+        `missing MCP tool entry: ${expected}`
+      );
+      assert.ok(REVIEW_MCP_ALLOWED_TOOLS.includes(expected));
+    }
+  });
+
+  it("REVIEW_MCP_TOOL_NAMES covers diff, log, show, blame, status, grep, ls_files", () => {
+    for (const expected of ["diff", "log", "show", "blame", "status", "grep", "ls_files"]) {
+      assert.ok(REVIEW_MCP_TOOL_NAMES.includes(expected), `missing ${expected}`);
+    }
+  });
+});
+
+describe("SANDBOX_STOP_REVIEW_TOOLS", () => {
+  it("uses exactly the read tools plus bundled git MCP tools", () => {
+    assert.deepEqual(SANDBOX_STOP_REVIEW_TOOLS, [
+      "Read",
+      "Glob",
+      "Grep",
+      ...REVIEW_MCP_ALLOWED_TOOLS,
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. createReviewMcpConfig
+// ---------------------------------------------------------------------------
+
+describe("createReviewMcpConfig", () => {
+  it("writes a JSON file that registers the gitReview MCP server", () => {
+    withTempCodexHome(() => {
+      const filePath = createReviewMcpConfig("/tmp/cc-review-fake-root");
+      try {
+        const content = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        assert.ok(content.mcpServers);
+        const server = content.mcpServers[REVIEW_MCP_SERVER_NAME];
+        assert.ok(server, "gitReview server must be present");
+        assert.equal(typeof server.command, "string");
+        assert.ok(Array.isArray(server.args));
+        assert.ok(server.args.some((a) => a.endsWith("claude-companion.mjs")));
+        assert.ok(server.args.includes("mcp-git"));
+        assert.equal(server.env.CC_GIT_ROOT, "/tmp/cc-review-fake-root");
+      } finally {
+        cleanupReviewMcpConfig(filePath);
+      }
+    });
+  });
+
+  it("rejects missing/blank gitRoot", () => {
+    withTempCodexHome(() => {
+      assert.throws(() => createReviewMcpConfig(""), /gitRoot is required/);
+      assert.throws(() => createReviewMcpConfig(null), /gitRoot is required/);
+      assert.throws(() => createReviewMcpConfig(undefined), /gitRoot is required/);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. buildArgs — review mode (mcpConfigFile + strictMcpConfig + new allowlist)
+// ---------------------------------------------------------------------------
+
+describe("buildArgs review mode", () => {
+  it("emits --mcp-config when mcpConfigFile is provided", () => {
+    const args = buildArgs("p", { mcpConfigFile: "/tmp/mcp.json" });
+    assert.ok(argsHas(args, "--mcp-config", "/tmp/mcp.json"));
+  });
+
+  it("emits --strict-mcp-config when strictMcpConfig is set", () => {
+    const args = buildArgs("p", { strictMcpConfig: true });
+    assert.ok(args.includes("--strict-mcp-config"));
+  });
+
+  it("can express the review allowlist via --allowedTools per entry", () => {
+    const args = buildArgs("p", { allowedTools: SANDBOX_REVIEW_TOOLS });
+    const allowed = argsAllowedTools(args);
+    assert.deepEqual([...allowed].sort(), [...SANDBOX_REVIEW_TOOLS].sort());
   });
 });

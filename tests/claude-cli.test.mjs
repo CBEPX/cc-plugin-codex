@@ -10,10 +10,14 @@ import {
   validateTurnCompletion,
   resolveModel,
   resolveEffort,
+  resolveDefaultModel,
+  resolveDefaultEffort,
   buildArgs,
   MODEL_ALIASES,
   EFFORT_ALIASES,
   VALID_EFFORTS,
+  DEFAULT_MODEL,
+  DEFAULT_EFFORT_BY_MODEL,
   SANDBOX_READ_ONLY_BASH_TOOLS,
   SANDBOX_READ_ONLY_TOOLS,
   SANDBOX_TEMP_DIR,
@@ -423,8 +427,8 @@ describe("validateTurnCompletion", () => {
 // ===========================================================================
 
 describe("resolveModel", () => {
-  it("maps 'sonnet' to 'claude-sonnet-4-6'", () => {
-    assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6");
+  it("maps 'sonnet' to the 1M variant 'claude-sonnet-4-6[1m]'", () => {
+    assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6[1m]");
   });
 
   it("maps 'haiku' to 'claude-haiku-4-5'", () => {
@@ -444,10 +448,84 @@ describe("resolveModel", () => {
     assert.equal(resolveModel(""), undefined);
   });
 
+  it("maps 'opus' to the 1M variant 'claude-opus-4-7[1m]'", () => {
+    assert.equal(resolveModel("opus"), "claude-opus-4-7[1m]");
+  });
+
   it("MODEL_ALIASES map has expected entries", () => {
-    assert.equal(MODEL_ALIASES.size, 2);
+    assert.equal(MODEL_ALIASES.size, 3);
+    assert.ok(MODEL_ALIASES.has("opus"));
     assert.ok(MODEL_ALIASES.has("sonnet"));
     assert.ok(MODEL_ALIASES.has("haiku"));
+  });
+});
+
+// ===========================================================================
+// resolveDefaultModel / resolveDefaultEffort
+// ===========================================================================
+
+describe("resolveDefaultModel", () => {
+  it("returns 'opus' when model is null/undefined/empty", () => {
+    assert.equal(resolveDefaultModel(null), "opus");
+    assert.equal(resolveDefaultModel(undefined), "opus");
+    assert.equal(resolveDefaultModel(""), "opus");
+    assert.equal(resolveDefaultModel("   "), "opus");
+  });
+
+  it("passes through an explicit model", () => {
+    assert.equal(resolveDefaultModel("sonnet"), "sonnet");
+    assert.equal(resolveDefaultModel("haiku"), "haiku");
+    assert.equal(resolveDefaultModel("claude-opus-4-7"), "claude-opus-4-7");
+  });
+
+  it("exposes DEFAULT_MODEL constant as 'opus'", () => {
+    assert.equal(DEFAULT_MODEL, "opus");
+  });
+});
+
+describe("resolveDefaultEffort", () => {
+  it("defaults to xhigh for opus alias and resolved id (including 1M variant)", () => {
+    assert.equal(resolveDefaultEffort("opus", null), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-4-7", null), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-4-7[1m]", null), "xhigh");
+    assert.equal(resolveDefaultEffort("OPUS", undefined), "xhigh");
+  });
+
+  it("defaults to high for sonnet alias and resolved id (including 1M variant)", () => {
+    assert.equal(resolveDefaultEffort("sonnet", null), "high");
+    assert.equal(resolveDefaultEffort("claude-sonnet-4-6", null), "high");
+    assert.equal(resolveDefaultEffort("claude-sonnet-4-6[1m]", null), "high");
+  });
+
+  it("returns undefined for haiku (no effort default)", () => {
+    assert.equal(resolveDefaultEffort("haiku", null), undefined);
+    assert.equal(resolveDefaultEffort("claude-haiku-4-5", undefined), undefined);
+  });
+
+  it("returns undefined for unknown model when effort not provided", () => {
+    assert.equal(resolveDefaultEffort("some-future-model", null), undefined);
+  });
+
+  it("preserves an explicit effort regardless of model", () => {
+    assert.equal(resolveDefaultEffort("opus", "low"), "low");
+    assert.equal(resolveDefaultEffort("sonnet", "medium"), "medium");
+    assert.equal(resolveDefaultEffort("haiku", "high"), "high");
+    assert.equal(resolveDefaultEffort(null, "max"), "max");
+  });
+
+  it("treats blank effort as missing", () => {
+    assert.equal(resolveDefaultEffort("opus", ""), "xhigh");
+    assert.equal(resolveDefaultEffort("opus", "   "), "xhigh");
+  });
+
+  it("DEFAULT_EFFORT_BY_MODEL contains the expected entries", () => {
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("opus"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-7"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-7[1m]"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("sonnet"), "high");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-4-6"), "high");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-4-6[1m]"), "high");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.has("haiku"), false);
   });
 });
 
@@ -476,8 +554,8 @@ describe("resolveEffort", () => {
     assert.equal(resolveEffort("high"), "high");
   });
 
-  it("maps 'xhigh' to 'max'", () => {
-    assert.equal(resolveEffort("xhigh"), "max");
+  it("passes 'xhigh' through as a first-class effort", () => {
+    assert.equal(resolveEffort("xhigh"), "xhigh");
   });
 
   it("maps 'max' to 'max'", () => {
@@ -486,6 +564,7 @@ describe("resolveEffort", () => {
 
   it("normalizes canonical effort values to lowercase", () => {
     assert.equal(resolveEffort("HIGH"), "high");
+    assert.equal(resolveEffort("XHIGH"), "xhigh");
   });
 
   it("throws on unsupported effort values", () => {
@@ -500,19 +579,19 @@ describe("resolveEffort", () => {
     assert.equal(resolveEffort(undefined), undefined);
   });
 
-  it("VALID_EFFORTS contains low, medium, high, max", () => {
+  it("VALID_EFFORTS contains low, medium, high, xhigh, max", () => {
     assert.ok(VALID_EFFORTS.has("low"));
     assert.ok(VALID_EFFORTS.has("medium"));
     assert.ok(VALID_EFFORTS.has("high"));
+    assert.ok(VALID_EFFORTS.has("xhigh"));
     assert.ok(VALID_EFFORTS.has("max"));
-    assert.equal(VALID_EFFORTS.size, 4);
+    assert.equal(VALID_EFFORTS.size, 5);
   });
 
   it("EFFORT_ALIASES only contains legacy compatibility mappings", () => {
     assert.deepEqual(EFFORT_ALIASES, {
       none: "low",
       minimal: "low",
-      xhigh: "max",
     });
   });
 });
@@ -564,11 +643,18 @@ describe("buildArgs", () => {
     const args = buildArgs("p", { model: "sonnet" });
     const idx = args.indexOf("--model");
     assert.ok(idx >= 0);
-    assert.equal(args[idx + 1], "claude-sonnet-4-6");
+    assert.equal(args[idx + 1], "claude-sonnet-4-6[1m]");
   });
 
   it("includes --effort with resolved effort", () => {
     const args = buildArgs("p", { effort: "xhigh" });
+    const idx = args.indexOf("--effort");
+    assert.ok(idx >= 0);
+    assert.equal(args[idx + 1], "xhigh");
+  });
+
+  it("passes 'max' through as --effort max when explicitly requested", () => {
+    const args = buildArgs("p", { effort: "max" });
     const idx = args.indexOf("--effort");
     assert.ok(idx >= 0);
     assert.equal(args[idx + 1], "max");
@@ -669,11 +755,14 @@ describe("SANDBOX_SETTINGS", () => {
     assert.ok("workspace-write" in SANDBOX_SETTINGS);
   });
 
-  it("read-only enables sandbox with allowWrite [SANDBOX_TEMP_DIR]", () => {
+  it("read-only enables sandbox with allowWrite [SANDBOX_TEMP_DIR] and unrestricted network", () => {
     const s = SANDBOX_SETTINGS["read-only"].sandbox;
     assert.equal(s.enabled, true);
     assert.deepEqual(s.filesystem.allowWrite, [SANDBOX_TEMP_DIR]);
-    assert.deepEqual(s.network.allowedDomains, []);
+    // network is intentionally omitted so that WebFetch/WebSearch and Claude's
+    // own API path remain reachable; review safety comes from removing Bash
+    // from the allowlist instead.
+    assert.equal(s.network, undefined);
   });
 
   it("workspace-write enables sandbox with allowWrite ['.', SANDBOX_TEMP_DIR]", () => {

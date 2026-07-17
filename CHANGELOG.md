@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.2.1
+
+- Switch marketplace installs to Codex native plugin hooks: bundled hooks now load from `hooks/hooks.json` in the active plugin cache with `$PLUGIN_ROOT` instead of writing managed global hook commands into `~/.codex/hooks.json`.
+- Remove the local checkout/stable-root install path from the supported install flow. The installer now uses `marketplace/add` + `plugin/install`, cleans stale `~/.codex/plugins/cc` state, and enables `[features].hooks` plus `[features].plugin_hooks`.
+- Update public skills to resolve the active plugin root from their `SKILL.md` path, so marketplace cache installs run the matching companion code after plugin updates.
+- Refresh README, setup, installer, and E2E coverage around the marketplace/cache-only install path, native hook feature-gate repair, and `$cc:setup` trust repair for this plugin's hook hashes.
+- Clarify the optional review gate as a turn-end blocking review of the previous Codex turn and document that gate runs keep the user's Claude Code default model and effort settings.
+
+## v1.2.0
+
+- Default the Claude model for `review`, `adversarial-review`, and `rescue`/`task` to `opus` (resolved to the 1M-context variant `claude-opus-4-7[1m]`) with `xhigh` effort. The `sonnet` alias resolves to `claude-sonnet-4-6[1m]` and defaults to `high` effort; `haiku` stays on `claude-haiku-4-5` with effort unset. `--model` and `--effort` remain user-overridable; `xhigh` is now a first-class effort level and `max` is reserved for users who explicitly opt in.
+- Isolate `review` and `adversarial-review` from the user repo with a three-layer design instead of the previous Bash-pattern allowlist (which the Claude CLI does not strictly enforce — once `Bash` is in the allowlist with any sub-pattern, the entire `Bash` tool opens up). Reviews now run inside an ephemeral `git worktree` checked out at the branch tip (or the original repo for `working-tree` scope, so staged/unstaged/untracked changes remain visible), use a bundled read-only git MCP server (`mcp-git` subcommand) exposing `diff`/`log`/`show`/`blame`/`status`/`grep`/`ls_files` as structured tools with strict ref/path validation, and tighten the allowlist to `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, and `mcp__gitReview__*` only (no `Bash` entry).
+- Leave network unrestricted in the `read-only` sandbox preset so `WebFetch`/`WebSearch` and the Claude CLI's own API path keep working; safety comes from removing `Bash` from the allowlist rather than from blocking network. File writes outside the OS temp dir stay blocked.
+- Expose `--effort` on `review` and `adversarial-review` and document the new defaults in `SKILL.md`, `README.md`, and the internal `cli-runtime` reference.
+- Sweep stranded `review-worktrees/`, `sandbox/`, and `mcp/` runtime files older than six hours at the start of every review to reclaim resources after `kill -9` or crashed runs.
+
 ## v1.1.0
 
 - Restructure the internal Claude runtime and prompt-shaping guidance from pseudo-hidden `SKILL.md` files into plain internal reference documents, while keeping the public `review`, `adversarial-review`, and `rescue` skills self-sufficient on their critical invocation rules.

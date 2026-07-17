@@ -10,9 +10,11 @@
  *
  * Adapted from codex-companion.mjs:
  * - Uses claude-cli.mjs instead of app-server/broker
- * - MODEL_ALIASES: sonnet -> claude-sonnet-4-6, haiku -> claude-haiku-4-5
- * - Claude CLI effort values: low, medium, high, max
- * - Legacy effort aliases: none|minimal -> low, xhigh -> max
+ * - MODEL_ALIASES: opus -> claude-opus-4-7[1m], sonnet -> claude-sonnet-4-6[1m], haiku -> claude-haiku-4-5
+ * - Default model when --model is unset: opus
+ * - Default effort by model: opus -> xhigh, sonnet -> high, haiku -> unset
+ * - Claude CLI effort values: low, medium, high, xhigh, max
+ * - Legacy effort aliases: none|minimal -> low
  * - Review gate matches upstream setup semantics: Stop hook runs when enabled
  *
  * Subcommands:
@@ -37,10 +39,20 @@ import {
   cancelClaudeProcess,
   MODEL_ALIASES,
   resolveEffort,
+  resolveDefaultModel,
+  resolveDefaultEffort,
   SANDBOX_READ_ONLY_TOOLS,
   createSandboxSettings,
   cleanupSandboxSettings,
+  createReviewMcpConfig,
+  cleanupReviewMcpConfig,
+  pruneStaleSandboxSettings,
+  pruneStaleReviewMcpConfigs,
 } from "./lib/claude-cli.mjs";
+import {
+  createReviewIsolation,
+  pruneStaleReviewWorktrees,
+} from "./lib/review-worktree.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import {
   collectReviewContext,
@@ -48,6 +60,11 @@ import {
   resolveReviewTarget
 } from "./lib/git.mjs";
 import { binaryAvailable, getProcessIdentity } from "./lib/process.mjs";
+import { callCodexAppServer } from "./lib/codex-app-server.mjs";
+import {
+  ensureNativePluginHooksEnabled,
+  nativePluginHooksStatus,
+} from "./lib/codex-config.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { parseStructuredOutput } from "./lib/structured-output.mjs";
 import {
@@ -100,7 +117,7 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const STOP_REVIEW_TASK_MARKER = "Run a turn-end gate review of the previous Codex turn.";
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
 // ---------------------------------------------------------------------------
@@ -112,9 +129,9 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|sonnet|haiku>] [--effort <low|medium|high|max>] [prompt]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>]",
+      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [focus text]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [prompt]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
@@ -322,20 +339,200 @@ function readOutputSchema(schemaPath) {
 // Readiness checks
 // ---------------------------------------------------------------------------
 
+function readCodexConfig() {
+  if (!fs.existsSync(CODEX_CONFIG_TOML)) {
+    return "";
+  }
+  return fs.readFileSync(CODEX_CONFIG_TOML, "utf8");
+}
+
+function writeCodexConfig(content) {
+  fs.mkdirSync(path.dirname(CODEX_CONFIG_TOML), { recursive: true });
+  fs.writeFileSync(CODEX_CONFIG_TOML, content, "utf8");
+}
+
+function configureNativePluginHooks() {
+  const existing = readCodexConfig();
+  const { changed, content } = ensureNativePluginHooksEnabled(existing);
+  if (changed || !fs.existsSync(CODEX_CONFIG_TOML)) {
+    writeCodexConfig(content);
+  }
+  return changed;
+}
+
+function currentPluginCacheInstallInfo() {
+  const cacheRoot = path.join(CODEX_DIR, "plugins", "cache");
+  const relativePath = path.relative(cacheRoot, ROOT_DIR);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  const [marketplaceName, pluginName, version] = relativePath
+    .split(path.sep)
+    .filter(Boolean);
+  if (!marketplaceName || pluginName !== "cc" || !version) {
+    return null;
+  }
+  return {
+    marketplaceName,
+    pluginName,
+    version,
+    pluginId: `${pluginName}@${marketplaceName}`,
+  };
+}
+
+function shouldRepairPluginHookTrust() {
+  return (
+    Boolean(currentPluginCacheInstallInfo()) ||
+    process.env.CC_PLUGIN_CODEX_FORCE_HOOK_TRUST === "1"
+  );
+}
+
+function pathIsInsideRoot(filePath) {
+  if (typeof filePath !== "string" || !filePath) {
+    return false;
+  }
+  const relativePath = path.relative(ROOT_DIR, path.resolve(filePath));
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function isCurrentPluginHook(hook, pluginInfo) {
+  if (!hook || typeof hook !== "object") {
+    return false;
+  }
+  if (String(hook.source || "").toLowerCase() !== "plugin") {
+    return false;
+  }
+  if (pluginInfo?.pluginId && hook.pluginId !== pluginInfo.pluginId) {
+    return false;
+  }
+  if (pluginInfo == null && typeof hook.pluginId === "string" && !hook.pluginId.startsWith("cc@")) {
+    return false;
+  }
+  return pathIsInsideRoot(hook.sourcePath);
+}
+
+function hookNeedsTrust(hook) {
+  const trustStatus = String(hook?.trustStatus || "").toLowerCase();
+  return trustStatus === "untrusted" || trustStatus === "modified";
+}
+
+async function repairNativePluginHookTrust(cwd) {
+  const pluginInfo = currentPluginCacheInstallInfo();
+  if (!shouldRepairPluginHookTrust()) {
+    return {
+      attempted: false,
+      ready: true,
+      detail: "not running from an installed Codex plugin cache",
+    };
+  }
+
+  let response;
+  try {
+    response = await callCodexAppServer({
+      cwd,
+      method: "hooks/list",
+      params: { cwds: [cwd] },
+    });
+  } catch (error) {
+    return {
+      attempted: true,
+      ready: false,
+      detail: `unable to inspect native plugin hooks: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+
+  const entries = Array.isArray(response?.data) ? response.data : [];
+  const hooks = entries.flatMap((entry) => (Array.isArray(entry?.hooks) ? entry.hooks : []));
+  const pluginHooks = hooks.filter((hook) => isCurrentPluginHook(hook, pluginInfo));
+  const untrustedHooks = pluginHooks.filter(
+    (hook) => hookNeedsTrust(hook) && typeof hook.key === "string" && hook.currentHash
+  );
+
+  if (pluginHooks.length === 0) {
+    return {
+      attempted: true,
+      ready: false,
+      found: 0,
+      trusted: 0,
+      detail: "no native plugin hooks were reported for this plugin",
+    };
+  }
+  if (untrustedHooks.length === 0) {
+    return {
+      attempted: true,
+      ready: true,
+      found: pluginHooks.length,
+      trusted: 0,
+      detail: `native plugin hooks already trusted (${pluginHooks.length})`,
+    };
+  }
+
+  const value = Object.fromEntries(
+    untrustedHooks.map((hook) => [
+      hook.key,
+      {
+        trusted_hash: hook.currentHash,
+      },
+    ])
+  );
+
+  try {
+    await callCodexAppServer({
+      cwd,
+      method: "config/batchWrite",
+      params: {
+        edits: [
+          {
+            keyPath: "hooks.state",
+            value,
+            mergeStrategy: "upsert",
+          },
+        ],
+        filePath: null,
+        expectedVersion: null,
+        reloadUserConfig: true,
+      },
+    });
+  } catch (error) {
+    return {
+      attempted: true,
+      ready: false,
+      found: pluginHooks.length,
+      trusted: 0,
+      detail: `unable to trust native plugin hooks: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+
+  return {
+    attempted: true,
+    ready: true,
+    found: pluginHooks.length,
+    trusted: untrustedHooks.length,
+    detail: `trusted ${untrustedHooks.length} native plugin hooks`,
+  };
+}
+
 function checkHooksStatus() {
-  const hooksFile = path.join(CODEX_DIR, "hooks.json");
-  if (!fs.existsSync(hooksFile)) {
-    return { installed: false, detail: "hooks.json not found — run install-hooks.mjs" };
+  const bundledHooksFile = path.join(ROOT_DIR, "hooks", "hooks.json");
+  if (!fs.existsSync(bundledHooksFile)) {
+    return {
+      installed: false,
+      detail: `plugin-bundled hooks file missing at ${bundledHooksFile}`,
+    };
   }
-  const content = fs.readFileSync(hooksFile, "utf8");
-  if (
-    content.includes("session-lifecycle-hook.mjs") &&
-    content.includes("stop-review-gate-hook.mjs") &&
-    content.includes("unread-result-hook.mjs")
-  ) {
-    return { installed: true, detail: "Codex hooks installed" };
+
+  const status = nativePluginHooksStatus(readCodexConfig());
+  if (status.installed) {
+    return { installed: true, detail: "native Codex plugin hooks enabled" };
   }
-  return { installed: false, detail: "hooks.json exists but Codex hooks not found — run install-hooks.mjs" };
+  return {
+    installed: false,
+    detail: `native Codex plugin hooks disabled: missing ${status.missing.join(", ")}`,
+  };
 }
 
 function ensureClaudeReady(cwd) {
@@ -352,7 +549,7 @@ function ensureClaudeReady(cwd) {
   }
 }
 
-function buildSetupReport(cwd, actionsTaken = []) {
+function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
   const claudeStatus = getClaudeAvailability(cwd);
@@ -368,11 +565,14 @@ function buildSetupReport(cwd, actionsTaken = []) {
     nextSteps.push("Run `claude auth login`.");
   }
   if (!hooksStatus.installed) {
-    nextSteps.push("Run `node scripts/install-hooks.mjs` to install Codex hooks.");
+    nextSteps.push("Run `$cc:setup` again after enabling native Codex plugin hooks.");
+  }
+  if (hookTrust?.ready === false) {
+    nextSteps.push("Open `/hooks` and trust this plugin's hooks manually, then rerun `$cc:setup`.");
   }
   if (!config.stopReviewGate) {
     nextSteps.push(
-      "Optional: run `$cc:setup --enable-review-gate` to require a fresh review before stop."
+      "Optional: run `$cc:setup --enable-review-gate` to require a fresh Claude review before each edit-producing Codex turn finishes."
     );
   }
 
@@ -381,11 +581,13 @@ function buildSetupReport(cwd, actionsTaken = []) {
       nodeStatus.available &&
       claudeStatus.available &&
       authStatus.loggedIn &&
-      hooksStatus.installed,
+      hooksStatus.installed &&
+      hookTrust?.ready !== false,
     node: nodeStatus,
     claude: claudeStatus,
     auth: authStatus,
     hooks: hooksStatus,
+    hookTrust,
     reviewGateEnabled: Boolean(config.stopReviewGate),
     actionsTaken,
     nextSteps
@@ -396,7 +598,7 @@ function buildSetupReport(cwd, actionsTaken = []) {
 // setup
 // ---------------------------------------------------------------------------
 
-function handleSetup(argv) {
+async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
@@ -410,15 +612,27 @@ function handleSetup(argv) {
   const workspaceRoot = resolveCommandWorkspace(options);
   const actionsTaken = [];
 
-  if (options["enable-review-gate"]) {
-    setConfig(workspaceRoot, "stopReviewGate", true);
-    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
-  } else if (options["disable-review-gate"]) {
-    setConfig(workspaceRoot, "stopReviewGate", false);
-    actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+  if (configureNativePluginHooks()) {
+    actionsTaken.push(
+      "Enabled native Codex plugin hooks via [features].hooks and [features].plugin_hooks."
+    );
+    actionsTaken.push("Restart Codex if this session started before the feature change.");
   }
 
-  const finalReport = buildSetupReport(cwd, actionsTaken);
+  const hookTrust = await repairNativePluginHookTrust(cwd);
+  if (hookTrust.trusted > 0) {
+    actionsTaken.push(`Trusted ${hookTrust.trusted} native Codex plugin hooks.`);
+  }
+
+  if (options["enable-review-gate"]) {
+    setConfig(workspaceRoot, "stopReviewGate", true);
+    actionsTaken.push(`Enabled the turn-end review gate for ${workspaceRoot}.`);
+  } else if (options["disable-review-gate"]) {
+    setConfig(workspaceRoot, "stopReviewGate", false);
+    actionsTaken.push(`Disabled the turn-end review gate for ${workspaceRoot}.`);
+  }
+
+  const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust);
   outputResult(
     options.json ? finalReport : renderSetupReport(finalReport),
     options.json
@@ -462,6 +676,11 @@ async function executeReviewRun(request) {
   ensureClaudeReady(request.cwd);
   ensureGitRepository(request.cwd);
 
+  // Sweep dead resources from previous crashed runs before allocating new ones.
+  try { pruneStaleReviewWorktrees(request.cwd); } catch {}
+  try { pruneStaleSandboxSettings(); } catch {}
+  try { pruneStaleReviewMcpConfigs(); } catch {}
+
   const target = resolveReviewTarget(request.cwd, {
     base: request.base,
     scope: request.scope
@@ -470,19 +689,32 @@ async function executeReviewRun(request) {
   const reviewName = request.reviewName ?? "Review";
 
   if (reviewName === "Review") {
-    // Standard review via Claude CLI — read-only sandbox
+    // Standard review via Claude CLI — read-only sandbox + ephemeral worktree.
     const context = collectReviewContext(request.cwd, target);
     const prompt = buildReviewPrompt(context);
-    const sandboxSettingsFile = createSandboxSettings("read-only");
     let result;
+    const sandboxSettingsFile = createSandboxSettings("read-only");
     try {
-      result = await runClaudeReview(request.cwd, prompt, {
-        model: request.model,
-        onProgress: request.onProgress,
-        onSpawn: request.onSpawn,
-        permissionMode: "dontAsk",
-        settingsFile: sandboxSettingsFile,
-      });
+      const isolation = createReviewIsolation(request.cwd, target, { label: "review" });
+      try {
+        const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
+        try {
+          result = await runClaudeReview(isolation.cwd, prompt, {
+            model: request.model,
+            effort: request.effort,
+            onProgress: request.onProgress,
+            onSpawn: request.onSpawn,
+            permissionMode: "dontAsk",
+            settingsFile: sandboxSettingsFile,
+            mcpConfigFile,
+            strictMcpConfig: true,
+          });
+        } finally {
+          cleanupReviewMcpConfig(mcpConfigFile);
+        }
+      } finally {
+        isolation.cleanup();
+      }
     } finally {
       cleanupSandboxSettings(sandboxSettingsFile);
     }
@@ -523,25 +755,40 @@ async function executeReviewRun(request) {
     };
   }
 
-  // Adversarial review with structured output — read-only sandbox
+  // Adversarial review with structured output — read-only sandbox + ephemeral worktree.
   const context = collectReviewContext(request.cwd, target);
   const prompt = buildAdversarialReviewPrompt(context, focusText);
   const schema = readOutputSchema(REVIEW_SCHEMA_PATH);
-  const sandboxSettingsFile = createSandboxSettings("read-only");
   let result;
+  const sandboxSettingsFile = createSandboxSettings("read-only");
   try {
-    result = await runClaudeAdversarialReview(
-      context.repoRoot,
-      prompt,
-      schema,
-      {
-        model: request.model,
-        onProgress: request.onProgress,
-        onSpawn: request.onSpawn,
-        permissionMode: "dontAsk",
-        settingsFile: sandboxSettingsFile,
+    const isolation = createReviewIsolation(context.repoRoot, target, {
+      label: "adversarial-review",
+    });
+    try {
+      const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
+      try {
+        result = await runClaudeAdversarialReview(
+          isolation.cwd,
+          prompt,
+          schema,
+          {
+            model: request.model,
+            effort: request.effort,
+            onProgress: request.onProgress,
+            onSpawn: request.onSpawn,
+            permissionMode: "dontAsk",
+            settingsFile: sandboxSettingsFile,
+            mcpConfigFile,
+            strictMcpConfig: true,
+          }
+        );
+      } finally {
+        cleanupReviewMcpConfig(mcpConfigFile);
       }
-    );
+    } finally {
+      isolation.cleanup();
+    }
   } finally {
     cleanupSandboxSettings(sandboxSettingsFile);
   }
@@ -620,8 +867,8 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
     String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)
   ) {
     return {
-      title: "Claude Code Stop Gate Review",
-      summary: "Stop-gate review of previous Claude turn"
+      title: "Claude Code Turn-End Gate Review",
+      summary: "Turn-end gate review of previous Codex turn"
     };
   }
 
@@ -825,11 +1072,12 @@ function buildReviewRequest({
   base,
   scope,
   model,
+  effort,
   focusText,
   reviewName,
   markViewedOnSuccess
 }) {
-  return { cwd, base, scope, model, focusText, reviewName, markViewedOnSuccess };
+  return { cwd, base, scope, model, effort, focusText, reviewName, markViewedOnSuccess };
 }
 
 function spawnDetachedReviewWorker(cwd, jobId) {
@@ -1183,7 +1431,7 @@ async function resolveLatestResumableSession(cwd, options = {}) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd", "view-state", "job-id", "owner-session-id"],
+    valueOptions: ["base", "scope", "model", "effort", "cwd", "view-state", "job-id", "owner-session-id"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -1204,6 +1452,10 @@ async function handleReviewCommand(argv, config) {
     options["view-state"],
     Boolean(options.background)
   );
+
+  const requestedModel = normalizeRequestedModel(options.model);
+  const resolvedModel = resolveDefaultModel(requestedModel);
+  const resolvedEffort = resolveDefaultEffort(resolvedModel, options.effort);
 
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     // Validate inside the reservation guard so failures do not leak markers.
@@ -1227,7 +1479,8 @@ async function handleReviewCommand(argv, config) {
         cwd,
         base: options.base,
         scope: options.scope,
-        model: options.model,
+        model: resolvedModel,
+        effort: resolvedEffort,
         focusText,
         reviewName: config.reviewName,
         markViewedOnSuccess
@@ -1248,7 +1501,8 @@ async function handleReviewCommand(argv, config) {
           cwd,
           base: options.base,
           scope: options.scope,
-          model: options.model,
+          model: resolvedModel,
+          effort: resolvedEffort,
           focusText,
           reviewName: config.reviewName,
           onProgress: progress,
@@ -1300,8 +1554,10 @@ async function handleTask(argv) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
 
-  const model = normalizeRequestedModel(options.model);
-  const effort = resolveEffort(options.effort) ?? null;
+  const requestedModel = normalizeRequestedModel(options.model);
+  const model = resolveDefaultModel(requestedModel);
+  const resolvedEffort = resolveDefaultEffort(model, options.effort);
+  const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
   const markViewedOnSuccess = resolveMarkViewedOnSuccess(
     options["view-state"],
@@ -1778,7 +2034,7 @@ async function main() {
 
   switch (subcommand) {
     case "setup":
-      handleSetup(argv);
+      await handleSetup(argv);
       break;
     case "review":
       await handleReview(argv);
@@ -1819,9 +2075,18 @@ async function main() {
     case "cancel":
       await handleCancel(argv);
       break;
+    case "mcp-git":
+      await handleMcpGit(argv);
+      break;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);
   }
+}
+
+async function handleMcpGit(_argv) {
+  const { runMcpGitServer } = await import("./lib/mcp-git.mjs");
+  const exitCode = await runMcpGitServer();
+  process.exit(exitCode ?? 0);
 }
 
 main().catch((error) => {

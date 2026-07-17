@@ -12,6 +12,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
@@ -344,15 +345,6 @@ export const SANDBOX_READ_ONLY_BASH_TOOLS = [
   "Bash(git config --get:*)",
 ];
 
-export const SANDBOX_STOP_REVIEW_TOOLS = [
-  "Read",
-  "Glob",
-  "Grep",
-  "Bash(git log:*)",
-  "Bash(git diff:*)",
-  "Bash(git show:*)",
-];
-
 /** read-only: file reading + read-only git + web + read-only agents. No writes, MCP, or skills. */
 export const SANDBOX_READ_ONLY_TOOLS = [
   "Read",
@@ -364,6 +356,48 @@ export const SANDBOX_READ_ONLY_TOOLS = [
   "Agent(explore,plan)",
 ];
 
+/**
+ * MCP server name used for the bundled read-only git MCP server. Exposes tools as
+ * `mcp__<SERVER_NAME>__<toolName>` (see scripts/lib/mcp-git.mjs for the catalog).
+ */
+export const REVIEW_MCP_SERVER_NAME = "gitReview";
+
+export const REVIEW_MCP_TOOL_NAMES = [
+  "diff",
+  "log",
+  "show",
+  "blame",
+  "status",
+  "grep",
+  "ls_files",
+];
+
+export const REVIEW_MCP_ALLOWED_TOOLS = REVIEW_MCP_TOOL_NAMES.map(
+  (name) => `mcp__${REVIEW_MCP_SERVER_NAME}__${name}`
+);
+
+export const SANDBOX_STOP_REVIEW_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  ...REVIEW_MCP_ALLOWED_TOOLS,
+];
+
+/**
+ * Tools exposed to review/adversarial-review runs. Bash is intentionally absent —
+ * the Claude CLI does not strictly enforce `Bash(<pattern>:*)` sub-patterns, so any
+ * Bash entry would open the full Bash surface. Git operations are surfaced through
+ * the bundled read-only git MCP server instead (`REVIEW_MCP_ALLOWED_TOOLS`).
+ */
+export const SANDBOX_REVIEW_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  "WebSearch",
+  "WebFetch",
+  ...REVIEW_MCP_ALLOWED_TOOLS,
+];
+
 // ---------------------------------------------------------------------------
 // Sandbox Settings — OS-level isolation via Claude Code's sandbox feature.
 // Written to a temp file and passed via --settings.
@@ -372,7 +406,10 @@ export const SANDBOX_READ_ONLY_TOOLS = [
 /**
  * Sandbox presets matching Codex sandbox modes.
  *
- * read-only:       no writes at all, no network from Bash.
+ * read-only:       no file writes outside the OS temp dir. Network is allowed so
+ *                  that `WebFetch`, `WebSearch`, and the Claude CLI's API path keep
+ *                  working; the review allowlist excludes Bash entirely, so there
+ *                  is no shell surface to exfiltrate or mutate state through.
  * workspace-write: Bash can write to cwd + OS temp dir only, no network from Bash.
  *                  All tools allowed (no allowedTools restriction).
  */
@@ -380,12 +417,11 @@ export const SANDBOX_SETTINGS = {
   "read-only": {
     sandbox: {
       enabled: true,
-      autoAllowBashIfSandboxed: true,
+      // No Bash in the review allowlist, but keep this flag conservative so that
+      // any sandbox-aware tool still has to opt in explicitly.
+      autoAllowBashIfSandboxed: false,
       filesystem: {
         allowWrite: [SANDBOX_TEMP_DIR],
-      },
-      network: {
-        allowedDomains: [],
       },
     },
   },
@@ -431,21 +467,156 @@ export function cleanupSandboxSettings(filePath) {
 }
 
 // ---------------------------------------------------------------------------
+// Review MCP config
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the absolute path of the bundled claude-companion.mjs script so the
+ * `mcp-git` subcommand can be invoked from any cwd. Uses `fileURLToPath` so the
+ * resolution works on Windows where `new URL(...).pathname` is not a usable
+ * filesystem path.
+ */
+function resolveCompanionScriptPath() {
+  return path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "claude-companion.mjs"
+  );
+}
+
+/**
+ * Write an `--mcp-config` JSON file that registers the bundled read-only git
+ * MCP server. The server's CC_GIT_ROOT env var is set to `gitRoot` so that its
+ * tool handlers operate strictly inside the review worktree.
+ */
+export function createReviewMcpConfig(gitRoot) {
+  if (!gitRoot || typeof gitRoot !== "string") {
+    throw new Error("createReviewMcpConfig: gitRoot is required");
+  }
+  const companionScript = resolveCompanionScriptPath();
+  const config = {
+    mcpServers: {
+      [REVIEW_MCP_SERVER_NAME]: {
+        command: process.execPath,
+        args: [companionScript, "mcp-git"],
+        env: {
+          CC_GIT_ROOT: gitRoot,
+        },
+      },
+    },
+  };
+
+  const dir = path.join(resolvePluginRuntimeRoot(), "mcp");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmpFile = path.join(
+    dir,
+    `cc-mcp-${process.pid}-${Date.now().toString(36)}-${randomBytes(6).toString("hex")}.json`
+  );
+  fs.writeFileSync(tmpFile, JSON.stringify(config), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return tmpFile;
+}
+
+export function cleanupReviewMcpConfig(filePath) {
+  if (filePath) {
+    try { fs.unlinkSync(filePath); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stale tmp sweepers — reclaim files left behind by SIGKILL/crashes.
+// ---------------------------------------------------------------------------
+
+function pruneStaleTempFiles(subdir, options = {}) {
+  const prefix = options.prefix;
+  const maxAgeMs = options.maxAgeMs ?? 6 * 60 * 60 * 1000;
+  const dir = path.join(resolvePluginRuntimeRoot(), subdir);
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (prefix && !entry.name.startsWith(prefix)) continue;
+    const full = path.join(dir, entry.name);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (now - stat.mtimeMs < maxAgeMs) continue;
+    try {
+      fs.unlinkSync(full);
+    } catch {
+      // Best effort: leave on disk rather than crash callers.
+    }
+  }
+}
+
+/**
+ * Sweep sandbox-settings JSON files left behind by crashes. Call this at the
+ * start of any flow that creates sandbox settings so they do not accumulate.
+ */
+export function pruneStaleSandboxSettings(options = {}) {
+  pruneStaleTempFiles("sandbox", { prefix: "cc-sandbox-", ...options });
+}
+
+/**
+ * Sweep review MCP config JSON files left behind by crashes. The same SIGKILL
+ * window that strands a worktree can strand the MCP config; clean both.
+ */
+export function pruneStaleReviewMcpConfigs(options = {}) {
+  pruneStaleTempFiles("mcp", { prefix: "cc-mcp-", ...options });
+}
+
+// ---------------------------------------------------------------------------
 // Model & Effort Mapping
 // ---------------------------------------------------------------------------
 
 export const MODEL_ALIASES = new Map([
-  ["sonnet", "claude-sonnet-4-6"],
+  ["opus", "claude-opus-4-7[1m]"],
+  ["sonnet", "claude-sonnet-4-6[1m]"],
   ["haiku", "claude-haiku-4-5"],
 ]);
 
 export const EFFORT_ALIASES = {
   none: "low",
   minimal: "low",
-  xhigh: "max",
 };
 
-export const VALID_EFFORTS = new Set(["low", "medium", "high", "max"]);
+export const VALID_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+export const DEFAULT_MODEL = "opus";
+
+export const DEFAULT_EFFORT_BY_MODEL = new Map([
+  ["opus", "xhigh"],
+  ["claude-opus-4-7", "xhigh"],
+  ["claude-opus-4-7[1m]", "xhigh"],
+  ["sonnet", "high"],
+  ["claude-sonnet-4-6", "high"],
+  ["claude-sonnet-4-6[1m]", "high"],
+]);
+
+export function resolveDefaultModel(model) {
+  if (model == null || String(model).trim() === "") {
+    return DEFAULT_MODEL;
+  }
+  return model;
+}
+
+export function resolveDefaultEffort(model, effort) {
+  if (effort != null && String(effort).trim() !== "") {
+    return effort;
+  }
+  const key = String(model ?? "").trim().toLowerCase();
+  return DEFAULT_EFFORT_BY_MODEL.get(key);
+}
 
 export function resolveModel(model) {
   if (!model) return undefined;
@@ -522,6 +693,12 @@ export function buildArgs(prompt, options = {}) {
   }
   if (options.settingsFile) {
     args.push("--settings", options.settingsFile);
+  }
+  if (options.mcpConfigFile) {
+    args.push("--mcp-config", options.mcpConfigFile);
+  }
+  if (options.strictMcpConfig) {
+    args.push("--strict-mcp-config");
   }
 
   args.push("--", prompt);
@@ -625,12 +802,17 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
 
 /**
  * Execute a review (non-streaming, no session persistence).
+ *
+ * The default allowlist is `SANDBOX_REVIEW_TOOLS` (Read/Glob/Grep/Web + the git
+ * MCP tool surface). Callers that want to run with an alternative allowlist —
+ * e.g., legacy `SANDBOX_READ_ONLY_TOOLS` for back-compat — can override via
+ * `options.allowedTools`. Bash is intentionally excluded by default.
  */
 export async function runClaudeReview(cwd, prompt, options = {}) {
   // Use streaming mode (same as runClaudeTurn) for progress reporting
   const result = await runClaudeTurn(cwd, prompt, {
     noSessionPersistence: true,
-    allowedTools: SANDBOX_READ_ONLY_TOOLS,
+    allowedTools: SANDBOX_REVIEW_TOOLS,
     ...options,
   });
 
