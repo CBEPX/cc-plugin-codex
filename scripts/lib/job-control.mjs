@@ -141,7 +141,7 @@ export function readStoredJob(workspaceRoot, jobId) {
   return readJobFile(workspaceRoot, jobId);
 }
 
-function matchJobReference(jobs, reference, predicate = () => true) {
+function matchJobReference(jobs, reference, predicate = (_job) => true) {
   const filtered = jobs.filter(predicate);
   if (!reference) return filtered[0] ?? null;
   const exact = filtered.find((job) => job.id === reference);
