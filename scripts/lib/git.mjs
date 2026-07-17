@@ -10,6 +10,7 @@ import { isProbablyText } from "./fs.mjs";
 import { formatCommandFailure, runCommand, runCommandChecked } from "./process.mjs";
 
 const MAX_UNTRACKED_BYTES = 24 * 1024;
+const MAX_UNTRACKED_TOTAL_BYTES = 32 * 1024;
 const MAX_INLINE_REVIEW_DIFF_BYTES = 64 * 1024;
 const REVIEW_DIFF_READ_MAX_BUFFER = MAX_INLINE_REVIEW_DIFF_BYTES + 8 * 1024;
 const HASH_OBJECT_BATCH_SIZE = 128;
@@ -317,6 +318,32 @@ function formatUntrackedFile(cwd, relativePath) {
   }
 }
 
+function formatUntrackedFiles(cwd, relativePaths) {
+  const sections = [];
+  let totalBytes = 0;
+  let omitted = 0;
+
+  for (const relativePath of relativePaths) {
+    const section = formatUntrackedFile(cwd, relativePath);
+    const separator = sections.length > 0 ? "\n\n" : "";
+    const sectionBytes = Buffer.byteLength(separator + section, "utf8");
+    if (totalBytes + sectionBytes > MAX_UNTRACKED_TOTAL_BYTES) {
+      omitted += 1;
+      continue;
+    }
+    sections.push(section);
+    totalBytes += sectionBytes;
+  }
+
+  if (omitted > 0) {
+    sections.push(
+      `### Omitted untracked files\n(skipped: ${omitted} untracked file(s) exceed the aggregate context limit)\nInspect them with \`git ls-files --others --exclude-standard\`.`
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
 function shouldInlineReviewDiff(...sections) {
   let totalBytes = 0;
   for (const section of sections) {
@@ -346,7 +373,7 @@ function readBoundedGitDiff(cwd, args) {
 
 function collectWorkingTreeContext(cwd, state) {
   const status = gitChecked(cwd, ["status", "--short"]).stdout.trim();
-  const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
+  const untrackedBody = formatUntrackedFiles(cwd, state.untracked);
   const stagedDiff = readBoundedGitDiff(cwd, ["diff", "--cached", "--no-ext-diff", "--submodule=diff"]);
   const unstagedDiff = readBoundedGitDiff(cwd, ["diff", "--no-ext-diff", "--submodule=diff"]);
   const inlineDiffs =

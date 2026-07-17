@@ -103,6 +103,33 @@ describe("collectReviewContext", () => {
     assert.match(context.content, /tracked-link[\s\S]*skipped: symlink/);
   });
 
+  it("bounds aggregate untracked file context", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "tracked\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "tracked"]);
+
+    for (let index = 0; index < 10; index += 1) {
+      fs.writeFileSync(
+        path.join(repo, `untracked-${index}.txt`),
+        `file-${index}\n${"x".repeat(6 * 1024)}`,
+        "utf8"
+      );
+    }
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.match(context.content, /file-0/);
+    assert.doesNotMatch(context.content, /file-9\nx/);
+    assert.match(context.content, /Omitted untracked files/);
+    assert.match(context.content, /git ls-files --others --exclude-standard/);
+    assert.ok(Buffer.byteLength(context.content, "utf8") < 64 * 1024);
+  });
+
   it("omits very large working-tree diffs and tells the reviewer to inspect git directly", () => {
     const repo = createRepo();
     const largeText = `${"x".repeat(200)}\n`.repeat(500);
