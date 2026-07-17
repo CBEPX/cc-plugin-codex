@@ -143,6 +143,15 @@ export function createJobLogFile(workspaceRoot, jobId, title) {
   return logFile;
 }
 
+/** @returns {{ stdio: import("node:child_process").StdioOptions, close: () => void }} */
+export function createWorkerLogStdio(logFile) {
+  const fd = fs.openSync(logFile, "a");
+  return {
+    stdio: ["ignore", fd, fd],
+    close: () => fs.closeSync(fd),
+  };
+}
+
 export function createJobRecord(base, options = {}) {
   const env = options.env ?? process.env;
   const sessionId =

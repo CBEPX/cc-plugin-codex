@@ -17,6 +17,7 @@ import {
   appendLogLine,
   appendLogBlock,
   createJobLogFile,
+  createWorkerLogStdio,
   createJobRecord,
   runTrackedJob,
 } from "../scripts/lib/tracked-jobs.mjs";
@@ -191,6 +192,31 @@ describe("createJobLogFile", () => {
     const content = fs.readFileSync(logFile, "utf8");
     assert.equal(content, "");
     fs.unlinkSync(logFile);
+  });
+});
+
+describe("createWorkerLogStdio", () => {
+  it("redirects worker stdout and stderr to the job log", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-log-"));
+    const logFile = path.join(dir, "worker.log");
+    fs.writeFileSync(logFile, "", "utf8");
+
+    const workerLog = createWorkerLogStdio(logFile);
+    try {
+      const result = spawnSync(
+        process.execPath,
+        ["-e", "console.log('worker out'); console.error('worker err')"],
+        { stdio: workerLog.stdio }
+      );
+      assert.equal(result.status, 0);
+    } finally {
+      workerLog.close();
+    }
+
+    const content = fs.readFileSync(logFile, "utf8");
+    assert.match(content, /worker out/);
+    assert.match(content, /worker err/);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 

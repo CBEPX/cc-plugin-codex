@@ -98,6 +98,7 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  createWorkerLogStdio,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
@@ -1080,21 +1081,26 @@ function buildReviewRequest({
   return { cwd, base, scope, model, effort, focusText, reviewName, markViewedOnSuccess };
 }
 
-function spawnDetachedReviewWorker(cwd, jobId) {
+function spawnDetachedWorker(cwd, command, jobId, logFile) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "review-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
-  child.unref();
-  return child;
+  const workerLog = createWorkerLogStdio(logFile);
+  try {
+    const child = spawn(
+      process.execPath,
+      [scriptPath, command, "--cwd", cwd, "--job-id", jobId],
+      {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: workerLog.stdio,
+        windowsHide: true
+      }
+    );
+    child.unref();
+    return child;
+  } finally {
+    workerLog.close();
+  }
 }
 
 function enqueueBackgroundReview(cwd, job, request) {
@@ -1111,7 +1117,7 @@ function enqueueBackgroundReview(cwd, job, request) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedReviewWorker(cwd, job.id);
+  const child = spawnDetachedWorker(cwd, "review-worker", job.id, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {
@@ -1289,23 +1295,6 @@ async function runForegroundCommand(job, runner, options = {}) {
 // Background task spawning
 // ---------------------------------------------------------------------------
 
-function spawnDetachedTaskWorker(cwd, jobId) {
-  const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
-  child.unref();
-  return child;
-}
-
 function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
@@ -1320,7 +1309,7 @@ function enqueueBackgroundTask(cwd, job, request) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  const child = spawnDetachedWorker(cwd, "task-worker", job.id, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {
