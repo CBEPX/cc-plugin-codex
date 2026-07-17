@@ -1,11 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Send Claude prompts through stdin instead of command-line arguments so large working-tree reviews no longer fail with `spawn ENAMETOOLONG` on Windows, and fail closed if prompt delivery itself errors.
+- Resolve native `claude.exe` shims and npm-packaged executables from the active Windows `PATH`, npm prefix, or `APPDATA`, while retaining an explicit `CC_PLUGIN_CODEX_CLAUDE_BIN` override.
+
 ## v1.2.1
 
 - Switch marketplace installs to Codex native plugin hooks: bundled hooks now load from `hooks/hooks.json` in the active plugin cache with `$PLUGIN_ROOT` instead of writing managed global hook commands into `~/.codex/hooks.json`.
 - Remove the local checkout/stable-root install path from the supported install flow. The installer now uses `marketplace/add` + `plugin/install`, cleans stale `~/.codex/plugins/cc` state, and enables `[features].hooks` plus `[features].plugin_hooks`.
 - Update public skills to resolve the active plugin root from their `SKILL.md` path, so marketplace cache installs run the matching companion code after plugin updates.
 - Refresh README, setup, installer, and E2E coverage around the marketplace/cache-only install path, native hook feature-gate repair, and `$cc:setup` trust repair for this plugin's hook hashes.
+- Clarify the optional review gate as a turn-end blocking review of the previous Codex turn and document that gate runs keep the user's Claude Code default model and effort settings.
 
 ## v1.2.0
 
