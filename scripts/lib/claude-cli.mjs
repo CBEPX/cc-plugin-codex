@@ -16,7 +16,65 @@ import { fileURLToPath } from "node:url";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
-const CLAUDE_BIN = "claude";
+const CLAUDE_PACKAGE_EXE_PARTS = [
+  "node_modules",
+  "@anthropic-ai",
+  "claude-code",
+  "bin",
+  "claude.exe",
+];
+
+/** @visibleForTesting */
+export function resolveClaudeBin(options = {}) {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const homedir = options.homedir ?? os.homedir();
+  const existsSync = options.existsSync ?? fs.existsSync;
+  const override = String(env.CC_PLUGIN_CODEX_CLAUDE_BIN ?? "").trim();
+
+  if (override) {
+    return override;
+  }
+  if (platform !== "win32") {
+    return "claude";
+  }
+
+  const pathApi = path.win32;
+  const searchRoots = [];
+  const pathValue = env.PATH ?? env.Path ?? env.path ?? "";
+  for (const entry of String(pathValue).split(pathApi.delimiter)) {
+    const normalized = entry.trim().replace(/^"|"$/g, "");
+    if (normalized) searchRoots.push(normalized);
+  }
+  if (env.npm_config_prefix) searchRoots.push(String(env.npm_config_prefix));
+  if (env.APPDATA) searchRoots.push(pathApi.join(String(env.APPDATA), "npm"));
+  searchRoots.push(pathApi.join(homedir, "AppData", "Roaming", "npm"));
+
+  const seenRoots = new Set();
+  for (const root of searchRoots) {
+    const resolvedRoot = pathApi.resolve(root);
+    const rootKey = resolvedRoot.toLowerCase();
+    if (seenRoots.has(rootKey)) continue;
+    seenRoots.add(rootKey);
+
+    const candidates = [
+      pathApi.join(resolvedRoot, "claude.exe"),
+      pathApi.join(resolvedRoot, ...CLAUDE_PACKAGE_EXE_PARTS),
+    ];
+    for (const candidate of candidates) {
+      try {
+        if (existsSync(candidate)) {
+          return candidate;
+        }
+      } catch {
+        // Continue to the next candidate, then fall back to normal PATH lookup.
+      }
+    }
+  }
+  return "claude";
+}
+
+const CLAUDE_BIN = resolveClaudeBin();
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
 export const MAX_STREAM_PARSER_PARSE_ERRORS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
@@ -642,6 +700,8 @@ export function resolveEffort(effort) {
 
 /**
  * Build CLI argument array for `claude -p`.
+ * The prompt is intentionally excluded and is written to stdin by runClaudeTurn
+ * so Windows process creation never has to carry a repository-sized prompt.
  */
 /** @visibleForTesting */
 export function buildArgs(prompt, options = {}) {
@@ -701,7 +761,6 @@ export function buildArgs(prompt, options = {}) {
     args.push("--strict-mcp-config");
   }
 
-  args.push("--", prompt);
   return args;
 }
 
@@ -719,8 +778,23 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     const proc = spawn(CLAUDE_BIN, args, {
       cwd,
       detached: true, // new process group for safe cancellation
-      stdio: ["ignore", "pipe", "pipe"], // stdin ignored — prompt is passed as CLI arg
+      stdio: ["pipe", "pipe", "pipe"],
     });
+
+    // Claude CLI print mode accepts the prompt on stdin. Keeping it out of argv
+    // avoids Windows' command-line length limit for reviews with large inline diffs.
+    let stdinError = null;
+    proc.stdin.on("error", (error) => {
+      // ChildProcess still emits its normal close/error event. Retain the pipe
+      // failure so a child cannot be reported as successful without its prompt.
+      stdinError = error;
+    });
+    try {
+      proc.stdin.end(String(prompt ?? ""), "utf8");
+    } catch (error) {
+      stdinError = error;
+      proc.stdin.destroy();
+    }
 
     let pidIdentity = null;
     try {
@@ -761,7 +835,16 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         if (options.onProgress) options.onProgress(evt);
       }
 
-      const validation = validateTurnCompletion(parser.state, code ?? 1);
+      if (stdinError) {
+        stderr = appendTextTail(
+          stderr,
+          `\nFailed to write Claude prompt to stdin: ${stdinError.message}`,
+          MAX_STDERR_BYTES
+        );
+      }
+      const validation = stdinError
+        ? { status: "failed", warning: "Claude prompt delivery through stdin failed." }
+        : validateTurnCompletion(parser.state, code ?? 1);
       resolve({
         status: validation.status,
         warning: validation.warning,

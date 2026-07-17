@@ -12,6 +12,7 @@ import {
   resolveEffort,
   resolveDefaultModel,
   resolveDefaultEffort,
+  resolveClaudeBin,
   buildArgs,
   MODEL_ALIASES,
   EFFORT_ALIASES,
@@ -597,6 +598,95 @@ describe("resolveEffort", () => {
 });
 
 // ===========================================================================
+// resolveClaudeBin
+// ===========================================================================
+
+describe("resolveClaudeBin", () => {
+  it("prefers an explicit binary override", () => {
+    assert.equal(
+      resolveClaudeBin({
+        env: { CC_PLUGIN_CODEX_CLAUDE_BIN: " C:\\custom\\claude.exe " },
+        platform: "win32",
+        homedir: "C:\\Users\\demo",
+        existsSync: () => false,
+      }),
+      "C:\\custom\\claude.exe"
+    );
+  });
+
+  it("finds the native package executable under a PATH npm prefix", () => {
+    const expected =
+      "D:\\tools\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
+    assert.equal(
+      resolveClaudeBin({
+        env: { PATH: "C:\\Windows;D:\\tools\\npm" },
+        platform: "win32",
+        homedir: "C:\\Users\\demo",
+        existsSync: (candidate) => candidate === expected,
+      }),
+      expected
+    );
+  });
+
+  it("finds a native Claude executable directly on PATH", () => {
+    const expected = "D:\\tools\\claude.exe";
+    assert.equal(
+      resolveClaudeBin({
+        env: { PATH: "C:\\Windows;D:\\tools" },
+        platform: "win32",
+        homedir: "C:\\Users\\demo",
+        existsSync: (candidate) => candidate === expected,
+      }),
+      expected
+    );
+  });
+
+  it("uses APPDATA when the npm prefix is not present in PATH", () => {
+    const expected =
+      "R:\\Profile\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
+    assert.equal(
+      resolveClaudeBin({
+        env: { APPDATA: "R:\\Profile" },
+        platform: "win32",
+        homedir: "C:\\Users\\demo",
+        existsSync: (candidate) => candidate === expected,
+      }),
+      expected
+    );
+  });
+
+  it("falls back to command lookup when no native executable is found", () => {
+    assert.equal(
+      resolveClaudeBin({
+        env: {},
+        platform: "win32",
+        homedir: "C:\\Users\\demo",
+        existsSync: () => false,
+      }),
+      "claude"
+    );
+  });
+
+  it("deduplicates Windows search roots case-insensitively", () => {
+    const checked = [];
+    resolveClaudeBin({
+      env: { PATH: "C:\\NPM;c:\\npm" },
+      platform: "win32",
+      homedir: "C:\\Users\\demo",
+      existsSync: (candidate) => {
+        checked.push(candidate);
+        return false;
+      },
+    });
+    assert.equal(checked.length, 4);
+    assert.equal(
+      checked[0].toLowerCase(),
+      "c:\\npm\\claude.exe"
+    );
+  });
+});
+
+// ===========================================================================
 // buildArgs
 // ===========================================================================
 
@@ -606,12 +696,11 @@ describe("buildArgs", () => {
     assert.equal(args[0], "-p");
   });
 
-  it("ends with -- separator followed by prompt", () => {
-    const args = buildArgs("my prompt");
-    const dashDashIdx = args.indexOf("--");
-    assert.ok(dashDashIdx >= 0);
-    assert.equal(args[dashDashIdx + 1], "my prompt");
-    assert.equal(args[args.length - 1], "my prompt");
+  it("keeps the prompt out of argv so it can be sent through stdin", () => {
+    const prompt = "x".repeat(70_000);
+    const args = buildArgs(prompt);
+    assert.ok(!args.includes("--"));
+    assert.ok(!args.includes(prompt));
   });
 
   it("defaults output format to json", () => {
