@@ -328,7 +328,6 @@ async function main() {
     null;
   const stopReviewRun = {
     runId: generateJobId("stop"),
-    trigger: "turn-end",
     startedAt: nowIso(),
     status: "started",
     claudeInvoked: false,

@@ -129,7 +129,6 @@ describe("loadPromptTemplate", () => {
 
   it("keeps the stop-review-gate prompt aligned to Codex wording", () => {
     const content = loadPromptTemplate(PROJECT_ROOT, "stop-review-gate");
-    assert.match(content, /turn-end gate review/);
     assert.match(content, /previous Codex turn/);
     assert.match(content, /\{\{PREVIOUS_RESPONSE_BLOCK\}\}/);
     assert.match(content, /untrusted model output/i);

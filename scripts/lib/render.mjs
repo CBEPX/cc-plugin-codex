@@ -232,7 +232,6 @@ export function renderSetupReport(report) {
     `- node: ${report.node.detail}`,
     `- claude: ${report.claude.detail}`,
     `- auth: ${report.auth.detail}`,
-    ...(report.claudeDefaults ? [`- Claude defaults: ${report.claudeDefaults.detail}`] : []),
     `- hooks: ${report.hooks.detail}`,
     ...(report.hookTrust ? [`- hook trust: ${report.hookTrust.detail}`] : []),
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,

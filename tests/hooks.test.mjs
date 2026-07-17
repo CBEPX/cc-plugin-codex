@@ -300,7 +300,6 @@ describe("hooks", () => {
       assert.match(result.stderr, /turn-end review passed/i);
       const snapshot = readStopReviewSnapshot(testEnv);
       assert.equal(snapshot.status, "allow");
-      assert.equal(snapshot.trigger, "turn-end");
       assert.equal(snapshot.claudeInvoked, true);
       assert.equal(snapshot.sessionId, null);
       assert.equal(snapshot.hasLastAssistantMessage, true);
@@ -604,7 +603,6 @@ describe("hooks", () => {
 
       const snapshot = readStopReviewSnapshot(testEnv);
       assert.equal(snapshot.status, "blocked");
-      assert.equal(snapshot.trigger, "turn-end");
       assert.equal(snapshot.claudeInvoked, true);
       assert.equal(snapshot.claudeStatus, "failed");
       assert.equal(snapshot.claudeExitCode, 7);

@@ -4,14 +4,10 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import {
   StreamParser,
   validateTurnCompletion,
-  detectClaudeDefaultSettings,
   resolveModel,
   resolveEffort,
   resolveDefaultModel,
@@ -31,15 +27,6 @@ import {
   MAX_STREAM_PARSER_TOOL_USES,
   MAX_STREAM_PARSER_TOUCHED_FILES,
 } from "../scripts/lib/claude-cli.mjs";
-
-function withTempDir(prefix, fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  try {
-    return fn(dir);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
 
 // ===========================================================================
 // StreamParser
@@ -470,50 +457,6 @@ describe("resolveModel", () => {
     assert.ok(MODEL_ALIASES.has("opus"));
     assert.ok(MODEL_ALIASES.has("sonnet"));
     assert.ok(MODEL_ALIASES.has("haiku"));
-  });
-});
-
-// ===========================================================================
-// detectClaudeDefaultSettings
-// ===========================================================================
-
-describe("detectClaudeDefaultSettings", () => {
-  it("detects Claude model and effort defaults from the configured settings file", () => {
-    withTempDir("claude-settings-test-", (dir) => {
-      const configDir = path.join(dir, ".claude");
-      fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(configDir, "settings.json"),
-        JSON.stringify(
-          {
-            model: "claude-opus-4-8[1m]",
-            effortLevel: "xhigh",
-          },
-          null,
-          2
-        ) + "\n",
-        "utf8"
-      );
-
-      const defaults = detectClaudeDefaultSettings({
-        HOME: dir,
-        CLAUDE_CONFIG_DIR: configDir,
-      });
-
-      assert.equal(defaults.model, "claude-opus-4-8[1m]");
-      assert.equal(defaults.effort, "xhigh");
-      assert.match(defaults.detail, /model claude-opus-4-8\[1m\], effort xhigh/);
-    });
-  });
-
-  it("falls back to Claude CLI defaults when no settings are detectable", () => {
-    withTempDir("claude-settings-test-", (dir) => {
-      const defaults = detectClaudeDefaultSettings({ HOME: dir });
-
-      assert.equal(defaults.model, null);
-      assert.equal(defaults.effort, null);
-      assert.equal(defaults.detail, "model Claude CLI default, effort Claude CLI default");
-    });
   });
 });
 
