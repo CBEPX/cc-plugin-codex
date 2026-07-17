@@ -36,7 +36,9 @@ import {
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
+  cleanupReviewMcpConfig,
   cleanupSandboxSettings,
+  createReviewMcpConfig,
   createSandboxSettings,
   runClaudeReview,
   SANDBOX_STOP_REVIEW_TOOLS,
@@ -167,14 +169,18 @@ function parseStopReviewOutput(rawOutput) {
 async function runStopReview(cwd, input = {}) {
   const prompt = buildStopReviewPrompt(input);
   const sandboxSettingsFile = createSandboxSettings("read-only");
+  let mcpConfigFile = null;
   const promptBytes = Buffer.byteLength(prompt, "utf8");
 
   try {
+    mcpConfigFile = createReviewMcpConfig(resolveWorkspaceRoot(cwd));
     const result = await runClaudeReview(cwd, prompt, {
       allowedTools: SANDBOX_STOP_REVIEW_TOOLS,
       maxTurns: 5,
       permissionMode: "dontAsk",
       settingsFile: sandboxSettingsFile,
+      mcpConfigFile,
+      strictMcpConfig: true,
     });
 
     if (result.status !== "completed") {
@@ -221,6 +227,7 @@ async function runStopReview(cwd, input = {}) {
       reason: `The stop-time Claude Code review failed: ${detail}`
     };
   } finally {
+    cleanupReviewMcpConfig(mcpConfigFile);
     cleanupSandboxSettings(sandboxSettingsFile);
   }
 }

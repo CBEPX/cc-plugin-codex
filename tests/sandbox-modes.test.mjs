@@ -13,6 +13,7 @@ import {
   SANDBOX_READ_ONLY_BASH_TOOLS,
   SANDBOX_READ_ONLY_TOOLS,
   SANDBOX_REVIEW_TOOLS,
+  SANDBOX_STOP_REVIEW_TOOLS,
   SANDBOX_TEMP_DIR,
   SANDBOX_SETTINGS,
   REVIEW_MCP_SERVER_NAME,
@@ -309,6 +310,17 @@ describe("SANDBOX_REVIEW_TOOLS", () => {
     for (const expected of ["diff", "log", "show", "blame", "status", "grep", "ls_files"]) {
       assert.ok(REVIEW_MCP_TOOL_NAMES.includes(expected), `missing ${expected}`);
     }
+  });
+});
+
+describe("SANDBOX_STOP_REVIEW_TOOLS", () => {
+  it("uses exactly the read tools plus bundled git MCP tools", () => {
+    assert.deepEqual(SANDBOX_STOP_REVIEW_TOOLS, [
+      "Read",
+      "Glob",
+      "Grep",
+      ...REVIEW_MCP_ALLOWED_TOOLS,
+    ]);
   });
 });
 

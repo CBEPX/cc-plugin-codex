@@ -11,7 +11,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { SANDBOX_STOP_REVIEW_TOOLS } from "../scripts/lib/claude-cli.mjs";
+import {
+  REVIEW_MCP_ALLOWED_TOOLS,
+  REVIEW_MCP_SERVER_NAME,
+  SANDBOX_STOP_REVIEW_TOOLS,
+} from "../scripts/lib/claude-cli.mjs";
 import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
 const PROJECT_ROOT = path.resolve(
@@ -42,6 +46,12 @@ const args = process.argv.slice(2);
 
 if (process.env.CLAUDE_ARGS_FILE) {
   fs.writeFileSync(process.env.CLAUDE_ARGS_FILE, JSON.stringify(args, null, 2) + "\\n", "utf8");
+}
+if (process.env.CLAUDE_MCP_CONFIG_FILE) {
+  const mcpConfigIndex = args.indexOf("--mcp-config");
+  if (mcpConfigIndex >= 0 && args[mcpConfigIndex + 1]) {
+    fs.copyFileSync(args[mcpConfigIndex + 1], process.env.CLAUDE_MCP_CONFIG_FILE);
+  }
 }
 
   if (args[0] === "-p") {
@@ -258,7 +268,7 @@ function writeTurnBaselineSnapshot(testEnv, sessionId, fingerprint) {
 }
 
 describe("hooks", () => {
-  it("stop-review hook uses read-only sandbox settings when review gate is enabled", () => {
+  it("stop-review hook uses read-only sandbox and git MCP when review gate is enabled", () => {
     const testEnv = createHookEnvironment();
 
     try {
@@ -271,6 +281,7 @@ describe("hooks", () => {
       );
 
       const argsFile = path.join(testEnv.rootDir, "claude-args.json");
+      const mcpConfigCaptureFile = path.join(testEnv.rootDir, "claude-mcp-config.json");
       const result = runHook(
         STOP_HOOK,
         [],
@@ -281,6 +292,7 @@ describe("hooks", () => {
         {
           ...testEnv.env,
           CLAUDE_ARGS_FILE: argsFile,
+          CLAUDE_MCP_CONFIG_FILE: mcpConfigCaptureFile,
         }
       );
 
@@ -296,6 +308,8 @@ describe("hooks", () => {
       assert.ok(permissionModeIndex >= 0);
       assert.equal(claudeArgs[permissionModeIndex + 1], "dontAsk");
       assert.ok(claudeArgs.includes("--settings"));
+      assert.ok(claudeArgs.includes("--mcp-config"));
+      assert.ok(claudeArgs.includes("--strict-mcp-config"));
 
       const allowedTools = [];
       for (let i = 0; i < claudeArgs.length; i++) {
@@ -303,7 +317,22 @@ describe("hooks", () => {
           allowedTools.push(claudeArgs[i + 1]);
         }
       }
-      assert.deepEqual(allowedTools, SANDBOX_STOP_REVIEW_TOOLS);
+      assert.deepEqual(
+        allowedTools,
+        ["Read", "Glob", "Grep", ...REVIEW_MCP_ALLOWED_TOOLS],
+        "stop review must expose only read tools and the bundled read-only git MCP"
+      );
+
+      const mcpConfigIndex = claudeArgs.indexOf("--mcp-config");
+      const mcpConfigPath = claudeArgs[mcpConfigIndex + 1];
+      assert.equal(fs.existsSync(mcpConfigPath), false);
+      const capturedMcpConfig = JSON.parse(fs.readFileSync(mcpConfigCaptureFile, "utf8"));
+      const server = capturedMcpConfig.mcpServers[REVIEW_MCP_SERVER_NAME];
+      assert.ok(server);
+      assert.equal(
+        fs.realpathSync.native(server.env.CC_GIT_ROOT),
+        fs.realpathSync.native(testEnv.workspaceDir)
+      );
     } finally {
       cleanupHookEnvironment(testEnv);
     }
