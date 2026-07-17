@@ -317,16 +317,11 @@ describe("hooks", () => {
           allowedTools.push(claudeArgs[i + 1]);
         }
       }
-      assert.deepEqual(allowedTools, SANDBOX_STOP_REVIEW_TOOLS);
-      for (const allowedTool of allowedTools) {
-        assert.ok(
-          !/^Bash(\(|$)/.test(allowedTool),
-          `stop review allowlist must not contain Bash: ${allowedTool}`
-        );
-      }
-      for (const expectedTool of REVIEW_MCP_ALLOWED_TOOLS) {
-        assert.ok(allowedTools.includes(expectedTool), `missing ${expectedTool}`);
-      }
+      assert.deepEqual(
+        allowedTools,
+        ["Read", "Glob", "Grep", ...REVIEW_MCP_ALLOWED_TOOLS],
+        "stop review must expose only read tools and the bundled read-only git MCP"
+      );
 
       const mcpConfigIndex = claudeArgs.indexOf("--mcp-config");
       const mcpConfigPath = claudeArgs[mcpConfigIndex + 1];
