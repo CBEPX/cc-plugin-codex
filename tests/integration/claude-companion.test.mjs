@@ -35,6 +35,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readStdin() {
+  let body = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    body += chunk;
+  }
+  return body;
+}
+
 function sanitize(value) {
   return String(value || "session")
     .toLowerCase()
@@ -64,7 +73,7 @@ async function main() {
   const prompt =
     promptIndex >= 0
       ? args.slice(promptIndex + 1).join(" ")
-      : "";
+      : await readStdin();
   const delay = Number((prompt.match(/\\bdelay=(\\d+)\\b/) || [])[1] || 80);
   if (process.env.CLAUDE_ARGS_FILE) {
     require("node:fs").writeFileSync(
@@ -905,6 +914,39 @@ describe("claude-companion integration", () => {
         fs.readFileSync(branchInvocationFile, "utf8")
       );
       assert.match(branchInvocation.prompt, /branch diff against main/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("sends a Windows-sized review prompt through stdin instead of argv", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, "app.js"),
+        "review-line\n".repeat(3_500),
+        "utf8"
+      );
+      const invocationFile = path.join(testEnv.rootDir, "large-review-invocation.json");
+
+      const result = runCompanion(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree", "--model", "haiku"],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+
+      const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
+      assert.ok(Buffer.byteLength(invocation.prompt, "utf8") > 32_767);
+      assert.match(invocation.prompt, /review-line/);
+      assert.equal(invocation.args.includes("--"), false);
+      assert.ok(!invocation.args.includes(invocation.prompt));
+      assert.match(result.stdout, /Claude Code Review/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
