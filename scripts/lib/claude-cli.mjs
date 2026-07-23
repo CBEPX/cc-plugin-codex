@@ -465,15 +465,20 @@ export class StreamParser {
     this.buffer += chunk;
     const lines = this.buffer.split("\n");
     this.buffer = lines.pop(); // keep incomplete trailing line
-    return lines.map((l) => this._parseLine(l)).filter(Boolean);
+    // flatMap: one line can yield several events (a forwarded subagent
+    // assistant record carries multiple content blocks).
+    return lines.flatMap((l) => {
+      const parsed = this._parseLine(l);
+      return parsed ? (Array.isArray(parsed) ? parsed : [parsed]) : [];
+    });
   }
 
   /** Flush remaining buffer at stream end. */
   flush() {
     if (this.buffer.trim()) {
-      const result = this._parseLine(this.buffer);
+      const parsed = this._parseLine(this.buffer);
       this.buffer = "";
-      return result ? [result] : [];
+      return parsed ? (Array.isArray(parsed) ? parsed : [parsed]) : [];
     }
     return [];
   }
@@ -482,6 +487,10 @@ export class StreamParser {
     if (!line.trim()) return null;
     try {
       const event = JSON.parse(line);
+      // Forwarded subagent events (--forward-subagent-text) carry
+      // parent_tool_use_id. Surface them as display-only progress; never let
+      // them touch parent-turn state (finalMessage/toolUses/session/model).
+      if (event.parent_tool_use_id) return this._handleSubagentEvent(event);
       // Extract session_id from any event
       if (event.session_id && !this.state.sessionId) {
         this.state.sessionId = event.session_id;
@@ -613,6 +622,66 @@ export class StreamParser {
           threadId: this.state.sessionId,
         };
       }
+    }
+    return null;
+  }
+
+  /**
+   * Display-only progress for subagent (Task) events — liveness signal while
+   * the parent turn is blocked on a Task tool. Never mutates parser state.
+   * Current Claude forwards subagent output as complete top-level `assistant`
+   * records; the `stream_event` branch covers partial-delta shapes.
+   */
+  _handleSubagentEvent(event) {
+    const base = {
+      subagent: true,
+      parentToolUseId: event.parent_tool_use_id,
+      phase: "subagent",
+      threadId: this.state.sessionId,
+    };
+    if (event.type === "assistant") {
+      const content = Array.isArray(event.message?.content)
+        ? event.message.content
+        : [];
+      return content
+        .map((block) => {
+          if (block?.type === "text" && block.text) {
+            return { ...base, kind: "subagent_text", text: block.text, message: block.text };
+          }
+          if (block?.type === "thinking" && block.thinking) {
+            return { ...base, kind: "subagent_thinking", message: block.thinking };
+          }
+          if (block?.type === "tool_use") {
+            return {
+              ...base,
+              kind: "subagent_tool_use",
+              tool: block.name,
+              input: block.input,
+              message: `Subagent using tool: ${block.name}`,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
+    }
+    if (event.type !== "stream_event") return null;
+    const inner = event.event;
+    const delta = inner?.delta;
+    if (delta?.type === "text_delta" && delta.text) {
+      return { ...base, kind: "subagent_text", text: delta.text, message: delta.text };
+    }
+    if (delta?.type === "thinking_delta" && delta.thinking) {
+      return { ...base, kind: "subagent_thinking", message: delta.thinking };
+    }
+    const cb = inner?.type === "content_block_start" ? inner.content_block : null;
+    if (cb?.type === "tool_use") {
+      return {
+        ...base,
+        kind: "subagent_tool_use",
+        tool: cb.name,
+        input: cb.input,
+        message: `Subagent using tool: ${cb.name}`,
+      };
     }
     return null;
   }
@@ -1083,6 +1152,13 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       cwd,
       detached: true, // new process group for safe cancellation
       stdio: ["ignore", "pipe", "pipe"], // stdin ignored — prompt is passed as CLI arg
+      env: {
+        ...process.env,
+        // Stream subagent (Task) text/thinking so long turns show liveness.
+        // Env var, not the --forward-subagent-text flag: older claude builds
+        // ignore unknown env vars but reject unknown CLI flags.
+        CLAUDE_CODE_FORWARD_SUBAGENT_TEXT: "1",
+      },
     });
 
     let pidIdentity = null;

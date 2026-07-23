@@ -52,17 +52,28 @@ function sliceTextTailByBytes(text, maxBytes) {
 }
 
 function trimLogFile(logFile, maxBytes = MAX_JOB_LOG_BYTES) {
-  if (!logFile || !fs.existsSync(logFile) || maxBytes <= 0) {
+  if (!logFile || maxBytes <= 0) {
+    return;
+  }
+
+  // stat before read: per-delta appends must not re-read the whole log.
+  let size;
+  try {
+    size = fs.statSync(logFile).size;
+  } catch {
+    return;
+  }
+  if (size <= maxBytes) {
     return;
   }
 
   const content = fs.readFileSync(logFile, "utf8");
-  if (Buffer.byteLength(content, "utf8") <= maxBytes) {
-    return;
-  }
+  // Trim with hysteresis to 75% of the cap so a near-cap log is not read and
+  // rewritten in full on every subsequent append.
+  const targetBytes = Math.floor(maxBytes * 0.75);
 
   let retained = content;
-  while (Buffer.byteLength(retained, "utf8") > maxBytes) {
+  while (Buffer.byteLength(retained, "utf8") > targetBytes) {
     const newlineIndex = retained.indexOf("\n");
     if (newlineIndex === -1 || newlineIndex === retained.length - 1) {
       break;
@@ -71,14 +82,14 @@ function trimLogFile(logFile, maxBytes = MAX_JOB_LOG_BYTES) {
   }
 
   let output = retained;
-  if (Buffer.byteLength(output, "utf8") > maxBytes) {
+  if (Buffer.byteLength(output, "utf8") > targetBytes) {
     const markerBytes = Buffer.byteLength(LOG_TRUNCATION_MARKER, "utf8");
-    if (markerBytes >= maxBytes) {
-      output = sliceTextTailByBytes(output, maxBytes);
+    if (markerBytes >= targetBytes) {
+      output = sliceTextTailByBytes(output, targetBytes);
     } else {
       output =
         LOG_TRUNCATION_MARKER +
-        sliceTextTailByBytes(output, maxBytes - markerBytes);
+        sliceTextTailByBytes(output, targetBytes - markerBytes);
     }
   }
 
@@ -295,6 +306,13 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     }
 
     if (!changed) {
+      return;
+    }
+
+    // Late display events (e.g. trailing subagent output) must not resurrect
+    // phase/thread fields on a job that already reached a terminal status.
+    const current = readJobFile(workspaceRoot, jobId);
+    if (current && current.status !== "running") {
       return;
     }
 

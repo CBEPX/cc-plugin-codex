@@ -321,6 +321,173 @@ describe("StreamParser", () => {
     assert.equal(events[0].threadId, "sess-think");
   });
 
+  it("emits tagged subagent progress without changing parent state", () => {
+    const parser = new StreamParser();
+    const topLevelEvent = {
+      type: "stream_event",
+      session_id: "sess-main",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "main text" },
+      },
+    };
+    const topLevelEvents = parser.feed(JSON.stringify(topLevelEvent) + "\n");
+    assert.equal(topLevelEvents.length, 1);
+    const parentState = structuredClone(parser.state);
+
+    const subagentEvents = [
+      {
+        type: "stream_event",
+        session_id: "sess-sub",
+        parent_tool_use_id: "toolu_sub_1",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "subagent text" },
+        },
+      },
+      {
+        type: "stream_event",
+        parent_tool_use_id: "toolu_sub_1",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "subagent thinking" },
+        },
+      },
+      {
+        type: "stream_event",
+        parent_tool_use_id: "toolu_sub_2",
+        event: {
+          type: "content_block_start",
+          content_block: {
+            type: "tool_use",
+            name: "Write",
+            input: { file_path: "/sub.txt" },
+          },
+        },
+      },
+      // Current Claude forwards subagent output as complete top-level
+      // assistant records, not stream_event deltas.
+      {
+        type: "assistant",
+        parent_tool_use_id: "toolu_sub_3",
+        session_id: "sess-main",
+        message: {
+          model: "claude-haiku-4-5",
+          content: [
+            { type: "text", text: "assistant record text" },
+            { type: "thinking", thinking: "assistant record thinking" },
+            { type: "tool_use", name: "Read", input: { path: "/y" } },
+          ],
+        },
+      },
+    ];
+    const events = parser.feed(
+      subagentEvents.map(JSON.stringify).join("\n") + "\n"
+    );
+
+    assert.equal(events.length, 6);
+    assert.deepEqual(
+      events.map((e) => e.kind),
+      [
+        "subagent_text",
+        "subagent_thinking",
+        "subagent_tool_use",
+        "subagent_text",
+        "subagent_thinking",
+        "subagent_tool_use",
+      ]
+    );
+    assert.ok(events.every((e) => e.subagent === true));
+    assert.ok(events.every((e) => e.phase === "subagent"));
+    assert.equal(events[0].parentToolUseId, "toolu_sub_1");
+    assert.equal(events[0].message, "subagent text");
+    assert.equal(events[1].message, "subagent thinking");
+    assert.equal(events[2].tool, "Write");
+    assert.equal(events[2].message, "Subagent using tool: Write");
+    assert.equal(events[3].parentToolUseId, "toolu_sub_3");
+    assert.equal(events[3].message, "assistant record text");
+    assert.equal(events[4].message, "assistant record thinking");
+    assert.equal(events[5].tool, "Read");
+    assert.equal(events[5].message, "Subagent using tool: Read");
+    assert.deepEqual(parser.state, parentState);
+  });
+
+  it("drops non-stream subagent events without changing parent state", () => {
+    const parser = new StreamParser();
+    const topLevelEvent = {
+      type: "stream_event",
+      session_id: "sess-main",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "main text" },
+      },
+    };
+    parser.feed(JSON.stringify(topLevelEvent) + "\n");
+    const parentState = structuredClone(parser.state);
+
+    const subagentEvents = [
+      {
+        type: "stream_event",
+        parent_tool_use_id: "toolu_nested",
+        event: {
+          type: "model_switch",
+          previous_model: "claude-opus-4-8",
+          current_model: "claude-haiku-4-5",
+        },
+      },
+      {
+        type: "system",
+        subtype: "api_retry",
+        parent_tool_use_id: "toolu_sub_2",
+      },
+      {
+        type: "user",
+        parent_tool_use_id: "toolu_nested",
+        message: { content: "subagent tool result" },
+      },
+      // Lifecycle stream events carry no displayable content.
+      {
+        type: "stream_event",
+        parent_tool_use_id: "toolu_sub_1",
+        event: { type: "message_start", message: { model: "<synthetic>" } },
+      },
+      {
+        type: "stream_event",
+        parent_tool_use_id: "toolu_sub_1",
+        event: { type: "content_block_stop", index: 0 },
+      },
+      {
+        type: "stream_event",
+        parent_tool_use_id: "toolu_sub_1",
+        event: { type: "message_delta", delta: { stop_reason: "end_turn" } },
+      },
+      {
+        type: "stream_event",
+        parent_tool_use_id: "toolu_sub_1",
+        event: { type: "message_stop" },
+      },
+      {
+        type: "result",
+        parent_tool_use_id: "toolu_sub_2",
+        result: "subagent result",
+        structured_output: { leaked: true },
+        model: "claude-haiku-4-5",
+      },
+    ];
+    const events = parser.feed(
+      subagentEvents.map(JSON.stringify).join("\n") + "\n"
+    );
+
+    assert.equal(events.length, 0);
+    assert.deepEqual(parser.state, parentState);
+  });
+
   it("parses a tool_use content_block_start event", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({
@@ -886,6 +1053,48 @@ describe("runClaudeTurn", () => {
       assert.ok(!result.stderr.includes("DROP-ME"));
     } finally {
       process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("spawns claude with CLAUDE_CODE_FORWARD_SUBAGENT_TEXT=1", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-env-"));
+    const oldPath = process.env.PATH ?? "";
+    const oldFlag = process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
+    delete process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
+    try {
+      const fakeClaude = path.join(tmpDir, "fake-claude.mjs");
+      fs.writeFileSync(
+        fakeClaude,
+        `const out = JSON.stringify({ type: "result", result: "env:" + (process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT ?? "unset"), session_id: "sess-env" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+      );
+
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          path.join(tmpDir, "claude.cmd"),
+          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs" %*\r\n`
+        );
+      } else {
+        const launcher = path.join(tmpDir, "claude");
+        fs.writeFileSync(
+          launcher,
+          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs" "$@"\n`
+        );
+        fs.chmodSync(launcher, 0o755);
+      }
+
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "prompt");
+
+      assert.equal(result.finalMessage, "env:1");
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldFlag === undefined) {
+        delete process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
+      } else {
+        process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = oldFlag;
+      }
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });

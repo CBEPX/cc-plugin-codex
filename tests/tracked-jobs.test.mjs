@@ -300,6 +300,31 @@ describe("createJobRecord", () => {
 // ---------------------------------------------------------------------------
 
 describe("createJobProgressUpdater", () => {
+  it("does not overwrite a terminal phase with late progress", () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-terminal-phase-job",
+      workspaceRoot: repoDir,
+      status: "completed",
+      phase: "done",
+      title: "terminal phase",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      const updateProgress = createJobProgressUpdater(repoDir, job.id);
+      updateProgress({ phase: "subagent", message: "late delta" });
+
+      const stored = readJobFile(repoDir, job.id);
+      assert.equal(stored.status, "completed");
+      assert.equal(stored.phase, "done");
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("persists model fallback progress on the running job", () => {
     const repoDir = createTempGitRepo();
     const job = {

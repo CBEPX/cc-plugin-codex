@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Stream subagent (Task) output from Claude turns as tagged display-only progress events (`subagent_text`/`subagent_thinking`/`subagent_tool_use`), so long turns blocked on a subagent show liveness in `[cc]` progress and job logs. Enabled via `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT=1` on the spawned `claude -p`; older Claude builds degrade silently.
+
+### Fixed
+
+- Keep forwarded subagent events out of parent-turn parser state so subagent text, tools, models, and results can never pollute `finalMessage`, `toolUses`, `touchedFiles`, or structured output — including when the forwarding env var is inherited from the user's shell.
+- Trim job logs with a stat check and 75%-of-cap hysteresis instead of re-reading the whole log on every append, removing multi-thousand-fold read amplification on token-level progress streams.
+- Stop late progress events from overwriting the phase of a job that already reached a terminal status.
+
 ## v1.3.2
 
 ### Fixed
