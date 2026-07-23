@@ -648,8 +648,14 @@ export class StreamParser {
           if (block?.type === "text" && block.text) {
             return { ...base, kind: "subagent_text", text: block.text, message: block.text };
           }
-          if (block?.type === "thinking" && block.thinking) {
-            return { ...base, kind: "subagent_thinking", message: block.thinking };
+          if (block?.type === "thinking" || block?.type === "redacted_thinking") {
+            // Live captures show thinking blocks with empty text (signature
+            // only); still a liveness signal.
+            return {
+              ...base,
+              kind: "subagent_thinking",
+              message: block.thinking || "Subagent thinking…",
+            };
           }
           if (block?.type === "tool_use") {
             return {

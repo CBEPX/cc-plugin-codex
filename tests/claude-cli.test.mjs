@@ -384,12 +384,23 @@ describe("StreamParser", () => {
           ],
         },
       },
+      // Live captures show thinking blocks with empty text (signature only);
+      // they still prove the subagent is alive.
+      {
+        type: "assistant",
+        parent_tool_use_id: "toolu_sub_3",
+        session_id: "sess-main",
+        message: {
+          model: "claude-haiku-4-5",
+          content: [{ type: "thinking", thinking: "", signature: "sig" }],
+        },
+      },
     ];
     const events = parser.feed(
       subagentEvents.map(JSON.stringify).join("\n") + "\n"
     );
 
-    assert.equal(events.length, 6);
+    assert.equal(events.length, 7);
     assert.deepEqual(
       events.map((e) => e.kind),
       [
@@ -399,6 +410,7 @@ describe("StreamParser", () => {
         "subagent_text",
         "subagent_thinking",
         "subagent_tool_use",
+        "subagent_thinking",
       ]
     );
     assert.ok(events.every((e) => e.subagent === true));
@@ -413,6 +425,7 @@ describe("StreamParser", () => {
     assert.equal(events[4].message, "assistant record thinking");
     assert.equal(events[5].tool, "Read");
     assert.equal(events[5].message, "Subagent using tool: Read");
+    assert.equal(events[6].message, "Subagent thinking…");
     assert.deepEqual(parser.state, parentState);
   });
 
