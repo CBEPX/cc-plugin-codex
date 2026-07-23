@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v1.4.0
+
 ### Added
 
 - Stream subagent (Task) output from Claude turns as tagged display-only progress events (`subagent_text`/`subagent_thinking`/`subagent_tool_use`), so long turns blocked on a subagent show liveness in `[cc]` progress and job logs. Enabled via `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT=1` on the spawned `claude -p`; older Claude builds degrade silently.

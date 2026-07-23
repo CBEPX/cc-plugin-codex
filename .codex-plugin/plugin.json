@@ -1,6 +1,6 @@
 {
   "name": "cc",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Claude Code Plugin for Codex. Delegate code reviews, investigations, tracked tasks, and transcript transfers from inside Codex.",
   "author": {
     "name": "CBEPX",
