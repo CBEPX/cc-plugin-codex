@@ -43,11 +43,11 @@ Background contract:
   - do not silently drop the completion notification path when the parent provided a non-empty parent thread id
 
 Spawn-agent defaults:
-- `agent_type: "default"`
 - `fork_context: false`
-- `model: "gpt-5.4-mini"`
 - `reasoning_effort: "medium"`
-- If that model is explicitly unavailable, retry once with `model: "gpt-5.4"` and the same effort.
+- Use the implicit default role and omit `agent_type`.
+- Omit `model` so the child inherits the current Codex runtime model.
+- Do not add a fixed-version model fallback.
 
 Completion steering:
 - When a reserved review job id exists, steer to:

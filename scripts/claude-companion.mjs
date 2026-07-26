@@ -10,7 +10,7 @@
  *
  * Adapted from codex-companion.mjs:
  * - Uses claude-cli.mjs instead of app-server/broker
- * - MODEL_ALIASES: opus -> claude-opus-4-8, sonnet -> claude-sonnet-5, haiku -> claude-haiku-4-5, fable -> claude-fable-5[1m]
+ * - MODEL_ALIASES: Claude aliases are passed through for Claude Code to resolve
  * - Default model when --model is unset: opus
  * - Default effort by model: opus -> xhigh, sonnet -> high, haiku/fable -> unset
  * - Claude CLI effort values: low, medium, high, xhigh, max

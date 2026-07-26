@@ -1128,6 +1128,7 @@ describe("areModelIdsEquivalent", () => {
   it("treats Claude CLI aliases as equivalent to concrete family ids", () => {
     assert.equal(areModelIdsEquivalent("fable", "claude-fable-5"), true);
     assert.equal(areModelIdsEquivalent("fable", "claude-fable-5[1m]"), true);
+    assert.equal(areModelIdsEquivalent("opus", "claude-opus-5"), true);
   });
 
   it("ignores bracketed context-window suffixes for comparison", () => {
@@ -1139,6 +1140,10 @@ describe("areModelIdsEquivalent", () => {
 
   it("does not treat different model families as equivalent", () => {
     assert.equal(areModelIdsEquivalent("claude-opus-4-8", "claude-sonnet-5"), false);
+  });
+
+  it("does not treat pinned versions in the same family as equivalent", () => {
+    assert.equal(areModelIdsEquivalent("claude-opus-4-8", "claude-opus-5"), false);
   });
 });
 
@@ -1186,12 +1191,12 @@ describe("validateTurnCompletion", () => {
 // ===========================================================================
 
 describe("resolveModel", () => {
-  it("maps 'sonnet' to 'claude-sonnet-5'", () => {
-    assert.equal(resolveModel("sonnet"), "claude-sonnet-5");
+  it("passes through the native 'sonnet' alias", () => {
+    assert.equal(resolveModel("sonnet"), "sonnet");
   });
 
-  it("maps 'haiku' to 'claude-haiku-4-5'", () => {
-    assert.equal(resolveModel("haiku"), "claude-haiku-4-5");
+  it("passes through the native 'haiku' alias", () => {
+    assert.equal(resolveModel("haiku"), "haiku");
   });
 
   it("passes through unknown model names", () => {
@@ -1207,20 +1212,19 @@ describe("resolveModel", () => {
     assert.equal(resolveModel(""), undefined);
   });
 
-  it("maps 'opus' to 'claude-opus-4-8'", () => {
-    assert.equal(resolveModel("opus"), "claude-opus-4-8");
+  it("passes through the native 'opus' alias", () => {
+    assert.equal(resolveModel("opus"), "opus");
   });
 
-  it("maps 'fable' to the 1M-context Claude Fable 5 id", () => {
-    assert.equal(resolveModel("fable"), "claude-fable-5[1m]");
+  it("passes through the native 'fable' alias", () => {
+    assert.equal(resolveModel("fable"), "fable");
   });
 
   it("MODEL_ALIASES map has expected entries", () => {
     assert.equal(MODEL_ALIASES.size, 4);
-    assert.ok(MODEL_ALIASES.has("opus"));
-    assert.ok(MODEL_ALIASES.has("sonnet"));
-    assert.ok(MODEL_ALIASES.has("haiku"));
-    assert.ok(MODEL_ALIASES.has("fable"));
+    for (const alias of ["opus", "sonnet", "haiku", "fable"]) {
+      assert.equal(MODEL_ALIASES.get(alias), alias);
+    }
   });
 });
 
@@ -1248,13 +1252,14 @@ describe("resolveDefaultModel", () => {
 });
 
 describe("resolveDefaultEffort", () => {
-  it("defaults to xhigh for opus alias and resolved id", () => {
+  it("defaults to xhigh for the opus alias and family ids", () => {
     assert.equal(resolveDefaultEffort("opus", null), "xhigh");
     assert.equal(resolveDefaultEffort("claude-opus-4-8", null), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-5", null), "xhigh");
     assert.equal(resolveDefaultEffort("OPUS", undefined), "xhigh");
   });
 
-  it("defaults to high for sonnet alias and resolved id", () => {
+  it("defaults to high for the sonnet alias and family ids", () => {
     assert.equal(resolveDefaultEffort("sonnet", null), "high");
     assert.equal(resolveDefaultEffort("claude-sonnet-5", null), "high");
   });
@@ -1286,10 +1291,9 @@ describe("resolveDefaultEffort", () => {
   });
 
   it("DEFAULT_EFFORT_BY_MODEL contains the expected entries", () => {
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.size, 2);
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("opus"), "xhigh");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-8"), "xhigh");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("sonnet"), "high");
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-5"), "high");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.has("haiku"), false);
   });
 });
@@ -1404,11 +1408,11 @@ describe("buildArgs", () => {
     assert.ok(!args.includes("--no-session-persistence"));
   });
 
-  it("includes --model with resolved model alias", () => {
+  it("includes --model with the native model alias", () => {
     const args = buildArgs("p", { model: "sonnet" });
     const idx = args.indexOf("--model");
     assert.ok(idx >= 0);
-    assert.equal(args[idx + 1], "claude-sonnet-5");
+    assert.equal(args[idx + 1], "sonnet");
   });
 
   it("includes --effort with resolved effort", () => {

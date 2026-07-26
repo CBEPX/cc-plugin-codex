@@ -133,7 +133,7 @@ $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 
 **Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
-**Defaults:** model `opus` resolves to `claude-opus-4-8` with `xhigh` effort. If you pick `sonnet`, it resolves to `claude-sonnet-5` and the default effort drops to `high`. `haiku` resolves to `claude-haiku-4-5`, `fable` resolves to `claude-fable-5[1m]`, and both have no default effort setting. Pass `--model` and `--effort` to override.
+**Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version, or use `--effort` to override the family default.
 
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
@@ -191,7 +191,7 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--resume-last` | Alias for `--resume` |
 | `--fresh` | Force a new task (don't resume) |
 | `--write` | Allow file edits (default) |
-| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`. The aliases resolve to `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5`, and `claude-fable-5[1m]`.) |
+| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`). Aliases are resolved by Claude Code; a full ID pins a version. |
 | `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable) |
 | `--prompt-file <path>` | Read task description from a file |
 | `--timeout-ms <ms>` | Foreground observer timeout before returning a retrievable job |

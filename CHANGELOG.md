@@ -5,6 +5,8 @@
 ### Fixed
 
 - Use the Claude CLI-compatible JSON Schema Draft-07 dialect for adversarial review structured output.
+- Pass native Claude model aliases through to Claude Code so they follow current models such as Opus 5, while full model IDs remain pinned.
+- Let built-in forwarding subagents use the implicit default role and inherit the current Codex runtime model instead of relying on removed `agent_type` metadata or a fixed `gpt-5.4-mini` to `gpt-5.4` fallback chain.
 
 ## v1.4.0
 

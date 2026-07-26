@@ -1018,10 +1018,10 @@ export function pruneStaleReviewMcpConfigs(options = {}) {
 // ---------------------------------------------------------------------------
 
 export const MODEL_ALIASES = new Map([
-  ["opus", "claude-opus-4-8"],
-  ["sonnet", "claude-sonnet-5"],
-  ["haiku", "claude-haiku-4-5"],
-  ["fable", "claude-fable-5[1m]"],
+  ["opus", "opus"],
+  ["sonnet", "sonnet"],
+  ["haiku", "haiku"],
+  ["fable", "fable"],
 ]);
 
 export const EFFORT_ALIASES = {
@@ -1035,9 +1035,7 @@ export const DEFAULT_MODEL = "opus";
 
 export const DEFAULT_EFFORT_BY_MODEL = new Map([
   ["opus", "xhigh"],
-  ["claude-opus-4-8", "xhigh"],
   ["sonnet", "high"],
-  ["claude-sonnet-5", "high"],
 ]);
 
 export function resolveDefaultModel(model) {
@@ -1052,7 +1050,12 @@ export function resolveDefaultEffort(model, effort) {
     return effort;
   }
   const key = String(model ?? "").trim().toLowerCase();
-  return DEFAULT_EFFORT_BY_MODEL.get(key);
+  for (const [alias, defaultEffort] of DEFAULT_EFFORT_BY_MODEL) {
+    if (areModelIdsEquivalent(key, alias)) {
+      return defaultEffort;
+    }
+  }
+  return undefined;
 }
 
 export function resolveModel(model) {

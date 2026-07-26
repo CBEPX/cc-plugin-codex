@@ -1288,7 +1288,7 @@ describe("claude-companion integration", () => {
       const args = JSON.parse(fs.readFileSync(argsFile, "utf8"));
       assert.equal(args[0], "-p");
       assert.ok(args.includes("--model"));
-      assert.equal(args[args.indexOf("--model") + 1], "claude-haiku-4-5");
+      assert.equal(args[args.indexOf("--model") + 1], "haiku");
       assert.ok(args.includes("--effort"));
       assert.equal(args[args.indexOf("--effort") + 1], "high");
       assert.ok(args.includes("--permission-mode"));
@@ -1317,7 +1317,7 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.status, "completed");
-      assert.equal(payload.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.requestedModel, "opus");
       assert.equal(payload.finalModel, "claude-sonnet-5");
       assert.equal(payload.modelFallbacks.length, 1);
       assert.equal(payload.modelFallbacks[0].fromModel, "claude-opus-4-8");
@@ -1345,10 +1345,10 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.status, "completed");
-      assert.equal(payload.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.requestedModel, "opus");
       assert.equal(payload.finalModel, "claude-sonnet-5");
       assert.equal(payload.modelFallbacks.length, 1);
-      assert.equal(payload.modelFallbacks[0].fromModel, "claude-opus-4-8");
+      assert.equal(payload.modelFallbacks[0].fromModel, "opus");
       assert.equal(payload.modelFallbacks[0].toModel, "claude-sonnet-5");
       assert.equal(payload.modelFallbacks[0].source, "terminal_result");
     } finally {
@@ -1380,7 +1380,7 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.status, "completed");
-      assert.equal(payload.requestedModel, "claude-fable-5[1m]");
+      assert.equal(payload.requestedModel, "fable");
       assert.equal(payload.finalModel, "claude-fable-5");
       assert.deepEqual(payload.modelFallbacks, []);
     } finally {
@@ -1652,7 +1652,7 @@ describe("claude-companion integration", () => {
       );
       assert.equal(
         reviewInvocation.args[reviewInvocation.args.indexOf("--model") + 1],
-        "claude-haiku-4-5"
+        "haiku"
       );
       assert.ok(reviewInvocation.args.includes("--strict-mcp-config"));
       assert.ok(reviewInvocation.args.includes("--mcp-config"));
@@ -1687,7 +1687,7 @@ describe("claude-companion integration", () => {
       );
       assert.equal(
         fableInvocation.args[fableInvocation.args.indexOf("--model") + 1],
-        "claude-fable-5[1m]"
+        "fable"
       );
 
       const branchInvocationFile = path.join(testEnv.rootDir, "branch-review-invocation.json");
@@ -1741,7 +1741,7 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.codex.status, "completed");
-      assert.equal(payload.codex.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.codex.requestedModel, "opus");
       assert.equal(payload.codex.finalModel, "claude-sonnet-5");
       assert.equal(payload.codex.modelFallbacks.length, 1);
       assert.equal(payload.codex.modelFallbacks[0].fromModel, "claude-opus-4-8");
@@ -2233,7 +2233,7 @@ describe("claude-companion integration", () => {
       const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
       assert.equal(
         invocation.args[invocation.args.indexOf("--model") + 1],
-        "claude-haiku-4-5"
+        "haiku"
       );
       assert.match(invocation.prompt, /focus on command injection/i);
       assert.match(result.stdout, /Adversarial Review/);
