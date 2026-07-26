@@ -742,6 +742,59 @@ describe("StreamParser", () => {
     assert.equal(parser.state.unresolvedParseErrors, 0);
   });
 
+  it("does not guess between multiple same-family usage entries for an alias", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "opus",
+        modelUsage: {
+          "claude-opus-4-8": { contextWindow: 200000 },
+          "claude-opus-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, "opus");
+    assert.equal(parser.state.contextWindow, null);
+  });
+
+  it("prefers a unique canonical usage entry over family alias matches", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "claude-opus-5",
+        modelUsage: {
+          opus: { contextWindow: 200000 },
+          "claude-opus-5[1m]": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, "claude-opus-5");
+    assert.equal(parser.state.contextWindow, 1000000);
+  });
+
+  it("uses a unique concrete usage entry for a terminal family alias", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "fable",
+        modelUsage: {
+          "claude-fable-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, "fable");
+    assert.equal(parser.state.contextWindow, 1000000);
+  });
+
   it("captures the observed model from message_start stream events", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({
@@ -1341,14 +1394,14 @@ describe("resolveDefaultModel", () => {
 });
 
 describe("resolveDefaultEffort", () => {
-  it("defaults to xhigh for the opus alias and family ids", () => {
+  it("defaults to xhigh for the opus alias and supported current ids", () => {
     assert.equal(resolveDefaultEffort("opus", null), "xhigh");
     assert.equal(resolveDefaultEffort("claude-opus-4-8", null), "xhigh");
     assert.equal(resolveDefaultEffort("claude-opus-5", null), "xhigh");
-    assert.equal(resolveDefaultEffort("OPUS", undefined), "xhigh");
+    assert.equal(resolveDefaultEffort(" OPUS ", undefined), "xhigh");
   });
 
-  it("defaults to high for the sonnet alias and family ids", () => {
+  it("defaults to high for the sonnet alias and supported current ids", () => {
     assert.equal(resolveDefaultEffort("sonnet", null), "high");
     assert.equal(resolveDefaultEffort("claude-sonnet-5", null), "high");
   });
@@ -1367,6 +1420,14 @@ describe("resolveDefaultEffort", () => {
     assert.equal(resolveDefaultEffort("some-future-model", null), undefined);
   });
 
+  it("does not broaden alias effort defaults to older pinned family ids", () => {
+    assert.equal(resolveDefaultEffort("claude-sonnet-4-5", null), undefined);
+    assert.equal(
+      resolveDefaultEffort("claude-opus-4-1-20250805", null),
+      undefined
+    );
+  });
+
   it("preserves an explicit effort regardless of model", () => {
     assert.equal(resolveDefaultEffort("opus", "low"), "low");
     assert.equal(resolveDefaultEffort("sonnet", "medium"), "medium");
@@ -1380,9 +1441,12 @@ describe("resolveDefaultEffort", () => {
   });
 
   it("DEFAULT_EFFORT_BY_MODEL contains the expected entries", () => {
-    assert.equal(DEFAULT_EFFORT_BY_MODEL.size, 2);
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.size, 5);
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("opus"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-8"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-5"), "xhigh");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("sonnet"), "high");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-5"), "high");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.has("haiku"), false);
   });
 });

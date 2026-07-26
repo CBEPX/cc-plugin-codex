@@ -12,14 +12,16 @@
 
 - Keep `requestedModel` as the forwarded Claude alias or pinned ID while reporting the concrete terminal `finalModel` observed from Claude Code.
 - Pass `fable` through without the legacy `[1m]` suffix because Fable 5 has a native 1M context window, leaving current-model resolution to Claude Code.
+- Let built-in forwarding subagents inherit the current Codex runtime model at medium effort; this avoids stale pins but can cost more than the former mini-model forwarder.
 
 ### Fixed
 
 - Use the Claude CLI-compatible JSON Schema Draft-07 dialect for adversarial review structured output.
 - Pass native Claude model aliases through to Claude Code so they follow current models such as Opus 5, while full model IDs remain pinned.
-- Let built-in forwarding subagents inherit the current Codex runtime model and adapt to whether the runtime requires `agent_type`, instead of relying on removed metadata or a fixed `gpt-5.4-mini` to `gpt-5.4` fallback chain.
+- Adapt built-in forwarding subagents to whether the runtime requires `agent_type`, instead of relying on removed metadata or a fixed `gpt-5.4-mini` to `gpt-5.4` fallback chain.
 - Match terminal context telemetry across equivalent Claude model IDs, including `[1m]` suffixes, without attributing a window when the terminal model is unknown or synthetic.
 - Normalize pre-v1.5 task and review results so `status` and `result` JSON consistently expose `contextWindow: null`.
+- Keep default effort selection exact for pinned model IDs while adding Opus 5, so older pinned versions do not silently inherit current-family effort defaults.
 
 ## v1.4.0
 

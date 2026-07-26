@@ -133,7 +133,7 @@ $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 
 **Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
-**Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version, or use `--effort` to override the family default.
+**Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version; for older pinned IDs, pass `--effort` explicitly instead of inheriting a current-family default.
 
 Fable 5 has a native 1M context window, so current Claude Code only needs the bare `fable` alias; no `[1m]` suffix is required. See Claude Code's [model configuration](https://code.claude.com/docs/en/model-config).
 
@@ -203,6 +203,8 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 **Resume behavior:** If you don't pass `--resume` or `--fresh`, rescue checks for a resumable Claude session and asks once whether to continue or start fresh. Your phrasing guides the recommendation — "continue the last run" → resume, "start over" → fresh.
 
 Background rescue runs through a built-in Codex subagent. When the child finishes, the plugin tries to nudge the parent thread with the exact `$cc:result <job-id>` to open.
+
+The forwarding subagent inherits the current Codex runtime model at `medium` effort. This avoids stale model pins, but it can cost more than the former mini-model forwarder.
 
 ### `$cc:transfer`
 

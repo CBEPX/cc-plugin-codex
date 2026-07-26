@@ -179,9 +179,15 @@ function extractContextWindow(value, observedModel) {
         usage &&
         !Array.isArray(usage)
     );
-    const usage = observedModel
-      ? entries.find(([model]) => areModelIdsEquivalent(model, observedModel))?.[1]
-      : null;
+    const equivalentEntries = entries.filter(([model]) =>
+      areModelIdsEquivalent(model, observedModel)
+    );
+    const observedCanonical = canonicalModelForComparison(observedModel);
+    const exactEntries = equivalentEntries.filter(
+      ([model]) => canonicalModelForComparison(model) === observedCanonical
+    );
+    const candidates = exactEntries.length > 0 ? exactEntries : equivalentEntries;
+    const usage = candidates.length === 1 ? candidates[0][1] : null;
     if (Number.isSafeInteger(usage?.contextWindow) && usage.contextWindow > 0) {
       return usage.contextWindow;
     }
@@ -1059,7 +1065,10 @@ export const DEFAULT_MODEL = "opus";
 
 export const DEFAULT_EFFORT_BY_MODEL = new Map([
   ["opus", "xhigh"],
+  ["claude-opus-4-8", "xhigh"],
+  ["claude-opus-5", "xhigh"],
   ["sonnet", "high"],
+  ["claude-sonnet-5", "high"],
 ]);
 
 export function resolveDefaultModel(model) {
@@ -1073,13 +1082,8 @@ export function resolveDefaultEffort(model, effort) {
   if (effort != null && String(effort).trim() !== "") {
     return effort;
   }
-  const key = String(model ?? "").trim().toLowerCase();
-  for (const [alias, defaultEffort] of DEFAULT_EFFORT_BY_MODEL) {
-    if (areModelIdsEquivalent(key, alias)) {
-      return defaultEffort;
-    }
-  }
-  return undefined;
+  const key = String(model).trim().toLowerCase();
+  return DEFAULT_EFFORT_BY_MODEL.get(key);
 }
 
 export function resolveModel(model) {
