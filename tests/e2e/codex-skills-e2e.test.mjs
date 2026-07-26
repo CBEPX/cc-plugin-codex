@@ -856,10 +856,7 @@ function startMockProvider({
           const requiredSpawnFields = Array.isArray(spawnAgentParameters.required)
             ? spawnAgentParameters.required
             : [];
-          assert.ok(
-            !requiredSpawnFields.includes("agent_type"),
-            "spawn_agent.agent_type must not be required"
-          );
+          const agentTypeRequired = requiredSpawnFields.includes("agent_type");
           assert.ok(
             !requiredSpawnFields.includes("model"),
             "spawn_agent.model must not be required"
@@ -902,6 +899,9 @@ function startMockProvider({
               "Example exact output: completed:/simplify make the output compact\n\n" +
               taskCommand,
           };
+          if (agentTypeRequired) {
+            spawnArgs.agent_type = "default";
+          }
           events = [
             eventCreated("resp-parent-1"),
             eventFunctionCall(spawnCallId, "spawn_agent", spawnArgs),

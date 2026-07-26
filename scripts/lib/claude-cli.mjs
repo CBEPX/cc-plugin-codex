@@ -542,14 +542,16 @@ export class StreamParser {
         case "result":
           this.state.receivedTerminalEvent = true;
           {
-            const terminalModel = extractRawObservedModel(event);
+            const terminalModel = normalizeObservedModel(
+              extractRawObservedModel(event)
+            );
             if (hasSyntheticModelSignal(event)) {
               this.state.hasTerminalLimitSignal = true;
             }
-            this.state.finalModel = normalizeObservedModel(terminalModel) ?? this.state.finalModel;
-            this.state.contextWindow =
-              extractContextWindow(event, this.state.finalModel) ??
-              this.state.contextWindow;
+            this.state.finalModel = terminalModel ?? this.state.finalModel;
+            this.state.contextWindow = terminalModel
+              ? extractContextWindow(event, terminalModel)
+              : null;
           }
           if (event.result) {
             this.state.finalMessage = mergeTerminalResultText(

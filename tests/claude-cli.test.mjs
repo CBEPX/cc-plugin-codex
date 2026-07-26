@@ -104,9 +104,15 @@ describe("StreamParser", () => {
       session_id: "sess-limit",
     });
 
+    parser.feed(
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-opus-4-8" },
+      }) + "\n"
+    );
     parser.feed(resultEvent + "\n");
 
-    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.finalModel, "claude-opus-4-8");
     assert.equal(parser.state.contextWindow, null);
     assert.equal(parser.state.hasTerminalLimitSignal, true);
     assert.equal(parser.state.unresolvedParseErrors, 0);
@@ -693,6 +699,12 @@ describe("StreamParser", () => {
     const parser = new StreamParser();
     parser.feed(
       JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-sonnet-5" },
+      }) + "\n"
+    );
+    parser.feed(
+      JSON.stringify({
         type: "result",
         result: "done",
         model: "claude-opus-5",
@@ -710,6 +722,12 @@ describe("StreamParser", () => {
     const parser = new StreamParser();
     parser.feed(
       JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-opus-5" },
+      }) + "\n"
+    );
+    parser.feed(
+      JSON.stringify({
         type: "result",
         result: "done",
         modelUsage: {
@@ -719,7 +737,7 @@ describe("StreamParser", () => {
       }) + "\n"
     );
 
-    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.finalModel, "claude-opus-5");
     assert.equal(parser.state.contextWindow, null);
     assert.equal(parser.state.unresolvedParseErrors, 0);
   });

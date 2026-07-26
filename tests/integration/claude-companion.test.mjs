@@ -2347,7 +2347,7 @@ describe("claude-companion integration", () => {
     }
   });
 
-  it("normalizes legacy task telemetry in status and result JSON", () => {
+  it("normalizes legacy task and review telemetry in status and result JSON", () => {
     const testEnv = createTestEnvironment();
     const jobId = "legacy-context-window";
     const legacyJob = {
@@ -2361,6 +2361,22 @@ describe("claude-companion integration", () => {
       result: {
         status: "completed",
         rawOutput: "legacy result",
+      },
+    };
+    const legacyReviewJob = {
+      id: `${jobId}-review`,
+      status: "completed",
+      jobClass: "review",
+      kind: "review",
+      sessionId: "legacy-session",
+      createdAt: "2026-04-03T10:00:00Z",
+      completedAt: "2026-04-03T10:00:01Z",
+      result: {
+        review: "Review",
+        codex: {
+          status: "completed",
+          rawOutput: "legacy review",
+        },
       },
     };
 
@@ -2379,6 +2395,21 @@ describe("claude-companion integration", () => {
       );
       assert.equal(resultPayload.job.result.contextWindow, null);
       assert.equal(resultPayload.storedJob.result.contextWindow, null);
+
+      writeSessionScopedJob(testEnv, legacyReviewJob.id, legacyReviewJob);
+      const reviewStatusPayload = runCompanionJson(
+        ["status", "--cwd", testEnv.workspaceDir, "--json", legacyReviewJob.id],
+        { env: testEnv.env }
+      );
+      assert.equal(reviewStatusPayload.job.result.codex.contextWindow, null);
+
+      writeSessionScopedJob(testEnv, legacyReviewJob.id, legacyReviewJob);
+      const reviewResultPayload = runCompanionJson(
+        ["result", "--cwd", testEnv.workspaceDir, "--json", legacyReviewJob.id],
+        { env: testEnv.env }
+      );
+      assert.equal(reviewResultPayload.job.result.codex.contextWindow, null);
+      assert.equal(reviewResultPayload.storedJob.result.codex.contextWindow, null);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

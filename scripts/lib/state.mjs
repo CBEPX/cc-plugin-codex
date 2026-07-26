@@ -326,10 +326,31 @@ export function writeJobFile(cwd, jobId, payload) {
 function normalizeStoredJob(job) {
   const isTask = job?.jobClass === "task" || job?.kind === "task";
   if (
-    !isTask ||
     !job.result ||
     typeof job.result !== "object" ||
     Array.isArray(job.result)
+  ) {
+    return job;
+  }
+  if (isTask) {
+    return {
+      ...job,
+      result: {
+        ...job.result,
+        contextWindow: job.result.contextWindow ?? null,
+      },
+    };
+  }
+
+  const isReview =
+    job?.jobClass === "review" ||
+    job?.kind === "review" ||
+    job?.kind === "adversarial-review";
+  if (
+    !isReview ||
+    !job.result.codex ||
+    typeof job.result.codex !== "object" ||
+    Array.isArray(job.result.codex)
   ) {
     return job;
   }
@@ -337,7 +358,10 @@ function normalizeStoredJob(job) {
     ...job,
     result: {
       ...job.result,
-      contextWindow: job.result.contextWindow ?? null,
+      codex: {
+        ...job.result.codex,
+        contextWindow: job.result.codex.contextWindow ?? null,
+      },
     },
   };
 }

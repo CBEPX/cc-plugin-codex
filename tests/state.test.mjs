@@ -320,9 +320,18 @@ describe("writeJobFile / readJobFile / listJobs", () => {
       listJobs(PROJECT_CWD).find((job) => job.id === jobId).result.contextWindow,
       null
     );
+
+    writeJobFile(PROJECT_CWD, jobId, {
+      id: jobId,
+      status: "completed",
+      kind: "task",
+      createdAt: nowIso(),
+      result: {},
+    });
+    assert.equal(readJobFile(PROJECT_CWD, jobId).result.contextWindow, null);
   });
 
-  it("preserves task telemetry and does not reshape review results", () => {
+  it("preserves task telemetry and normalizes legacy review results", () => {
     writeJobFile(PROJECT_CWD, jobId, {
       id: jobId,
       status: "completed",
@@ -339,7 +348,25 @@ describe("writeJobFile / readJobFile / listJobs", () => {
       createdAt: nowIso(),
       result: { codex: {} },
     });
-    assert.equal("contextWindow" in readJobFile(PROJECT_CWD, jobId).result, false);
+    assert.equal(readJobFile(PROJECT_CWD, jobId).result.codex.contextWindow, null);
+
+    writeJobFile(PROJECT_CWD, jobId, {
+      id: jobId,
+      status: "completed",
+      kind: "adversarial-review",
+      createdAt: nowIso(),
+      result: { codex: { contextWindow: 200000 } },
+    });
+    assert.equal(readJobFile(PROJECT_CWD, jobId).result.codex.contextWindow, 200000);
+
+    writeJobFile(PROJECT_CWD, jobId, {
+      id: jobId,
+      status: "completed",
+      kind: "review",
+      createdAt: nowIso(),
+      result: { codex: {} },
+    });
+    assert.equal(readJobFile(PROJECT_CWD, jobId).result.codex.contextWindow, null);
   });
 
   it("listJobs returns recent entries without error", () => {

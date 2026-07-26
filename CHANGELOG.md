@@ -19,7 +19,7 @@
 - Pass native Claude model aliases through to Claude Code so they follow current models such as Opus 5, while full model IDs remain pinned.
 - Let built-in forwarding subagents inherit the current Codex runtime model and adapt to whether the runtime requires `agent_type`, instead of relying on removed metadata or a fixed `gpt-5.4-mini` to `gpt-5.4` fallback chain.
 - Match terminal context telemetry across equivalent Claude model IDs, including `[1m]` suffixes, without attributing a window when the terminal model is unknown or synthetic.
-- Normalize pre-v1.5 task results so `status` and `result` JSON consistently expose `contextWindow: null`.
+- Normalize pre-v1.5 task and review results so `status` and `result` JSON consistently expose `contextWindow: null`.
 
 ## v1.4.0
 
