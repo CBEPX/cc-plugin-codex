@@ -13,8 +13,8 @@ If the user wants Claude Code to investigate, validate by changing code, or actu
 If the overall request is "you review it too, also ask Claude to review in the background, then you aggregate and fix it", keep the delegated Claude part on `$cc:review` unless the user explicitly asks for a harsher or more adversarial review.
 `$cc:review` does not accept custom focus text. If the user wants to steer Claude toward a particular angle, question, subsystem, or risk area, that is a signal to use `$cc:adversarial-review` instead.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
-`node "<plugin-root>/scripts/claude-companion.mjs" review ...`
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Resolve `<workspace-root>` from the active Codex session's user workspace, never from `<plugin-root>` or the directory used to read this skill. Always run the companion from the active plugin root while passing the user workspace explicitly:
+`node "<plugin-root>/scripts/claude-companion.mjs" review --cwd "<workspace-root>" ...`
 
 Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers` (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku and fable have no effort)
 
@@ -57,7 +57,7 @@ Argument handling:
 
 Foreground flow:
 - Run:
-  `node "<plugin-root>/scripts/claude-companion.mjs" review --view-state on-success <arguments with --wait/--background removed>`
+  `node "<plugin-root>/scripts/claude-companion.mjs" review --cwd "<workspace-root>" --view-state on-success <arguments with --wait/--background removed>`
 - Foreground review belongs to the main Codex thread. Do not spawn a review subagent, do not invoke a generic review-runner role, and do not proxy this foreground path through any background worker abstraction.
 - Do not fall back to raw `claude`, `claude-code`, `claude review`, `bash -lc ...claude...`, or any other direct Claude CLI syntax when the companion path is available. The foreground syntax contract here is the resolved companion command above, not a hand-rolled Claude invocation.
 - If the resolved companion command fails, surface that failure. Do not silently retry foreground review through a different CLI shape, a generic review runner, or a custom shell wrapper.
@@ -70,7 +70,8 @@ Background flow:
 - Never satisfy background review by running the companion command itself with shell backgrounding such as `&`, `nohup`, detached `spawn`, or any equivalent direct background process launch.
 - Background here means "spawn the forwarding child via `spawn_agent` and do not wait in the parent turn." The companion review command inside that child still runs once, in the foreground, inside the child thread.
 - Before spawning the built-in child, capture the review job id plus routing context in one call:
-  `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind review --json`
+  `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind review --cwd "<workspace-root>" --json`
+- Treat the helper's non-empty `workspaceRoot` as the canonical workspace for the forwarding child. Pass it back as `--cwd "<workspaceRoot>"`; never substitute `<plugin-root>` or the child's default working directory.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
 - If that helper returns a non-empty `ownerSessionId`, include `--owner-session-id <owner-session-id>` in the companion command.
 - If it returns an empty `ownerSessionId`, omit `--owner-session-id` entirely. Never leave an empty placeholder such as `--owner-session-id  --job-id`.
@@ -88,12 +89,13 @@ Background flow:
 - The built-in child must be a pure forwarder. It should:
   - run exactly one shell command
   - execute:
-    `node "<plugin-root>/scripts/claude-companion.mjs" review --view-state defer <arguments with --wait/--background removed>`
+    `node "<plugin-root>/scripts/claude-companion.mjs" review --cwd "<workspaceRoot>" --view-state defer <arguments with --wait/--background removed>`
   - run that command as one blocking foreground shell-tool call, not as a background terminal/session
   - do not request a shell session id, poll a shell session later, or return before the companion command exits
   - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
   - include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id
   - include `--job-id <reserved-job-id>` when the parent reserved one
+  - preserve the helper's exact non-empty `workspaceRoot` in `--cwd` so the reservation and job use the same workspace state
   - never leave an empty routing placeholder such as `--owner-session-id  --job-id`
   - return only that command's stdout exactly, with no added commentary
   - ignore stderr progress chatter such as `[cc] ...` lines and preserve only the final stdout-equivalent result text

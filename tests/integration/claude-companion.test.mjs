@@ -2641,6 +2641,44 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("reuses the routing helper workspace for a forwarded task reservation", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const routing = runCompanionJson(
+        [
+          "background-routing-context",
+          "--kind",
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(routing.workspaceRoot, testEnv.workspaceDir);
+      runCompanion(
+        [
+          "task",
+          "--cwd",
+          routing.workspaceRoot,
+          "--job-id",
+          routing.jobId,
+          "forwarded-workspace-anchor delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.workspaceRoot, testEnv.workspaceDir);
+      assert.equal(storedJob.status, "completed");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("keeps completed resume candidates session-scoped and ignores active tasks", async () => {
     const testEnv = createTestEnvironment();
     const sessionAEnv = {

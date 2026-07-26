@@ -7,8 +7,8 @@ description: 'Show the stored final output for a finished Claude Code job in thi
 
 Use this skill when the user wants the stored final output for a finished Claude Code job.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
-`node "<plugin-root>/scripts/claude-companion.mjs" result $ARGUMENTS`
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Resolve `<workspace-root>` from the active Codex session's user workspace, never from `<plugin-root>` or the directory used to read this skill. Always run:
+`node "<plugin-root>/scripts/claude-companion.mjs" result --cwd "<workspace-root>" $ARGUMENTS`
 
 Supported arguments: `[job-id]`
 

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v1.5.1
+
+### Fixed
+
+- Anchor every public companion command to the active Codex user workspace with an explicit `--cwd`, instead of allowing skill-file or plugin-cache directories to become the job workspace.
+- Reuse the canonical `workspaceRoot` returned by `background-routing-context` in forwarding-child task and review commands, so reserved job IDs and their consumers always share the same workspace state.
+- Refresh the transitive development-only `brace-expansion` lockfile entry to `5.0.8`, clearing the known high-severity audit finding without changing the Node.js 18+ plugin runtime.
+
 ## v1.5.0
 
 ### Added
