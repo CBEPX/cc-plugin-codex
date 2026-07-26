@@ -7,8 +7,8 @@ description: 'Cancel an active tracked Claude Code job in this repository. Args:
 
 Use this skill when the user wants to stop an active Claude Code job in this repository.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Resolve `<workspace-root>` from the active Codex session's user workspace, never from `<plugin-root>` or the directory used to read this skill. Always run:
-`node "<plugin-root>/scripts/claude-companion.mjs" cancel --cwd "<workspace-root>" $ARGUMENTS`
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Always run:
+`node "<plugin-root>/scripts/claude-companion.mjs" cancel --cwd "$PWD" $ARGUMENTS`
 
 Supported arguments: `[job-id]`
 

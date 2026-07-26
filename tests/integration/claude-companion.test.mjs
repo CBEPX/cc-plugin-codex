@@ -2658,6 +2658,18 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(routing.workspaceRoot, testEnv.workspaceDir);
+      const missingWorkspace = runCompanionExpectFailure(
+        [
+          "task",
+          "--job-id",
+          routing.jobId,
+          "forwarded-workspace-anchor delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.match(missingWorkspace.stderr, /is not reserved/i);
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), true);
+
       runCompanion(
         [
           "task",
@@ -2671,9 +2683,73 @@ describe("claude-companion integration", () => {
       );
 
       const storedJob = readStoredJobById(testEnv, routing.jobId);
-      assert.equal(storedJob.workspaceRoot, testEnv.workspaceDir);
+      assert.equal(storedJob.workspaceRoot, routing.workspaceRoot);
       assert.equal(storedJob.status, "completed");
       assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reuses the routing helper workspace for a forwarded review reservation", () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const routing = runCompanionJson(
+        [
+          "background-routing-context",
+          "--kind",
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env }
+      );
+
+      runCompanion(
+        [
+          "review",
+          "--cwd",
+          routing.workspaceRoot,
+          "--scope",
+          "working-tree",
+          "--job-id",
+          routing.jobId,
+        ],
+        { env: testEnv.env }
+      );
+
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.workspaceRoot, routing.workspaceRoot);
+      assert.equal(storedJob.status, "completed");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects invalid command workspaces before creating state", () => {
+    const testEnv = createTestEnvironment();
+    const missingWorkspace = path.join(testEnv.rootDir, "missing-workspace");
+    const workspaceFile = path.join(testEnv.rootDir, "workspace-file");
+    fs.writeFileSync(workspaceFile, "not a directory\n", "utf8");
+
+    try {
+      const missingResult = runCompanionExpectFailure(
+        ["status", "--cwd", missingWorkspace, "--json"],
+        { env: testEnv.env }
+      );
+      const fileResult = runCompanionExpectFailure(
+        ["status", "--cwd", workspaceFile, "--json"],
+        { env: testEnv.env }
+      );
+
+      assert.match(missingResult.stderr, /workspace must be an existing directory/i);
+      assert.match(fileResult.stderr, /workspace must be an existing directory/i);
+      assert.equal(fs.existsSync(missingWorkspace), false);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

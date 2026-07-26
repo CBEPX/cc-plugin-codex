@@ -2,11 +2,11 @@
 
 Use this document only when the main Codex thread or a built-in forwarding child is executing a Claude Code `review` or `adversarial-review` command.
 This is an internal runtime reference, not a public skill. It captures the exact companion-command contract and the foreground/background execution boundary.
-The public skill already resolved the active plugin root from its `SKILL.md` path and the user workspace from the active Codex session. Reuse both. Never derive the workspace from the plugin root or the directory used to read this document.
+The public skill already resolved the active plugin root from its `SKILL.md` path and keeps foreground shell calls in the user workspace. Reuse both. Never derive the workspace from the plugin root or the directory used to read this document.
 
 Primary helper:
-- `node "<plugin-root>/scripts/claude-companion.mjs" review --cwd "<workspace-root>" ...`
-- `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review --cwd "<workspace-root>" ...`
+- `node "<plugin-root>/scripts/claude-companion.mjs" review --cwd "$PWD" ...`
+- `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review --cwd "$PWD" ...`
 
 Execution boundary:
 - Foreground review stays on the main Codex thread. Do not satisfy foreground review through a review subagent, a generic review-runner role, or any background worker abstraction.
@@ -16,14 +16,14 @@ Execution boundary:
 
 Foreground contract:
 - Strip `--wait` and `--background` before building the companion command.
-- Preserve `--cwd "<workspace-root>"` independently of the plugin path.
+- Keep the shell tool in the active user workspace and preserve `--cwd "$PWD"` independently of the plugin path.
 - Foreground command:
-  - `review --cwd "<workspace-root>" --view-state on-success ...`
-  - `adversarial-review --cwd "<workspace-root>" --view-state on-success ...`
+  - `review --cwd "$PWD" --view-state on-success ...`
+  - `adversarial-review --cwd "$PWD" --view-state on-success ...`
 - Return companion stdout faithfully and do not add review execution commentary around it.
 
 Background contract:
-- Use `background-routing-context --kind review --cwd "<workspace-root>" --json` before spawning the forwarding child.
+- Use `background-routing-context --kind review --cwd "$PWD" --json` before spawning the forwarding child.
 - Pass the helper's exact non-empty `workspaceRoot` back to the child as `--cwd "<workspaceRoot>"`; this keeps the reservation and job in the same workspace state.
 - Preserve `--job-id` only when reserved by the parent helper.
 - Preserve `--owner-session-id` only when the parent helper returned a non-empty owner session id.

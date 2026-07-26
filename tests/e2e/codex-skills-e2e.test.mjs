@@ -1663,6 +1663,30 @@ describe("Codex direct-skill E2E", () => {
 
     const userRequest = "$cc:review --wait --scope working-tree --model haiku";
     const companionScript = path.join(pluginRoot, "scripts", "claude-companion.mjs");
+    for (const pluginCacheCwd of [pluginRoot, path.join(pluginRoot, "scripts")]) {
+      const pluginCacheWorkspace = spawnSync(
+        process.execPath,
+        [companionScript, "status", "--json"],
+        {
+          cwd: pluginCacheCwd,
+          env: testEnv.env,
+          encoding: "utf8",
+        }
+      );
+      assert.notEqual(
+        pluginCacheWorkspace.status,
+        0,
+        JSON.stringify({
+          pluginCacheCwd,
+          realPluginRoot: fs.realpathSync.native(pluginRoot),
+          codexHome: testEnv.codexHome,
+          stdout: pluginCacheWorkspace.stdout,
+          stderr: pluginCacheWorkspace.stderr,
+        })
+      );
+      assert.match(pluginCacheWorkspace.stderr, /Refusing to use the installed plugin cache/i);
+    }
+
     const provider = startDirectSkillProvider({
       userRequest,
       expectedNeedles: ["Claude Code Review"],

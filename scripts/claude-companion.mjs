@@ -294,7 +294,32 @@ function parseCommandInput(argv, config = {}) {
 }
 
 function resolveCommandCwd(options = {}) {
-  return options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
+  const resolvedCwd = options.cwd
+    ? path.resolve(process.cwd(), options.cwd)
+    : process.cwd();
+  let directory;
+  try {
+    directory = fs.statSync(resolvedCwd);
+  } catch {
+    throw new Error(`Claude Code workspace must be an existing directory: ${resolvedCwd}`);
+  }
+  if (!directory.isDirectory()) {
+    throw new Error(`Claude Code workspace must be an existing directory: ${resolvedCwd}`);
+  }
+
+  const canonicalCwd = fs.realpathSync.native(resolvedCwd);
+  if (currentPluginCacheInstallInfo()) {
+    const canonicalPluginRoot = fs.realpathSync.native(ROOT_DIR);
+    const relativePath = path.relative(canonicalPluginRoot, canonicalCwd);
+    const isPluginCacheWorkspace =
+      !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+    if (isPluginCacheWorkspace) {
+      throw new Error(
+        `Refusing to use the installed plugin cache as the Claude Code workspace: ${canonicalCwd}. Run the command from the user workspace and pass that directory with --cwd.`
+      );
+    }
+  }
+  return resolvedCwd;
 }
 
 function resolveCommandWorkspace(options = {}) {
@@ -444,7 +469,14 @@ function configureNativePluginHooks() {
 
 function currentPluginCacheInstallInfo() {
   const cacheRoot = path.join(CODEX_DIR, "plugins", "cache");
-  const relativePath = path.relative(cacheRoot, ROOT_DIR);
+  let canonicalCacheRoot = path.resolve(cacheRoot);
+  try {
+    canonicalCacheRoot = fs.realpathSync.native(cacheRoot);
+  } catch {}
+  const relativePath = path.relative(
+    canonicalCacheRoot,
+    fs.realpathSync.native(ROOT_DIR)
+  );
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     return null;
   }
