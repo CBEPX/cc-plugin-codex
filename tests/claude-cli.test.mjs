@@ -89,7 +89,7 @@ describe("StreamParser", () => {
     assert.equal(parser.state.hasTerminalLimitSignal, true);
   });
 
-  it("detects Claude synthetic model ids in multi-model usage payloads", () => {
+  it("does not guess context telemetry from synthetic limit payloads", () => {
     const parser = new StreamParser();
     const resultEvent = JSON.stringify({
       type: "result",
@@ -107,8 +107,9 @@ describe("StreamParser", () => {
     parser.feed(resultEvent + "\n");
 
     assert.equal(parser.state.finalModel, null);
-    assert.equal(parser.state.contextWindow, 1000000);
+    assert.equal(parser.state.contextWindow, null);
     assert.equal(parser.state.hasTerminalLimitSignal, true);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
   });
 
   it("does not treat unrelated assistant synthetic model ids as terminal limit signals", () => {

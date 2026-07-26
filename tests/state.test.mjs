@@ -306,6 +306,42 @@ describe("writeJobFile / readJobFile / listJobs", () => {
     assert.ok(found, "Expected to find the written job in listJobs");
   });
 
+  it("normalizes missing context telemetry in legacy task results", () => {
+    writeJobFile(PROJECT_CWD, jobId, {
+      id: jobId,
+      status: "completed",
+      jobClass: "task",
+      createdAt: nowIso(),
+      result: { status: "completed", rawOutput: "done" },
+    });
+
+    assert.equal(readJobFile(PROJECT_CWD, jobId).result.contextWindow, null);
+    assert.equal(
+      listJobs(PROJECT_CWD).find((job) => job.id === jobId).result.contextWindow,
+      null
+    );
+  });
+
+  it("preserves task telemetry and does not reshape review results", () => {
+    writeJobFile(PROJECT_CWD, jobId, {
+      id: jobId,
+      status: "completed",
+      jobClass: "task",
+      createdAt: nowIso(),
+      result: { contextWindow: 1000000 },
+    });
+    assert.equal(readJobFile(PROJECT_CWD, jobId).result.contextWindow, 1000000);
+
+    writeJobFile(PROJECT_CWD, jobId, {
+      id: jobId,
+      status: "completed",
+      jobClass: "review",
+      createdAt: nowIso(),
+      result: { codex: {} },
+    });
+    assert.equal("contextWindow" in readJobFile(PROJECT_CWD, jobId).result, false);
+  });
+
   it("listJobs returns recent entries without error", () => {
     // Write 5 jobs, verify they all appear (we won't actually write 51)
     const ids = [];

@@ -2347,6 +2347,43 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("normalizes legacy task telemetry in status and result JSON", () => {
+    const testEnv = createTestEnvironment();
+    const jobId = "legacy-context-window";
+    const legacyJob = {
+      id: jobId,
+      status: "completed",
+      jobClass: "task",
+      kind: "task",
+      sessionId: "legacy-session",
+      createdAt: "2026-04-03T10:00:00Z",
+      completedAt: "2026-04-03T10:00:01Z",
+      result: {
+        status: "completed",
+        rawOutput: "legacy result",
+      },
+    };
+
+    try {
+      writeSessionScopedJob(testEnv, jobId, legacyJob);
+      const statusPayload = runCompanionJson(
+        ["status", "--cwd", testEnv.workspaceDir, "--json", jobId],
+        { env: testEnv.env }
+      );
+      assert.equal(statusPayload.job.result.contextWindow, null);
+
+      writeSessionScopedJob(testEnv, jobId, legacyJob);
+      const resultPayload = runCompanionJson(
+        ["result", "--cwd", testEnv.workspaceDir, "--json", jobId],
+        { env: testEnv.env }
+      );
+      assert.equal(resultPayload.job.result.contextWindow, null);
+      assert.equal(resultPayload.storedJob.result.contextWindow, null);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("uses an explicit owner session id so rescue-launched jobs stay visible to the parent session", async () => {
     const testEnv = createTestEnvironment();
     const childSessionEnv = {

@@ -179,12 +179,9 @@ function extractContextWindow(value, observedModel) {
         usage &&
         !Array.isArray(usage)
     );
-    const matchingEntry = observedModel
-      ? entries.find(([model]) => areModelIdsEquivalent(model, observedModel))
+    const usage = observedModel
+      ? entries.find(([model]) => areModelIdsEquivalent(model, observedModel))?.[1]
       : null;
-    const usage =
-      matchingEntry?.[1] ??
-      (!observedModel && entries.length === 1 ? entries[0][1] : null);
     if (Number.isSafeInteger(usage?.contextWindow) && usage.contextWindow > 0) {
       return usage.contextWindow;
     }
