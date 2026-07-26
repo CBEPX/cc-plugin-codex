@@ -788,7 +788,7 @@ function startMockProvider({
   const waitCallId = "wait-1";
   const taskCommand =
     taskCommandOverride ??
-    `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh ${JSON.stringify(taskPrompt)}`;
+    `node ${JSON.stringify(COMPANION_SCRIPT)} task --cwd ${JSON.stringify(PROJECT_ROOT)} --fresh ${JSON.stringify(taskPrompt)}`;
   let childRenderedOutput = null;
 
   const server = http.createServer((req, res) => {
@@ -1323,9 +1323,11 @@ describe("Codex rescue-skill E2E", () => {
       userRequest,
       mode: "builtin-default",
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh --job-id ${JSON.stringify(reservedJobId)} --view-state defer ${JSON.stringify(taskPrompt)}`,
-      expectedChildNeedles: ["--view-state defer", "--job-id", reservedJobId],
+        `node ${JSON.stringify(COMPANION_SCRIPT)} task --cwd ${JSON.stringify(PROJECT_ROOT)} --fresh --job-id ${JSON.stringify(reservedJobId)} --view-state defer ${JSON.stringify(taskPrompt)}`,
+      expectedChildNeedles: ["--cwd", PROJECT_ROOT, "--view-state defer", "--job-id", reservedJobId],
       expectedParentNeedles: [
+        "background-routing-context --kind task --json",
+        "helper's non-empty `workspaceRoot` as the canonical workspace",
         "blocking foreground shell-tool call, not as a background terminal/session",
         "do not request a shell session id, poll a shell session later, or return before the companion command exits",
         "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
@@ -1506,8 +1508,8 @@ describe("Codex rescue-skill E2E", () => {
       userRequest: followupRequest,
       mode: "builtin-alias",
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} task --resume ${JSON.stringify(followupTaskPrompt)}`,
-      expectedChildNeedles: ["task --resume"],
+        `node ${JSON.stringify(COMPANION_SCRIPT)} task --cwd ${JSON.stringify(PROJECT_ROOT)} --resume ${JSON.stringify(followupTaskPrompt)}`,
+      expectedChildNeedles: ["task --cwd", PROJECT_ROOT, "--resume"],
     });
     testEnv.providerPort = await provider.listen();
     fs.rmSync(path.join(testEnv.codexHome, "config.toml"), { force: true });
@@ -1658,9 +1660,42 @@ describe("Codex direct-skill E2E", () => {
     );
 
     const pluginRoot = installPlugin(testEnv);
+    const pluginCacheRoot = path.join(testEnv.codexHome, "plugins", "cache");
+    const siblingVersionRoot = path.join(path.dirname(pluginRoot), "0.0.0-sibling");
+    fs.mkdirSync(siblingVersionRoot, { recursive: true });
 
     const userRequest = "$cc:review --wait --scope working-tree --model haiku";
     const companionScript = path.join(pluginRoot, "scripts", "claude-companion.mjs");
+    for (const pluginCacheCwd of [
+      pluginCacheRoot,
+      path.dirname(pluginRoot),
+      siblingVersionRoot,
+      pluginRoot,
+      path.join(pluginRoot, "scripts"),
+    ]) {
+      const pluginCacheWorkspace = spawnSync(
+        process.execPath,
+        [companionScript, "status", "--json"],
+        {
+          cwd: pluginCacheCwd,
+          env: testEnv.env,
+          encoding: "utf8",
+        }
+      );
+      assert.notEqual(
+        pluginCacheWorkspace.status,
+        0,
+        JSON.stringify({
+          pluginCacheCwd,
+          realPluginRoot: fs.realpathSync.native(pluginRoot),
+          codexHome: testEnv.codexHome,
+          stdout: pluginCacheWorkspace.stdout,
+          stderr: pluginCacheWorkspace.stderr,
+        })
+      );
+      assert.match(pluginCacheWorkspace.stderr, /Refusing to use the installed plugin cache/i);
+    }
+
     const provider = startDirectSkillProvider({
       userRequest,
       expectedNeedles: ["Claude Code Review"],
@@ -1686,6 +1721,20 @@ describe("Codex direct-skill E2E", () => {
         ),
         "installed plugin review should forward the requested model alias to Claude without running setup first"
       );
+
+      const setupResult = spawnSync(
+        process.execPath,
+        [companionScript, "setup", "--cwd", workspaceDir, "--json"],
+        {
+          cwd: workspaceDir,
+          env: testEnv.env,
+          encoding: "utf8",
+        }
+      );
+      assert.equal(setupResult.status, 0, setupResult.stderr || setupResult.stdout);
+      const setupReport = JSON.parse(setupResult.stdout);
+      assert.equal(setupReport.hookTrust.ready, true);
+      assert.ok(setupReport.hookTrust.found > 0);
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);
@@ -1769,6 +1818,7 @@ describe("Codex direct-skill E2E", () => {
       skillTitle: "Claude Code Review",
       expectedParentNeedles: [
         "background-routing-context --kind review --json",
+        "helper's non-empty `workspaceRoot` as the canonical workspace",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background review by running the companion command itself with shell backgrounding",
         "blocking foreground shell-tool call, not as a background terminal/session",
@@ -1780,8 +1830,10 @@ describe("Codex direct-skill E2E", () => {
         "Background Claude Code review finished. Open it with $cc:result <reserved-job-id>.",
       ],
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --cwd ${JSON.stringify(workspaceDir)} --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
       expectedChildNeedles: [
+        "--cwd",
+        workspaceDir,
         "--view-state defer",
         "--job-id",
         reservedJobId,
@@ -1803,7 +1855,7 @@ describe("Codex direct-skill E2E", () => {
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
         "If the command fails, return only the command stdout if any, otherwise a terse failure note.\n\n" +
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --cwd ${JSON.stringify(workspaceDir)} --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
     });
     testEnv.providerPort = await provider.listen();
     installHooks(testEnv);
@@ -1981,6 +2033,7 @@ describe("Codex direct-skill E2E", () => {
       skillTitle: "Claude Code Adversarial Review",
       expectedParentNeedles: [
         "background-routing-context --kind review --json",
+        "helper's non-empty `workspaceRoot` as the canonical workspace",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background adversarial review by running the companion command itself with shell backgrounding",
         "blocking foreground shell-tool call, not as a background terminal/session",
@@ -1992,8 +2045,10 @@ describe("Codex direct-skill E2E", () => {
         "Background Claude Code adversarial review finished. Open it with $cc:result <reserved-job-id>.",
       ],
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --cwd ${JSON.stringify(workspaceDir)} --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
       expectedChildNeedles: [
+        "--cwd",
+        workspaceDir,
         "--view-state defer",
         "--job-id",
         reservedJobId,
@@ -2016,7 +2071,7 @@ describe("Codex direct-skill E2E", () => {
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
         "If the command fails, return only the command stdout if any, otherwise a terse failure note.\n\n" +
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --cwd ${JSON.stringify(workspaceDir)} --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
     });
     testEnv.providerPort = await provider.listen();
     installHooks(testEnv);

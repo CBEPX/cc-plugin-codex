@@ -35,6 +35,29 @@ test("README model alias docs match runtime aliases", () => {
   assert.match(readme, /does not infer a context limit from a floating alias/i);
 });
 
+test("public skills keep plugin and user workspace roots separate", () => {
+  const skillPaths = [
+    "skills/adversarial-review/SKILL.md",
+    "skills/cancel/SKILL.md",
+    "skills/mcp-diagnose/SKILL.md",
+    "skills/rescue/SKILL.md",
+    "skills/result/SKILL.md",
+    "skills/review/SKILL.md",
+    "skills/setup/SKILL.md",
+    "skills/status/SKILL.md",
+    "skills/transfer/SKILL.md",
+  ];
+
+  for (const skillPath of skillPaths) {
+    const skillText = read(skillPath);
+    assert.match(skillText, /Keep the shell tool in the active Codex user workspace/i, skillPath);
+    assert.match(skillText, /never set its working directory to `<plugin-root>`/i, skillPath);
+    assert.doesNotMatch(skillText, /--cwd "<plugin-root>"/i, skillPath);
+    assert.doesNotMatch(skillText, /--cwd "\$PWD"/i, skillPath);
+    assert.doesNotMatch(skillText, /<workspace-root>/i, skillPath);
+  }
+});
+
 test("internal runtime references keep the active-root and notification invariants", () => {
   const reviewRuntime = read("internal-skills/review-runtime/runtime.md");
   const rescueRuntime = read("internal-skills/cli-runtime/runtime.md");
@@ -42,7 +65,8 @@ test("internal runtime references keep the active-root and notification invarian
 
   assert.match(reviewRuntime, /resolved the active plugin root/i);
   assert.match(reviewRuntime, activeRootPattern);
-  assert.match(reviewRuntime, /Do not derive a new runtime path from this document or the current working tree/i);
+  assert.match(reviewRuntime, /Never derive the workspace from the plugin root/i);
+  assert.match(reviewRuntime, /--cwd "<workspaceRoot>"/i);
   assert.match(reviewRuntime, /Never emit an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
   assert.match(reviewRuntime, /blocking foreground shell-tool call, not as a background terminal\/session/i);
   assert.match(reviewRuntime, /Do not request a shell session id, poll a shell session later, or return before the companion command exits/i);
@@ -59,7 +83,8 @@ test("internal runtime references keep the active-root and notification invarian
 
   assert.match(rescueRuntime, /resolved the active plugin root/i);
   assert.match(rescueRuntime, activeRootPattern);
-  assert.match(rescueRuntime, /Do not derive a new runtime path from this document or the current working tree/i);
+  assert.match(rescueRuntime, /Never derive the workspace from the plugin root/i);
+  assert.match(rescueRuntime, /--cwd "<workspaceRoot>"/i);
   assert.match(rescueRuntime, /Never emit an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
   assert.match(rescueRuntime, /Do not add `--quiet-progress` by default/i);
   assert.match(rescueRuntime, /slash command as literal Claude Code task text/i);
@@ -101,6 +126,8 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /Never satisfy background review by running the companion command itself with shell backgrounding/i);
   assert.match(review, /Background here means "spawn the forwarding child via `spawn_agent` and do not wait in the parent turn\."/i);
   assert.match(review, /background-routing-context --kind review --json/i);
+  assert.match(review, /helper's non-empty `workspaceRoot` as the canonical workspace/i);
+  assert.match(review, /review --cwd "<workspaceRoot>" --view-state defer/i);
   assert.match(review, /internal `--job-id <reserved-job-id>` routing flag/i);
   assert.match(review, /non-empty `ownerSessionId`/i);
   assert.match(review, /omit `--owner-session-id` entirely/i);
@@ -114,7 +141,7 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /Only consider `fork_context: true` as a last resort/i);
   assert.match(review, /Do not retry with an explicit model override if spawning fails/i);
   assert.doesNotMatch(review, /gpt-5\.\d+/i);
-  assert.match(review, /review --view-state defer/i);
+  assert.match(review, /review --cwd "<workspaceRoot>" --view-state defer/i);
   assert.match(review, /include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id/i);
   assert.match(review, /never leave an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
   assert.match(review, /blocking foreground shell-tool call, not as a background terminal\/session/i);
@@ -158,6 +185,8 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /Never satisfy background adversarial review by running the companion command itself with shell backgrounding/i);
   assert.match(adversarial, /Background here means "spawn the forwarding child via `spawn_agent` and do not wait in the parent turn\."/i);
   assert.match(adversarial, /background-routing-context --kind review --json/i);
+  assert.match(adversarial, /helper's non-empty `workspaceRoot` as the canonical workspace/i);
+  assert.match(adversarial, /adversarial-review --cwd "<workspaceRoot>" --view-state defer/i);
   assert.match(adversarial, /internal `--job-id <reserved-job-id>` routing flag/i);
   assert.match(adversarial, /non-empty `ownerSessionId`/i);
   assert.match(adversarial, /omit `--owner-session-id` entirely/i);
@@ -171,7 +200,7 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /Only consider `fork_context: true` as a last resort/i);
   assert.match(adversarial, /Do not retry with an explicit model override if spawning fails/i);
   assert.doesNotMatch(adversarial, /gpt-5\.\d+/i);
-  assert.match(adversarial, /adversarial-review --view-state defer/i);
+  assert.match(adversarial, /adversarial-review --cwd "<workspaceRoot>" --view-state defer/i);
   assert.match(adversarial, /include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id/i);
   assert.match(adversarial, /never leave an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
   assert.match(adversarial, /blocking foreground shell-tool call, not as a background terminal\/session/i);
@@ -214,6 +243,8 @@ test("rescue skill keeps --background and --wait as host-side controls only", ()
   assert.match(rescue, /Remove `--background` and `--wait` before spawning the subagent/i);
   assert.match(rescue, /If the free-text task begins with `\/`, preserve it verbatim/i);
   assert.match(rescue, /background-routing-context --kind task --json/i);
+  assert.match(rescue, /helper's non-empty `workspaceRoot` as the canonical workspace/i);
+  assert.match(rescue, /--cwd "<workspaceRoot>"/i);
   assert.match(rescue, /non-empty `ownerSessionId`/i);
   assert.match(rescue, /omit `--owner-session-id` entirely/i);
   assert.match(rescue, /internal `--job-id <reserved-job-id>` routing flag/i);

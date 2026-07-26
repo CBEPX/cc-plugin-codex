@@ -808,7 +808,13 @@ describe("claude-companion integration", () => {
 
   it("setup trusts current native plugin hooks through Codex hooks/list", () => {
     const testEnv = createTestEnvironment();
-    const sourcePath = path.join(PROJECT_ROOT, "hooks", "hooks.json");
+    const projectAlias = path.join(testEnv.rootDir, "plugin-root-link");
+    fs.symlinkSync(
+      PROJECT_ROOT,
+      projectAlias,
+      process.platform === "win32" ? "junction" : "dir"
+    );
+    const sourcePath = path.join(projectAlias, "hooks", "hooks.json");
     const hooks = [
       {
         key: "cc@sendbird:hooks/hooks.json:session_start:0:0",
@@ -862,6 +868,23 @@ describe("claude-companion integration", () => {
         trustStatus: "trusted",
       },
       {
+        key: "cc@sendbird:hooks/hooks.json:outside:0:0",
+        eventName: "session_start",
+        handlerType: "command",
+        matcher: null,
+        command: "node outside.mjs",
+        timeoutSec: 600,
+        statusMessage: null,
+        sourcePath: path.join(testEnv.rootDir, "outside", "hooks.json"),
+        source: "plugin",
+        pluginId: "cc@sendbird",
+        displayOrder: 3,
+        enabled: true,
+        isManaged: false,
+        currentHash: "sha256:outside",
+        trustStatus: "untrusted",
+      },
+      {
         key: "other@sendbird:hooks/hooks.json:session_start:0:0",
         eventName: "session_start",
         handlerType: "command",
@@ -872,7 +895,7 @@ describe("claude-companion integration", () => {
         sourcePath: path.join(testEnv.rootDir, "other", "hooks.json"),
         source: "plugin",
         pluginId: "other@sendbird",
-        displayOrder: 3,
+        displayOrder: 4,
         enabled: true,
         isManaged: false,
         currentHash: "sha256:other",
@@ -2636,6 +2659,120 @@ describe("claude-companion integration", () => {
       assert.equal(payload.ownerSessionId, "env-session");
       assert.equal(payload.parentThreadId, "thread-123");
       assert.match(payload.jobId, /^review-/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reuses the routing helper workspace for a forwarded task reservation", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const routing = runCompanionJson(
+        [
+          "background-routing-context",
+          "--kind",
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(routing.workspaceRoot, testEnv.workspaceDir);
+      const missingWorkspace = runCompanionExpectFailure(
+        [
+          "task",
+          "--job-id",
+          routing.jobId,
+          "forwarded-workspace-anchor delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.match(missingWorkspace.stderr, /is not reserved/i);
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), true);
+
+      runCompanion(
+        [
+          "task",
+          "--cwd",
+          routing.workspaceRoot,
+          "--job-id",
+          routing.jobId,
+          "forwarded-workspace-anchor delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.workspaceRoot, routing.workspaceRoot);
+      assert.equal(storedJob.status, "completed");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reuses the routing helper workspace for a forwarded review reservation", () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const routing = runCompanionJson(
+        [
+          "background-routing-context",
+          "--kind",
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env }
+      );
+
+      runCompanion(
+        [
+          "review",
+          "--cwd",
+          routing.workspaceRoot,
+          "--scope",
+          "working-tree",
+          "--job-id",
+          routing.jobId,
+        ],
+        { env: testEnv.env }
+      );
+
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.workspaceRoot, routing.workspaceRoot);
+      assert.equal(storedJob.status, "completed");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects invalid command workspaces before creating state", () => {
+    const testEnv = createTestEnvironment();
+    const missingWorkspace = path.join(testEnv.rootDir, "missing-workspace");
+    const workspaceFile = path.join(testEnv.rootDir, "workspace-file");
+    fs.writeFileSync(workspaceFile, "not a directory\n", "utf8");
+
+    try {
+      const missingResult = runCompanionExpectFailure(
+        ["status", "--cwd", missingWorkspace, "--json"],
+        { env: testEnv.env }
+      );
+      const fileResult = runCompanionExpectFailure(
+        ["status", "--cwd", workspaceFile, "--json"],
+        { env: testEnv.env }
+      );
+
+      assert.match(missingResult.stderr, /workspace must be an existing directory/i);
+      assert.match(fileResult.stderr, /workspace must be an existing directory/i);
+      assert.equal(fs.existsSync(missingWorkspace), false);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

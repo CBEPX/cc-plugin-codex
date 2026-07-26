@@ -7,7 +7,7 @@ description: 'Check whether Claude Code CLI is ready in this environment and opt
 
 Use this skill when the user wants to verify Claude Code readiness or toggle the review gate.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root.
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. The companion uses that shell's current directory as the workspace.
 
 Supported arguments:
 - `--enable-review-gate`

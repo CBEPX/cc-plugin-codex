@@ -16,8 +16,7 @@ Prefer `$cc:rescue` when the user wants Claude Code to diagnose the issue, valid
 Do not use rescue for "just review this diff" unless the user also wants follow-through work beyond review findings.
 Do not use rescue merely because the main Codex thread plans to fix things after combining its own review with a separate Claude review. Rescue is only the right delegation when Claude itself is supposed to investigate, edit, test, or otherwise own the follow-through work.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
-`node "<plugin-root>/scripts/claude-companion.mjs" task ...`
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Parent helpers use that shell's current directory directly; the forwarding child uses the canonical `workspaceRoot` returned by `background-routing-context`.
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -69,6 +68,7 @@ Subagent launch:
 - If the free-text task begins with `/`, preserve it verbatim in the spawned subagent request. Do not strip the slash or rewrite it into a local Codex command.
 - Before spawning the built-in child, capture the task job id plus routing context in one call:
   `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind task --json`
+- Treat the helper's non-empty `workspaceRoot` as the canonical workspace for the forwarding child. Pass it back as `--cwd "<workspaceRoot>"`; never substitute `<plugin-root>` or the child's default working directory.
 - If that helper returns a non-empty `ownerSessionId`, include `--owner-session-id <owner-session-id>` in the companion command so tracked Claude Code jobs stay attached to the user-facing parent session for `$cc:status` / `$cc:result`.
 - If it returns an empty `ownerSessionId`, omit `--owner-session-id` entirely. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
@@ -139,6 +139,7 @@ Subagent launch:
   - for background rescue, use that same steering message as the child's own final assistant message instead of echoing the raw companion result
   - tell the child not to inspect the repository, read files, grep, or do the task directly
   - tell the child not to reinterpret routing flags that were already resolved by the parent
+  - tell the child to preserve the helper's exact non-empty `workspaceRoot` as `--cwd "<workspaceRoot>"` in the companion command
   - tell the child to copy the resolved rescue task text byte-for-byte into that exact command after parent-side routing flags are removed
   - explicitly forbid appending terminal punctuation, adding quotes, dropping prefixes such as `completed:`, or stripping leading slash commands such as `/simplify`
   - include one short exact-output example such as `completed:/simplify make the output compact`

@@ -2,10 +2,10 @@
 
 Use this document only inside the rescue forwarding worker spawned by `$cc:rescue` as defined in `../../skills/rescue/SKILL.md`.
 This is an internal execution contract, not a public skill. It owns execution and routing. It does not own prompt rewriting beyond deciding when to consult the prompt-shaping reference.
-The public rescue skill already resolved the active plugin root from its `SKILL.md` path. Reuse that path here. Do not derive a new runtime path from this document or the current working tree.
+The public rescue skill already resolved the active plugin root from its `SKILL.md` path and ran `background-routing-context` from the parent user workspace. Reuse the helper's canonical `workspaceRoot`. Never derive the workspace from the plugin root or the directory used to read this document.
 
 Primary helper:
-- `node "<plugin-root>/scripts/claude-companion.mjs" task ...`
+- `node "<plugin-root>/scripts/claude-companion.mjs" task --cwd "<workspaceRoot>" ...`
 
 Execution rules:
 - The rescue subagent is a forwarder, not an operator. Launch exactly one `task` command and return that stdout unchanged.
@@ -23,7 +23,8 @@ Command selection:
 - The caller's background or foreground choice changes only subagent execution. It does not change the companion command you build.
 
 Routing controls:
-- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Treat `--cwd`, `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Preserve the parent helper's exact non-empty `workspaceRoot` as `--cwd "<workspaceRoot>"`; never substitute the plugin root or the child's default working directory.
 - Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku and fable.
 - `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.

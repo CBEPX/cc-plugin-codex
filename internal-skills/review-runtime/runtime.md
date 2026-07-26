@@ -2,7 +2,7 @@
 
 Use this document only when the main Codex thread or a built-in forwarding child is executing a Claude Code `review` or `adversarial-review` command.
 This is an internal runtime reference, not a public skill. It captures the exact companion-command contract and the foreground/background execution boundary.
-The public skill already resolved the active plugin root from its `SKILL.md` path. Reuse that path here. Do not derive a new runtime path from this document or the current working tree.
+The public skill already resolved the active plugin root from its `SKILL.md` path and keeps foreground shell calls in the user workspace. Reuse both. Never derive the workspace from the plugin root or the directory used to read this document.
 
 Primary helper:
 - `node "<plugin-root>/scripts/claude-companion.mjs" review ...`
@@ -16,20 +16,22 @@ Execution boundary:
 
 Foreground contract:
 - Strip `--wait` and `--background` before building the companion command.
+- Keep the shell tool in the active user workspace; do not set its working directory to the plugin path.
 - Foreground command:
   - `review --view-state on-success ...`
   - `adversarial-review --view-state on-success ...`
 - Return companion stdout faithfully and do not add review execution commentary around it.
 
 Background contract:
-- Use `background-routing-context --kind review --json` before spawning the forwarding child.
+- Use `background-routing-context --kind review --json` from the parent user workspace before spawning the forwarding child.
+- Pass the helper's exact non-empty `workspaceRoot` back to the child as `--cwd "<workspaceRoot>"`; this keeps the reservation and job in the same workspace state.
 - Preserve `--job-id` only when reserved by the parent helper.
 - Preserve `--owner-session-id` only when the parent helper returned a non-empty owner session id.
 - Preserve the parent notification path only when the helper returned a non-empty parent thread id.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.
 - The built-in child runs exactly one shell command:
-  - `review --view-state defer ...`
-  - `adversarial-review --view-state defer ...`
+  - `review --cwd "<workspaceRoot>" --view-state defer ...`
+  - `adversarial-review --cwd "<workspaceRoot>" --view-state defer ...`
 - The child must be a pure forwarder:
   - return stdout only
   - ignore stderr progress chatter such as `[cc] ...`

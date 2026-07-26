@@ -7,7 +7,7 @@ description: 'Diagnose which Claude MCP servers and exact tools would be availab
 
 Use this skill when the user wants to understand why a Claude MCP tool is or is not available through the plugin.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Always run:
 `node "<plugin-root>/scripts/claude-companion.mjs" mcp-diagnose $ARGUMENTS`
 
 Supported arguments: `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`

@@ -121,6 +121,7 @@ import {
 } from "./lib/render.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const CANONICAL_ROOT_DIR = fs.realpathSync.native(ROOT_DIR);
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_FOREGROUND_TASK_WAIT_TIMEOUT_MS = 1800000;
@@ -294,7 +295,32 @@ function parseCommandInput(argv, config = {}) {
 }
 
 function resolveCommandCwd(options = {}) {
-  return options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
+  const resolvedCwd = options.cwd
+    ? path.resolve(process.cwd(), options.cwd)
+    : process.cwd();
+  let directory;
+  try {
+    directory = fs.statSync(resolvedCwd);
+  } catch {
+    throw new Error(`Claude Code workspace must be an existing directory: ${resolvedCwd}`);
+  }
+  if (!directory.isDirectory()) {
+    throw new Error(`Claude Code workspace must be an existing directory: ${resolvedCwd}`);
+  }
+
+  const canonicalCwd = fs.realpathSync.native(resolvedCwd);
+  const pluginInfo = currentPluginCacheInstallInfo();
+  if (pluginInfo) {
+    const relativePath = path.relative(pluginInfo.canonicalCacheRoot, canonicalCwd);
+    const isPluginCacheWorkspace =
+      !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+    if (isPluginCacheWorkspace) {
+      throw new Error(
+        `Refusing to use the installed plugin cache as the Claude Code workspace: ${canonicalCwd}. Run the command from the user workspace and pass that directory with --cwd.`
+      );
+    }
+  }
+  return resolvedCwd;
 }
 
 function resolveCommandWorkspace(options = {}) {
@@ -444,7 +470,14 @@ function configureNativePluginHooks() {
 
 function currentPluginCacheInstallInfo() {
   const cacheRoot = path.join(CODEX_DIR, "plugins", "cache");
-  const relativePath = path.relative(cacheRoot, ROOT_DIR);
+  let canonicalCacheRoot = path.resolve(cacheRoot);
+  try {
+    canonicalCacheRoot = fs.realpathSync.native(cacheRoot);
+  } catch {}
+  const relativePath = path.relative(
+    canonicalCacheRoot,
+    CANONICAL_ROOT_DIR
+  );
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     return null;
   }
@@ -459,6 +492,7 @@ function currentPluginCacheInstallInfo() {
     pluginName,
     version,
     pluginId: `${pluginName}@${marketplaceName}`,
+    canonicalCacheRoot,
   };
 }
 
@@ -473,8 +507,12 @@ function pathIsInsideRoot(filePath) {
   if (typeof filePath !== "string" || !filePath) {
     return false;
   }
-  const relativePath = path.relative(ROOT_DIR, path.resolve(filePath));
-  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+  let canonicalPath = path.resolve(filePath);
+  try {
+    canonicalPath = fs.realpathSync.native(canonicalPath);
+  } catch {}
+  const relativePath = path.relative(CANONICAL_ROOT_DIR, canonicalPath);
+  return !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
 function isCurrentPluginHook(hook, pluginInfo) {
