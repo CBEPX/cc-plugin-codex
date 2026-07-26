@@ -480,33 +480,12 @@ function getToolNames(body) {
         .filter(Boolean);
 }
 
-function getToolParameterDescription(body, toolName, parameterName) {
-  return flattenTools(body.tools)
-        .find((tool) => (tool.name || tool.function?.name || tool.type) === toolName)
-        ?.parameters?.properties?.[parameterName]?.description ?? null;
-}
-
-function extractRoleBlock(description, roleName) {
-  if (!description) {
-    return null;
-  }
-
-  const roleHeader = `${roleName}: {`;
-  const lines = description.split("\n");
-  const startIndex = lines.findIndex((line) => line === roleHeader);
-  if (startIndex < 0) {
-    return null;
-  }
-
-  const block = [];
-  for (let index = startIndex; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (index > startIndex && line.endsWith(": {")) {
-      break;
-    }
-    block.push(line);
-  }
-  return block.join("\n");
+function getToolParameters(body, name) {
+  const tool = flattenTools(body.tools).find(
+    (candidate) =>
+      (candidate.name || candidate.function?.name || candidate.type) === name
+  );
+  return tool?.parameters ?? tool?.function?.parameters ?? null;
 }
 
 function chooseShellTool(body) {
@@ -827,8 +806,8 @@ function startMockProvider({
             object: "list",
             data: [
               { id: "mock-model", object: "model" },
-              { id: "gpt-5.4", object: "model" },
-              { id: "gpt-5.4-mini", object: "model" },
+              { id: "gpt-5.6-sol", object: "model" },
+              { id: "gpt-5.6-terra", object: "model" },
             ],
           })
         );
@@ -869,30 +848,37 @@ function startMockProvider({
             getToolNames(body).includes("spawn_agent"),
             "spawn_agent should be available in the parent turn"
           );
-          const agentTypeDescription = getToolParameterDescription(body, "spawn_agent", "agent_type");
+          const spawnAgentParameters = getToolParameters(body, "spawn_agent");
+          assert.ok(
+            spawnAgentParameters,
+            "spawn_agent should expose its live parameter schema"
+          );
+          const requiredSpawnFields = Array.isArray(spawnAgentParameters.required)
+            ? spawnAgentParameters.required
+            : [];
+          const agentTypeRequired = requiredSpawnFields.includes("agent_type");
+          assert.ok(
+            !requiredSpawnFields.includes("model"),
+            "spawn_agent.model must not be required"
+          );
           if (mode === "builtin-alias") {
             assert.ok(
               bodyText.includes("--builtin-agent"),
               "legacy built-in rescue alias should preserve the routing flag in the parent turn"
             );
           }
-          const defaultRoleBlock = extractRoleBlock(agentTypeDescription, "default");
           assert.ok(
-            typeof defaultRoleBlock === "string" && defaultRoleBlock.includes("Default agent."),
-            `parent turn should advertise the built-in default role in the spawn_agent schema, saw: ${defaultRoleBlock}`
+            bodyText.includes("inherits the current Codex runtime model"),
+            "parent turn should tell the forwarding child to inherit the current runtime model"
           );
           assert.ok(
-            bodyText.includes("retry once with") && bodyText.includes("gpt-5.4"),
-            "parent turn should include the narrow gpt-5.4 fallback guidance for mini-unavailable errors"
+            bodyText.includes("Do not retry with an explicit model override"),
+            "parent turn should forbid fixed-version model fallback"
           );
-          assert.ok(
-            bodyText.includes("Do not use that fallback for arbitrary failures"),
-            "parent turn should forbid broad fallback on generic spawn failures"
-          );
+          assert.ok(!bodyText.includes("gpt-5.4"), "parent turn should not pin a stale Codex model");
 
           const spawnArgs = {
-            agent_type: "default",
-            model: "gpt-5.4-mini",
+            fork_context: false,
             reasoning_effort: "medium",
             message:
               spawnMessage ??
@@ -913,6 +899,9 @@ function startMockProvider({
               "Example exact output: completed:/simplify make the output compact\n\n" +
               taskCommand,
           };
+          if (agentTypeRequired) {
+            spawnArgs.agent_type = "default";
+          }
           events = [
             eventCreated("resp-parent-1"),
             eventFunctionCall(spawnCallId, "spawn_agent", spawnArgs),
@@ -1693,7 +1682,7 @@ describe("Codex direct-skill E2E", () => {
       const claudeInvocations = readClaudeInvocations(testEnv.claudeLogFile);
       assert.ok(
         claudeInvocations.some(
-          (entry) => entry.args.includes("--model") && entry.args.includes("claude-haiku-4-5")
+          (entry) => entry.args.includes("--model") && entry.args.includes("haiku")
         ),
         "installed plugin review should forward the requested model alias to Claude without running setup first"
       );
@@ -1744,7 +1733,7 @@ describe("Codex direct-skill E2E", () => {
       assert.match(finalMessage, /Claude Code Review/);
       const claudeInvocations = readClaudeInvocations(testEnv.claudeLogFile);
       assert.ok(
-        claudeInvocations.some((entry) => entry.args.includes("--model") && entry.args.includes("claude-haiku-4-5")),
+        claudeInvocations.some((entry) => entry.args.includes("--model") && entry.args.includes("haiku")),
         "review e2e should forward the requested model alias to Claude"
       );
     } finally {

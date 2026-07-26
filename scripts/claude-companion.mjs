@@ -10,7 +10,7 @@
  *
  * Adapted from codex-companion.mjs:
  * - Uses claude-cli.mjs instead of app-server/broker
- * - MODEL_ALIASES: opus -> claude-opus-4-8, sonnet -> claude-sonnet-5, haiku -> claude-haiku-4-5, fable -> claude-fable-5[1m]
+ * - MODEL_ALIASES: Claude aliases are passed through for Claude Code to resolve
  * - Default model when --model is unset: opus
  * - Default effort by model: opus -> xhigh, sonnet -> high, haiku/fable -> unset
  * - Claude CLI effort values: low, medium, high, xhigh, max
@@ -1076,6 +1076,7 @@ async function executeReviewRun(request) {
         stdout: result.result,
         requestedModel: result.requestedModel ?? null,
         finalModel: result.finalModel ?? null,
+        contextWindow: result.contextWindow ?? null,
         modelFallbacks
       }
     };
@@ -1183,6 +1184,7 @@ async function executeReviewRun(request) {
       stdout: typeof result.result === "string" ? result.result : JSON.stringify(result.result),
       requestedModel: result.requestedModel ?? null,
       finalModel: result.finalModel ?? null,
+      contextWindow: result.contextWindow ?? null,
       modelFallbacks
     },
     result: parsed.parsed,
@@ -1309,6 +1311,7 @@ async function executeTaskRun(request) {
     sessionId: result.sessionId,
     requestedModel: result.requestedModel ?? null,
     finalModel: result.finalModel ?? null,
+    contextWindow: result.contextWindow ?? null,
     modelFallbacks,
     failure: result.failure ?? null,
     rawOutput,
@@ -1798,7 +1801,7 @@ function enqueueDetachedTask(cwd, job, request, options = {}) {
 
 function buildStoredTaskPayload(job) {
   if (job?.result && typeof job.result === "object") {
-    return job.result;
+    return { contextWindow: null, ...job.result };
   }
   return {
     status: job?.status === "completed" ? "completed" : "failed",
@@ -1808,6 +1811,7 @@ function buildStoredTaskPayload(job) {
     resultMissing: true,
     requestedModel: null,
     finalModel: null,
+    contextWindow: null,
     modelFallbacks: [],
     rawOutput: "",
     touchedFiles: [],

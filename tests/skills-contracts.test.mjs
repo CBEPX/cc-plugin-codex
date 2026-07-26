@@ -25,12 +25,14 @@ function escapeRegex(value) {
 test("README model alias docs match runtime aliases", () => {
   const readme = read("README.md");
 
-  for (const [alias, model] of MODEL_ALIASES) {
-    assert.match(
-      readme,
-      new RegExp(`\\\`${escapeRegex(alias)}\\\`[\\s\\S]*?\\\`${escapeRegex(model)}\\\``)
-    );
+  for (const alias of MODEL_ALIASES.keys()) {
+    assert.match(readme, new RegExp(`\\\`${escapeRegex(alias)}\\\``));
   }
+  assert.match(readme, /Claude Code resolves aliases to the current model/i);
+  assert.match(readme, /full model ID to pin a version/i);
+  assert.match(readme, /requestedModel.*forwarded alias or full ID/i);
+  assert.match(readme, /terminal `contextWindow` reported in `modelUsage`/i);
+  assert.match(readme, /does not infer a context limit from a floating alias/i);
 });
 
 test("internal runtime references keep the active-root and notification invariants", () => {
@@ -49,6 +51,11 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(reviewRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
   assert.match(reviewRuntime, /do not silently drop the completion notification path when the parent provided a non-empty parent thread id/i);
   assert.match(reviewRuntime, /Use that same steering message as the child's own final assistant message for background mode/i);
+  assert.match(reviewRuntime, /Use the implicit default role and omit `agent_type` when it is optional or absent/i);
+  assert.match(reviewRuntime, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
+  assert.match(reviewRuntime, /Omit `model` so the child inherits the current Codex runtime model/i);
+  assert.match(reviewRuntime, /Do not add a fixed-version model fallback/i);
+  assert.doesNotMatch(reviewRuntime, /gpt-5\.\d+/i);
 
   assert.match(rescueRuntime, /resolved the active plugin root/i);
   assert.match(rescueRuntime, activeRootPattern);
@@ -99,11 +106,14 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /omit `--owner-session-id` entirely/i);
   assert.match(review, /spawn_agent/i);
   assert.match(review, /`fork_context: false`/i);
-  assert.match(review, /`model: "gpt-5\.4-mini"`/i);
   assert.match(review, /`reasoning_effort: "medium"`/i);
+  assert.match(review, /Use the built-in default role implicitly and omit `agent_type` when it is optional or absent/i);
+  assert.match(review, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
+  assert.match(review, /Omit `model` so the forwarding child inherits the current Codex runtime model/i);
   assert.match(review, /Prefer a self-contained child message over inheriting parent history/i);
   assert.match(review, /Only consider `fork_context: true` as a last resort/i);
-  assert.match(review, /retry once with `model: "gpt-5\.4"`/i);
+  assert.match(review, /Do not retry with an explicit model override if spawning fails/i);
+  assert.doesNotMatch(review, /gpt-5\.\d+/i);
   assert.match(review, /review --view-state defer/i);
   assert.match(review, /include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id/i);
   assert.match(review, /never leave an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
@@ -153,11 +163,14 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /omit `--owner-session-id` entirely/i);
   assert.match(adversarial, /spawn_agent/i);
   assert.match(adversarial, /`fork_context: false`/i);
-  assert.match(adversarial, /`model: "gpt-5\.4-mini"`/i);
   assert.match(adversarial, /`reasoning_effort: "medium"`/i);
+  assert.match(adversarial, /Use the built-in default role implicitly and omit `agent_type` when it is optional or absent/i);
+  assert.match(adversarial, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
+  assert.match(adversarial, /Omit `model` so the forwarding child inherits the current Codex runtime model/i);
   assert.match(adversarial, /Prefer a self-contained child message over inheriting parent history/i);
   assert.match(adversarial, /Only consider `fork_context: true` as a last resort/i);
-  assert.match(adversarial, /retry once with `model: "gpt-5\.4"`/i);
+  assert.match(adversarial, /Do not retry with an explicit model override if spawning fails/i);
+  assert.doesNotMatch(adversarial, /gpt-5\.\d+/i);
   assert.match(adversarial, /adversarial-review --view-state defer/i);
   assert.match(adversarial, /include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id/i);
   assert.match(adversarial, /never leave an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
@@ -232,12 +245,12 @@ test("rescue skill documents the experimental built-in-agent forwarding path", (
   assert.match(rescue, /compatibility alias for the default built-in path/i);
   assert.match(rescue, /Prefer `fork_context: false` for the built-in rescue child/i);
   assert.match(rescue, /Only consider `fork_context: true` as a last resort/i);
-  assert.match(rescue, /must set `model: "gpt-5\.4-mini"` and `reasoning_effort: "medium"` on `spawn_agent`/i);
-  assert.match(rescue, /emit one short commentary update that records the attempted subagent model selection/i);
-  assert.match(rescue, /Prefer `gpt-5\.4-mini`/i);
-  assert.match(rescue, /retry once with `model: "gpt-5\.4"` and the same `reasoning_effort: "medium"`/i);
-  assert.match(rescue, /clearly says `gpt-5\.4-mini` was unavailable and the parent is retrying with `gpt-5\.4`/i);
-  assert.match(rescue, /Do not use that fallback for arbitrary failures/i);
+  assert.match(rescue, /implicit default role and omit `agent_type` when it is optional or absent/i);
+  assert.match(rescue, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
+  assert.match(rescue, /must omit `model` and set `reasoning_effort: "medium"` on `spawn_agent`/i);
+  assert.match(rescue, /inherits the current Codex runtime model/i);
+  assert.match(rescue, /Do not retry with an explicit model override if spawning fails/i);
+  assert.doesNotMatch(rescue, /gpt-5\.\d+/i);
   assert.match(rescue, /non-empty `parentThreadId`/i);
   assert.match(rescue, /pass it into the child prompt as the parent thread id/i);
   assert.match(rescue, /allow one extra `send_input` call after a successful shell result/i);

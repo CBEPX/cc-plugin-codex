@@ -133,7 +133,11 @@ $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 
 **Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
-**Defaults:** model `opus` resolves to `claude-opus-4-8` with `xhigh` effort. If you pick `sonnet`, it resolves to `claude-sonnet-5` and the default effort drops to `high`. `haiku` resolves to `claude-haiku-4-5`, `fable` resolves to `claude-fable-5[1m]`, and both have no default effort setting. Pass `--model` and `--effort` to override.
+**Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version; for older pinned IDs, pass `--effort` explicitly instead of inheriting a current-family default.
+
+Fable 5 has a native 1M context window, so current Claude Code only needs the bare `fable` alias; no `[1m]` suffix is required. See Claude Code's [model configuration](https://code.claude.com/docs/en/model-config).
+
+JSON task and review results keep `requestedModel` as the forwarded alias or full ID, report `finalModel` from Claude's terminal result, and expose the terminal `contextWindow` reported in `modelUsage` (`null` when Claude does not provide it). The plugin does not infer a context limit from a floating alias.
 
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
@@ -191,7 +195,7 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--resume-last` | Alias for `--resume` |
 | `--fresh` | Force a new task (don't resume) |
 | `--write` | Allow file edits (default) |
-| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`. The aliases resolve to `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5`, and `claude-fable-5[1m]`.) |
+| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`). Aliases are resolved by Claude Code; a full ID pins a version. |
 | `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable) |
 | `--prompt-file <path>` | Read task description from a file |
 | `--timeout-ms <ms>` | Foreground observer timeout before returning a retrievable job |
@@ -199,6 +203,8 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 **Resume behavior:** If you don't pass `--resume` or `--fresh`, rescue checks for a resumable Claude session and asks once whether to continue or start fresh. Your phrasing guides the recommendation — "continue the last run" → resume, "start over" → fresh.
 
 Background rescue runs through a built-in Codex subagent. When the child finishes, the plugin tries to nudge the parent thread with the exact `$cc:result <job-id>` to open.
+
+The forwarding subagent inherits the current Codex runtime model at `medium` effort. This avoids stale model pins, but it can cost more than the former mini-model forwarder.
 
 ### `$cc:transfer`
 

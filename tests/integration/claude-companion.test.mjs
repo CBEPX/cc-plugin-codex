@@ -160,6 +160,18 @@ async function main() {
     process.stdout.write("{not-json\\n");
   }
 
+  const requestedModel = getValue("--model");
+  const nativeModels = {
+    opus: "claude-opus-5",
+    sonnet: "claude-sonnet-5",
+    haiku: "claude-haiku-4-5",
+    fable: "claude-fable-5",
+  };
+  const resultModel =
+    terminalModel ||
+    (terminalModelFallback || emitModelFallback
+      ? "claude-sonnet-5"
+      : nativeModels[requestedModel] || requestedModel || "claude-opus-5");
   process.stdout.write(
     JSON.stringify({
       type: "result",
@@ -171,6 +183,13 @@ async function main() {
       ...(structuredResult
         ? { structured_output: structuredResult }
         : {}),
+      modelUsage: {
+        [resultModel]: {
+          inputTokens: 1,
+          outputTokens: 1,
+          contextWindow: 1000000,
+        },
+      },
     }) + "\\n"
   );
   if (failAfterResult) {
@@ -730,6 +749,7 @@ function assertCompletedTaskPayload(payload, prompt) {
   assert.equal(payload.job.status, "completed");
   assert.ok(payload.storedJob);
   assert.ok(payload.storedJob.result);
+  assert.equal(payload.storedJob.result.contextWindow, 1000000);
   assert.match(
     payload.storedJob.result.rawOutput,
     new RegExp(`completed:${escapeRegExp(prompt)}`)
@@ -743,6 +763,7 @@ function assertCompletedReviewPayload(payload) {
   assert.equal(payload.storedJob.result.review, "Review");
   assert.equal(payload.storedJob.result.target.mode, "working-tree");
   assert.equal(payload.storedJob.result.codex.status, "completed");
+  assert.equal(payload.storedJob.result.codex.contextWindow, 1000000);
   assert.match(payload.storedJob.rendered, /# Claude Code Review/);
 }
 
@@ -1288,7 +1309,7 @@ describe("claude-companion integration", () => {
       const args = JSON.parse(fs.readFileSync(argsFile, "utf8"));
       assert.equal(args[0], "-p");
       assert.ok(args.includes("--model"));
-      assert.equal(args[args.indexOf("--model") + 1], "claude-haiku-4-5");
+      assert.equal(args[args.indexOf("--model") + 1], "haiku");
       assert.ok(args.includes("--effort"));
       assert.equal(args[args.indexOf("--effort") + 1], "high");
       assert.ok(args.includes("--permission-mode"));
@@ -1317,8 +1338,9 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.status, "completed");
-      assert.equal(payload.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.requestedModel, "opus");
       assert.equal(payload.finalModel, "claude-sonnet-5");
+      assert.equal(payload.contextWindow, 1000000);
       assert.equal(payload.modelFallbacks.length, 1);
       assert.equal(payload.modelFallbacks[0].fromModel, "claude-opus-4-8");
       assert.equal(payload.modelFallbacks[0].toModel, "claude-sonnet-5");
@@ -1345,10 +1367,10 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.status, "completed");
-      assert.equal(payload.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.requestedModel, "opus");
       assert.equal(payload.finalModel, "claude-sonnet-5");
       assert.equal(payload.modelFallbacks.length, 1);
-      assert.equal(payload.modelFallbacks[0].fromModel, "claude-opus-4-8");
+      assert.equal(payload.modelFallbacks[0].fromModel, "opus");
       assert.equal(payload.modelFallbacks[0].toModel, "claude-sonnet-5");
       assert.equal(payload.modelFallbacks[0].source, "terminal_result");
     } finally {
@@ -1380,8 +1402,9 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.status, "completed");
-      assert.equal(payload.requestedModel, "claude-fable-5[1m]");
+      assert.equal(payload.requestedModel, "fable");
       assert.equal(payload.finalModel, "claude-fable-5");
+      assert.equal(payload.contextWindow, 1000000);
       assert.deepEqual(payload.modelFallbacks, []);
     } finally {
       cleanupTestEnvironment(testEnv);
@@ -1652,7 +1675,7 @@ describe("claude-companion integration", () => {
       );
       assert.equal(
         reviewInvocation.args[reviewInvocation.args.indexOf("--model") + 1],
-        "claude-haiku-4-5"
+        "haiku"
       );
       assert.ok(reviewInvocation.args.includes("--strict-mcp-config"));
       assert.ok(reviewInvocation.args.includes("--mcp-config"));
@@ -1687,7 +1710,7 @@ describe("claude-companion integration", () => {
       );
       assert.equal(
         fableInvocation.args[fableInvocation.args.indexOf("--model") + 1],
-        "claude-fable-5[1m]"
+        "fable"
       );
 
       const branchInvocationFile = path.join(testEnv.rootDir, "branch-review-invocation.json");
@@ -1741,8 +1764,9 @@ describe("claude-companion integration", () => {
       );
 
       assert.equal(payload.codex.status, "completed");
-      assert.equal(payload.codex.requestedModel, "claude-opus-4-8");
+      assert.equal(payload.codex.requestedModel, "opus");
       assert.equal(payload.codex.finalModel, "claude-sonnet-5");
+      assert.equal(payload.codex.contextWindow, 1000000);
       assert.equal(payload.codex.modelFallbacks.length, 1);
       assert.equal(payload.codex.modelFallbacks[0].fromModel, "claude-opus-4-8");
       assert.equal(payload.codex.modelFallbacks[0].toModel, "claude-sonnet-5");
@@ -2233,7 +2257,7 @@ describe("claude-companion integration", () => {
       const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
       assert.equal(
         invocation.args[invocation.args.indexOf("--model") + 1],
-        "claude-haiku-4-5"
+        "haiku"
       );
       assert.match(invocation.prompt, /focus on command injection/i);
       assert.match(result.stdout, /Adversarial Review/);
@@ -2318,6 +2342,74 @@ describe("claude-companion integration", () => {
       assert.equal(statusPayload.latestFinished.id, "status-fallback-a");
       const recentIds = statusPayload.recent.map((job) => job.id);
       assert.ok(!recentIds.includes("status-fallback-b"));
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("normalizes legacy task and review telemetry in status and result JSON", () => {
+    const testEnv = createTestEnvironment();
+    const jobId = "legacy-context-window";
+    const legacyJob = {
+      id: jobId,
+      status: "completed",
+      jobClass: "task",
+      kind: "task",
+      sessionId: "legacy-session",
+      createdAt: "2026-04-03T10:00:00Z",
+      completedAt: "2026-04-03T10:00:01Z",
+      result: {
+        status: "completed",
+        rawOutput: "legacy result",
+      },
+    };
+    const legacyReviewJob = {
+      id: `${jobId}-review`,
+      status: "completed",
+      jobClass: "review",
+      kind: "review",
+      sessionId: "legacy-session",
+      createdAt: "2026-04-03T10:00:00Z",
+      completedAt: "2026-04-03T10:00:01Z",
+      result: {
+        review: "Review",
+        codex: {
+          status: "completed",
+          rawOutput: "legacy review",
+        },
+      },
+    };
+
+    try {
+      writeSessionScopedJob(testEnv, jobId, legacyJob);
+      const statusPayload = runCompanionJson(
+        ["status", "--cwd", testEnv.workspaceDir, "--json", jobId],
+        { env: testEnv.env }
+      );
+      assert.equal(statusPayload.job.result.contextWindow, null);
+
+      writeSessionScopedJob(testEnv, jobId, legacyJob);
+      const resultPayload = runCompanionJson(
+        ["result", "--cwd", testEnv.workspaceDir, "--json", jobId],
+        { env: testEnv.env }
+      );
+      assert.equal(resultPayload.job.result.contextWindow, null);
+      assert.equal(resultPayload.storedJob.result.contextWindow, null);
+
+      writeSessionScopedJob(testEnv, legacyReviewJob.id, legacyReviewJob);
+      const reviewStatusPayload = runCompanionJson(
+        ["status", "--cwd", testEnv.workspaceDir, "--json", legacyReviewJob.id],
+        { env: testEnv.env }
+      );
+      assert.equal(reviewStatusPayload.job.result.codex.contextWindow, null);
+
+      writeSessionScopedJob(testEnv, legacyReviewJob.id, legacyReviewJob);
+      const reviewResultPayload = runCompanionJson(
+        ["result", "--cwd", testEnv.workspaceDir, "--json", legacyReviewJob.id],
+        { env: testEnv.env }
+      );
+      assert.equal(reviewResultPayload.job.result.codex.contextWindow, null);
+      assert.equal(reviewResultPayload.storedJob.result.codex.contextWindow, null);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -3008,6 +3100,7 @@ describe("claude-companion integration", () => {
 
       const payload = JSON.parse(stdout);
       assert.equal(payload.status, "failed");
+      assert.equal(payload.contextWindow, null);
 
       const storedJob = readStoredJobById(testEnv, reserved.jobId);
       assert.equal(storedJob.status, "cancelled");

@@ -171,6 +171,30 @@ function normalizeObservedModel(model) {
   return normalized;
 }
 
+function extractContextWindow(value, observedModel) {
+  for (const modelUsage of collectModelUsageSources(value)) {
+    const entries = Object.entries(modelUsage).filter(
+      ([model, usage]) =>
+        !isSyntheticModelId(model) &&
+        usage &&
+        !Array.isArray(usage)
+    );
+    const equivalentEntries = entries.filter(([model]) =>
+      areModelIdsEquivalent(model, observedModel)
+    );
+    const observedCanonical = canonicalModelForComparison(observedModel);
+    const exactEntries = equivalentEntries.filter(
+      ([model]) => canonicalModelForComparison(model) === observedCanonical
+    );
+    const candidates = exactEntries.length > 0 ? exactEntries : equivalentEntries;
+    const usage = candidates.length === 1 ? candidates[0][1] : null;
+    if (Number.isSafeInteger(usage?.contextWindow) && usage.contextWindow > 0) {
+      return usage.contextWindow;
+    }
+  }
+  return null;
+}
+
 function extractRawObservedModel(value) {
   return (
     firstStringFieldFromSources(collectEventModelSources(value), MODEL_FIELD_NAMES) ??
@@ -376,8 +400,7 @@ function canonicalModelForComparison(model) {
   }
   const withoutContextSuffix = normalized.replace(/\[[^\]]+\]$/u, "");
   const withoutDateSuffix = withoutContextSuffix.replace(/-\d{8}$/u, "");
-  const resolved = MODEL_ALIASES.get(withoutDateSuffix) ?? withoutDateSuffix;
-  return resolved.replace(/\[[^\]]+\]$/u, "");
+  return withoutDateSuffix;
 }
 
 export function areModelIdsEquivalent(left, right) {
@@ -456,6 +479,7 @@ export class StreamParser {
       touchedFiles: [],
       modelEvents: [],
       finalModel: null,
+      contextWindow: null,
       hasTerminalLimitSignal: false,
     };
   }
@@ -524,11 +548,20 @@ export class StreamParser {
         case "result":
           this.state.receivedTerminalEvent = true;
           {
-            const terminalModel = extractRawObservedModel(event);
-            if (hasSyntheticModelSignal(event)) {
+            const terminalModel = normalizeObservedModel(
+              extractRawObservedModel(event)
+            );
+            const hasSyntheticTerminalModel = hasSyntheticModelSignal(event);
+            if (hasSyntheticTerminalModel) {
               this.state.hasTerminalLimitSignal = true;
             }
-            this.state.finalModel = normalizeObservedModel(terminalModel) ?? this.state.finalModel;
+            this.state.finalModel = terminalModel ?? this.state.finalModel;
+            const attributionModel =
+              terminalModel ??
+              (hasSyntheticTerminalModel ? null : this.state.finalModel);
+            this.state.contextWindow = attributionModel
+              ? extractContextWindow(event, attributionModel)
+              : null;
           }
           if (event.result) {
             this.state.finalMessage = mergeTerminalResultText(
@@ -1018,10 +1051,11 @@ export function pruneStaleReviewMcpConfigs(options = {}) {
 // ---------------------------------------------------------------------------
 
 export const MODEL_ALIASES = new Map([
-  ["opus", "claude-opus-4-8"],
-  ["sonnet", "claude-sonnet-5"],
-  ["haiku", "claude-haiku-4-5"],
-  ["fable", "claude-fable-5[1m]"],
+  // Identity values are intentional: Claude Code owns floating alias resolution.
+  ["opus", "opus"],
+  ["sonnet", "sonnet"],
+  ["haiku", "haiku"],
+  ["fable", "fable"],
 ]);
 
 export const EFFORT_ALIASES = {
@@ -1036,6 +1070,7 @@ export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT_BY_MODEL = new Map([
   ["opus", "xhigh"],
   ["claude-opus-4-8", "xhigh"],
+  ["claude-opus-5", "xhigh"],
   ["sonnet", "high"],
   ["claude-sonnet-5", "high"],
 ]);
@@ -1051,13 +1086,18 @@ export function resolveDefaultEffort(model, effort) {
   if (effort != null && String(effort).trim() !== "") {
     return effort;
   }
-  const key = String(model ?? "").trim().toLowerCase();
+  const key = String(model)
+    .trim()
+    .toLowerCase()
+    .replace(/\[[^\]]+\]$/u, "");
   return DEFAULT_EFFORT_BY_MODEL.get(key);
 }
 
 export function resolveModel(model) {
   if (!model) return undefined;
-  return MODEL_ALIASES.get(model) ?? model;
+  const normalized = String(model).trim();
+  if (!normalized) return undefined;
+  return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
 }
 
 export function resolveEffort(effort) {
@@ -1207,6 +1247,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       const validation = validateTurnCompletion(parser.state, code ?? 1);
       const modelEvents = [...parser.state.modelEvents];
       const finalModel = parser.state.finalModel;
+      const contextWindow = parser.state.contextWindow;
       const failure =
         validation.status === "failed"
           ? classifyClaudeFailure({
@@ -1244,6 +1285,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         touchedFiles: parser.state.touchedFiles,
         requestedModel,
         finalModel,
+        contextWindow,
         modelEvents,
         failure,
         stderr,
@@ -1263,6 +1305,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         touchedFiles: [],
         requestedModel,
         finalModel: null,
+        contextWindow: null,
         modelEvents: [],
         failure: classifyClaudeFailure({ stderr: err.message }),
         stderr: err.message,
@@ -1303,6 +1346,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     sessionId: result.sessionId,
     requestedModel: result.requestedModel,
     finalModel: result.finalModel,
+    contextWindow: result.contextWindow,
     modelEvents: result.modelEvents,
     failure: result.failure,
     stderr: result.stderr,

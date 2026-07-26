@@ -89,22 +89,55 @@ describe("StreamParser", () => {
     assert.equal(parser.state.hasTerminalLimitSignal, true);
   });
 
-  it("detects Claude synthetic model ids in multi-model usage payloads", () => {
+  it("marks only synthetic terminal models as limit signals", () => {
+    const syntheticParser = new StreamParser();
+    syntheticParser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "<synthetic>",
+      }) + "\n"
+    );
+    assert.equal(syntheticParser.state.hasTerminalLimitSignal, true);
+
+    const regularParser = new StreamParser();
+    regularParser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "claude-opus-5",
+      }) + "\n"
+    );
+    assert.equal(regularParser.state.hasTerminalLimitSignal, false);
+  });
+
+  it("does not guess context telemetry from synthetic limit payloads", () => {
     const parser = new StreamParser();
     const resultEvent = JSON.stringify({
       type: "result",
       result: "Claude AI usage limit reached|1751554800",
       modelUsage: {
-        "claude-opus-4-8": { input_tokens: 10 },
+        "claude-opus-4-8": {
+          input_tokens: 10,
+          contextWindow: 1000000,
+        },
         "<synthetic>": { input_tokens: 0 },
       },
       session_id: "sess-limit",
     });
 
+    parser.feed(
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-opus-4-8" },
+      }) + "\n"
+    );
     parser.feed(resultEvent + "\n");
 
-    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.finalModel, "claude-opus-4-8");
+    assert.equal(parser.state.contextWindow, null);
     assert.equal(parser.state.hasTerminalLimitSignal, true);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
   });
 
   it("does not treat unrelated assistant synthetic model ids as terminal limit signals", () => {
@@ -650,6 +683,158 @@ describe("StreamParser", () => {
     assert.equal(parser.state.finalModel, "claude-sonnet-5");
   });
 
+  it("matches context windows across equivalent model ids in multi-model usage", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      result: "done",
+      model: "claude-fable-5",
+      modelUsage: {
+        "claude-fable-5[1m]": { contextWindow: 1000000 },
+        "claude-haiku-4-5": { contextWindow: 200000 },
+      },
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-fable-5");
+    assert.equal(parser.state.contextWindow, 1000000);
+  });
+
+  it("rejects invalid context window telemetry", () => {
+    for (const contextWindow of [0, -1, 1.5, "1000000", null]) {
+      const parser = new StreamParser();
+      parser.feed(
+        JSON.stringify({
+          type: "result",
+          result: "done",
+          modelUsage: {
+            "claude-opus-5": { contextWindow },
+          },
+        }) + "\n"
+      );
+      assert.equal(parser.state.contextWindow, null);
+    }
+  });
+
+  it("does not attribute context telemetry from a different model", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-sonnet-5" },
+      }) + "\n"
+    );
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "claude-opus-5",
+        modelUsage: {
+          "claude-sonnet-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.contextWindow, null);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+  });
+
+  it("uses the observed session model when multi-model terminal usage omits it", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-opus-5" },
+      }) + "\n"
+    );
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        modelUsage: {
+          "claude-opus-5": { contextWindow: 1000000 },
+          "claude-sonnet-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, "claude-opus-5");
+    assert.equal(parser.state.contextWindow, 1000000);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+  });
+
+  it("does not guess context telemetry without an observed terminal model", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        modelUsage: {
+          "claude-opus-5": { contextWindow: 1000000 },
+          "claude-sonnet-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.contextWindow, null);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+  });
+
+  it("does not guess between multiple same-family usage entries for an alias", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "opus",
+        modelUsage: {
+          "claude-opus-4-8": { contextWindow: 200000 },
+          "claude-opus-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, "opus");
+    assert.equal(parser.state.contextWindow, null);
+  });
+
+  it("prefers a unique canonical usage entry over family alias matches", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "claude-opus-5",
+        modelUsage: {
+          opus: { contextWindow: 200000 },
+          "claude-opus-5[1m]": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, "claude-opus-5");
+    assert.equal(parser.state.contextWindow, 1000000);
+  });
+
+  it("uses a unique concrete usage entry for a terminal family alias", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "fable",
+        modelUsage: {
+          "claude-fable-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, "fable");
+    assert.equal(parser.state.contextWindow, 1000000);
+  });
+
   it("captures the observed model from message_start stream events", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({
@@ -686,6 +871,7 @@ describe("StreamParser", () => {
     parser.feed(evt + "\n");
 
     assert.equal(parser.state.finalModel, "claude-sonnet-5");
+    assert.equal(parser.state.contextWindow, 1000000);
   });
 
   it("returns null for unknown event types and tracks them", () => {
@@ -1128,6 +1314,7 @@ describe("areModelIdsEquivalent", () => {
   it("treats Claude CLI aliases as equivalent to concrete family ids", () => {
     assert.equal(areModelIdsEquivalent("fable", "claude-fable-5"), true);
     assert.equal(areModelIdsEquivalent("fable", "claude-fable-5[1m]"), true);
+    assert.equal(areModelIdsEquivalent("opus", "claude-opus-5"), true);
   });
 
   it("ignores bracketed context-window suffixes for comparison", () => {
@@ -1139,6 +1326,10 @@ describe("areModelIdsEquivalent", () => {
 
   it("does not treat different model families as equivalent", () => {
     assert.equal(areModelIdsEquivalent("claude-opus-4-8", "claude-sonnet-5"), false);
+  });
+
+  it("does not treat pinned versions in the same family as equivalent", () => {
+    assert.equal(areModelIdsEquivalent("claude-opus-4-8", "claude-opus-5"), false);
   });
 });
 
@@ -1186,12 +1377,12 @@ describe("validateTurnCompletion", () => {
 // ===========================================================================
 
 describe("resolveModel", () => {
-  it("maps 'sonnet' to 'claude-sonnet-5'", () => {
-    assert.equal(resolveModel("sonnet"), "claude-sonnet-5");
+  it("passes through the native 'sonnet' alias", () => {
+    assert.equal(resolveModel("sonnet"), "sonnet");
   });
 
-  it("maps 'haiku' to 'claude-haiku-4-5'", () => {
-    assert.equal(resolveModel("haiku"), "claude-haiku-4-5");
+  it("passes through the native 'haiku' alias", () => {
+    assert.equal(resolveModel("haiku"), "haiku");
   });
 
   it("passes through unknown model names", () => {
@@ -1205,22 +1396,17 @@ describe("resolveModel", () => {
 
   it("passes through empty string", () => {
     assert.equal(resolveModel(""), undefined);
+    assert.equal(resolveModel("   "), undefined);
   });
 
-  it("maps 'opus' to 'claude-opus-4-8'", () => {
-    assert.equal(resolveModel("opus"), "claude-opus-4-8");
-  });
-
-  it("maps 'fable' to the 1M-context Claude Fable 5 id", () => {
-    assert.equal(resolveModel("fable"), "claude-fable-5[1m]");
-  });
-
-  it("MODEL_ALIASES map has expected entries", () => {
+  it("normalizes and forwards native aliases without pinning a version", () => {
     assert.equal(MODEL_ALIASES.size, 4);
-    assert.ok(MODEL_ALIASES.has("opus"));
-    assert.ok(MODEL_ALIASES.has("sonnet"));
-    assert.ok(MODEL_ALIASES.has("haiku"));
-    assert.ok(MODEL_ALIASES.has("fable"));
+    for (const alias of ["opus", "sonnet", "haiku", "fable"]) {
+      assert.equal(MODEL_ALIASES.get(alias), alias);
+      assert.equal(resolveModel(` ${alias.toUpperCase()} `), alias);
+      const args = buildArgs("p", { model: alias });
+      assert.equal(args[args.indexOf("--model") + 1], alias);
+    }
   });
 });
 
@@ -1248,15 +1434,19 @@ describe("resolveDefaultModel", () => {
 });
 
 describe("resolveDefaultEffort", () => {
-  it("defaults to xhigh for opus alias and resolved id", () => {
+  it("defaults to xhigh for the opus alias and supported current ids", () => {
     assert.equal(resolveDefaultEffort("opus", null), "xhigh");
+    assert.equal(resolveDefaultEffort("opus[1m]", null), "xhigh");
     assert.equal(resolveDefaultEffort("claude-opus-4-8", null), "xhigh");
-    assert.equal(resolveDefaultEffort("OPUS", undefined), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-5", null), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-5[1m]", null), "xhigh");
+    assert.equal(resolveDefaultEffort(" OPUS ", undefined), "xhigh");
   });
 
-  it("defaults to high for sonnet alias and resolved id", () => {
+  it("defaults to high for the sonnet alias and supported current ids", () => {
     assert.equal(resolveDefaultEffort("sonnet", null), "high");
     assert.equal(resolveDefaultEffort("claude-sonnet-5", null), "high");
+    assert.equal(resolveDefaultEffort("claude-sonnet-5[1m]", null), "high");
   });
 
   it("returns undefined for haiku (no effort default)", () => {
@@ -1273,6 +1463,15 @@ describe("resolveDefaultEffort", () => {
     assert.equal(resolveDefaultEffort("some-future-model", null), undefined);
   });
 
+  it("does not broaden alias effort defaults to older pinned family ids", () => {
+    assert.equal(resolveDefaultEffort("claude-sonnet-4-5", null), undefined);
+    assert.equal(
+      resolveDefaultEffort("claude-opus-4-1-20250805", null),
+      undefined
+    );
+    assert.equal(resolveDefaultEffort("claude-opus[1m]-5", null), undefined);
+  });
+
   it("preserves an explicit effort regardless of model", () => {
     assert.equal(resolveDefaultEffort("opus", "low"), "low");
     assert.equal(resolveDefaultEffort("sonnet", "medium"), "medium");
@@ -1286,8 +1485,10 @@ describe("resolveDefaultEffort", () => {
   });
 
   it("DEFAULT_EFFORT_BY_MODEL contains the expected entries", () => {
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.size, 5);
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("opus"), "xhigh");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-4-8"), "xhigh");
+    assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-opus-5"), "xhigh");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("sonnet"), "high");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.get("claude-sonnet-5"), "high");
     assert.equal(DEFAULT_EFFORT_BY_MODEL.has("haiku"), false);
@@ -1404,11 +1605,11 @@ describe("buildArgs", () => {
     assert.ok(!args.includes("--no-session-persistence"));
   });
 
-  it("includes --model with resolved model alias", () => {
+  it("includes --model with the native model alias", () => {
     const args = buildArgs("p", { model: "sonnet" });
     const idx = args.indexOf("--model");
     assert.ok(idx >= 0);
-    assert.equal(args[idx + 1], "claude-sonnet-5");
+    assert.equal(args[idx + 1], "sonnet");
   });
 
   it("includes --effort with resolved effort", () => {
@@ -1457,7 +1658,10 @@ describe("buildArgs", () => {
   });
 
   it("includes --json-schema as stringified JSON", () => {
-    const schema = { type: "object", properties: { x: { type: "string" } } };
+    const schema = {
+      type: "object",
+      properties: { answer: { type: "string" } },
+    };
     const args = buildArgs("p", { jsonSchema: schema });
     const idx = args.indexOf("--json-schema");
     assert.ok(idx >= 0);

@@ -323,10 +323,53 @@ export function writeJobFile(cwd, jobId, payload) {
   return jobFile;
 }
 
+function normalizeStoredJob(job) {
+  const isTask = job?.jobClass === "task" || job?.kind === "task";
+  if (
+    !job.result ||
+    typeof job.result !== "object" ||
+    Array.isArray(job.result)
+  ) {
+    return job;
+  }
+  if (isTask) {
+    return {
+      ...job,
+      result: {
+        ...job.result,
+        contextWindow: job.result.contextWindow ?? null,
+      },
+    };
+  }
+
+  const isReview =
+    job?.jobClass === "review" ||
+    job?.kind === "review" ||
+    job?.kind === "adversarial-review";
+  if (
+    !isReview ||
+    !job.result.codex ||
+    typeof job.result.codex !== "object" ||
+    Array.isArray(job.result.codex)
+  ) {
+    return job;
+  }
+  return {
+    ...job,
+    result: {
+      ...job.result,
+      codex: {
+        ...job.result.codex,
+        contextWindow: job.result.codex.contextWindow ?? null,
+      },
+    },
+  };
+}
+
 export function readJobFile(cwd, jobId) {
   const jobFile = resolveJobFile(cwd, jobId);
   try {
-    return JSON.parse(fs.readFileSync(jobFile, "utf8"));
+    return normalizeStoredJob(JSON.parse(fs.readFileSync(jobFile, "utf8")));
   } catch {
     return null;
   }
@@ -340,8 +383,8 @@ function readAllJobs(cwd) {
     .filter((f) => f.endsWith(".json") && !f.endsWith(".lock"))
     .map((f) => {
       try {
-        return JSON.parse(
-          fs.readFileSync(path.join(jobsDir, f), "utf8")
+        return normalizeStoredJob(
+          JSON.parse(fs.readFileSync(path.join(jobsDir, f), "utf8"))
         );
       } catch {
         return null;
