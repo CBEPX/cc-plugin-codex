@@ -4,11 +4,39 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 import {
   extractFirstJsonObject,
   parseStructuredOutput,
 } from "../scripts/lib/structured-output.mjs";
+
+describe("review output schema", () => {
+  it("stays within the Claude CLI-compatible Draft-07 contract", () => {
+    const schema = JSON.parse(
+      fs.readFileSync(
+        new URL("../schemas/review-output.schema.json", import.meta.url),
+        "utf8"
+      )
+    );
+    const newerDraftKeywords = new Set([
+      "$defs",
+      "dependentSchemas",
+      "prefixItems",
+      "unevaluatedProperties",
+    ]);
+    const visit = (value) => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        assert.equal(newerDraftKeywords.has(key), false, `${key} requires a newer JSON Schema draft`);
+        visit(child);
+      }
+    };
+
+    assert.equal(schema.$schema, "http://json-schema.org/draft-07/schema#");
+    visit(schema);
+  });
+});
 
 describe("extractFirstJsonObject", () => {
   it("extracts a JSON object after prose", () => {

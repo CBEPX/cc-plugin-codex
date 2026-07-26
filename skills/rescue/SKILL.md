@@ -56,7 +56,7 @@ Main-thread routing rules:
 - If a legacy request still includes `--notify-parent-on-complete`, treat it as a compatibility alias. Background built-in rescue now attempts parent wake-up by default.
 
 Subagent launch:
-- By default, use Codex's `spawn_agent` tool with its implicit default role. Omit `agent_type` because newer Codex runtimes no longer expose that parameter.
+- By default, use Codex's `spawn_agent` tool with its implicit default role and omit `agent_type` when it is optional or absent. If the runtime schema marks `agent_type` required, pass `agent_type: "default"`.
 - Never satisfy background rescue by launching `claude-companion.mjs task` itself as a detached shell process. Do not use `&`, `nohup`, detached `spawn`, or any equivalent direct background process launch from the parent.
 - If a legacy request still includes `--builtin-agent`, treat it as a compatibility alias for the default built-in path. It should not change behavior.
 - Prefer `fork_context: false` for the built-in rescue child. The parent should pass a self-contained forwarding message instead of replaying the full parent thread by default.

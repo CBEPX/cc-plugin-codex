@@ -171,6 +171,27 @@ function normalizeObservedModel(model) {
   return normalized;
 }
 
+function extractContextWindow(value, observedModel) {
+  for (const modelUsage of collectModelUsageSources(value)) {
+    const entries = Object.entries(modelUsage).filter(
+      ([model, usage]) =>
+        !isSyntheticModelId(model) &&
+        usage &&
+        !Array.isArray(usage)
+    );
+    const matchingEntry = observedModel
+      ? entries.find(([model]) => areModelIdsEquivalent(model, observedModel))
+      : null;
+    const usage =
+      matchingEntry?.[1] ??
+      (!observedModel && entries.length === 1 ? entries[0][1] : null);
+    if (Number.isSafeInteger(usage?.contextWindow) && usage.contextWindow > 0) {
+      return usage.contextWindow;
+    }
+  }
+  return null;
+}
+
 function extractRawObservedModel(value) {
   return (
     firstStringFieldFromSources(collectEventModelSources(value), MODEL_FIELD_NAMES) ??
@@ -376,8 +397,7 @@ function canonicalModelForComparison(model) {
   }
   const withoutContextSuffix = normalized.replace(/\[[^\]]+\]$/u, "");
   const withoutDateSuffix = withoutContextSuffix.replace(/-\d{8}$/u, "");
-  const resolved = MODEL_ALIASES.get(withoutDateSuffix) ?? withoutDateSuffix;
-  return resolved.replace(/\[[^\]]+\]$/u, "");
+  return withoutDateSuffix;
 }
 
 export function areModelIdsEquivalent(left, right) {
@@ -456,6 +476,7 @@ export class StreamParser {
       touchedFiles: [],
       modelEvents: [],
       finalModel: null,
+      contextWindow: null,
       hasTerminalLimitSignal: false,
     };
   }
@@ -529,6 +550,9 @@ export class StreamParser {
               this.state.hasTerminalLimitSignal = true;
             }
             this.state.finalModel = normalizeObservedModel(terminalModel) ?? this.state.finalModel;
+            this.state.contextWindow =
+              extractContextWindow(event, this.state.finalModel) ??
+              this.state.contextWindow;
           }
           if (event.result) {
             this.state.finalMessage = mergeTerminalResultText(
@@ -1018,6 +1042,7 @@ export function pruneStaleReviewMcpConfigs(options = {}) {
 // ---------------------------------------------------------------------------
 
 export const MODEL_ALIASES = new Map([
+  // Identity values are intentional: Claude Code owns floating alias resolution.
   ["opus", "opus"],
   ["sonnet", "sonnet"],
   ["haiku", "haiku"],
@@ -1060,7 +1085,9 @@ export function resolveDefaultEffort(model, effort) {
 
 export function resolveModel(model) {
   if (!model) return undefined;
-  return MODEL_ALIASES.get(model) ?? model;
+  const normalized = String(model).trim();
+  if (!normalized) return undefined;
+  return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
 }
 
 export function resolveEffort(effort) {
@@ -1210,6 +1237,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       const validation = validateTurnCompletion(parser.state, code ?? 1);
       const modelEvents = [...parser.state.modelEvents];
       const finalModel = parser.state.finalModel;
+      const contextWindow = parser.state.contextWindow;
       const failure =
         validation.status === "failed"
           ? classifyClaudeFailure({
@@ -1247,6 +1275,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         touchedFiles: parser.state.touchedFiles,
         requestedModel,
         finalModel,
+        contextWindow,
         modelEvents,
         failure,
         stderr,
@@ -1266,6 +1295,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         touchedFiles: [],
         requestedModel,
         finalModel: null,
+        contextWindow: null,
         modelEvents: [],
         failure: classifyClaudeFailure({ stderr: err.message }),
         stderr: err.message,
@@ -1306,6 +1336,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     sessionId: result.sessionId,
     requestedModel: result.requestedModel,
     finalModel: result.finalModel,
+    contextWindow: result.contextWindow,
     modelEvents: result.modelEvents,
     failure: result.failure,
     stderr: result.stderr,

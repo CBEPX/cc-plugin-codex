@@ -95,7 +95,10 @@ describe("StreamParser", () => {
       type: "result",
       result: "Claude AI usage limit reached|1751554800",
       modelUsage: {
-        "claude-opus-4-8": { input_tokens: 10 },
+        "claude-opus-4-8": {
+          input_tokens: 10,
+          contextWindow: 1000000,
+        },
         "<synthetic>": { input_tokens: 0 },
       },
       session_id: "sess-limit",
@@ -104,6 +107,7 @@ describe("StreamParser", () => {
     parser.feed(resultEvent + "\n");
 
     assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.contextWindow, 1000000);
     assert.equal(parser.state.hasTerminalLimitSignal, true);
   });
 
@@ -650,6 +654,75 @@ describe("StreamParser", () => {
     assert.equal(parser.state.finalModel, "claude-sonnet-5");
   });
 
+  it("matches context windows across equivalent model ids in multi-model usage", () => {
+    const parser = new StreamParser();
+    const evt = JSON.stringify({
+      type: "result",
+      result: "done",
+      model: "claude-fable-5",
+      modelUsage: {
+        "claude-fable-5[1m]": { contextWindow: 1000000 },
+        "claude-haiku-4-5": { contextWindow: 200000 },
+      },
+    });
+
+    parser.feed(evt + "\n");
+
+    assert.equal(parser.state.finalModel, "claude-fable-5");
+    assert.equal(parser.state.contextWindow, 1000000);
+  });
+
+  it("rejects invalid context window telemetry", () => {
+    for (const contextWindow of [0, -1, 1.5, "1000000", null]) {
+      const parser = new StreamParser();
+      parser.feed(
+        JSON.stringify({
+          type: "result",
+          result: "done",
+          modelUsage: {
+            "claude-opus-5": { contextWindow },
+          },
+        }) + "\n"
+      );
+      assert.equal(parser.state.contextWindow, null);
+    }
+  });
+
+  it("does not attribute context telemetry from a different model", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "claude-opus-5",
+        modelUsage: {
+          "claude-sonnet-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.contextWindow, null);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+  });
+
+  it("does not guess context telemetry when the terminal model is ambiguous", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        modelUsage: {
+          "claude-opus-5": { contextWindow: 1000000 },
+          "claude-sonnet-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, null);
+    assert.equal(parser.state.contextWindow, null);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+  });
+
   it("captures the observed model from message_start stream events", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({
@@ -686,6 +759,7 @@ describe("StreamParser", () => {
     parser.feed(evt + "\n");
 
     assert.equal(parser.state.finalModel, "claude-sonnet-5");
+    assert.equal(parser.state.contextWindow, 1000000);
   });
 
   it("returns null for unknown event types and tracks them", () => {
@@ -1210,20 +1284,16 @@ describe("resolveModel", () => {
 
   it("passes through empty string", () => {
     assert.equal(resolveModel(""), undefined);
+    assert.equal(resolveModel("   "), undefined);
   });
 
-  it("passes through the native 'opus' alias", () => {
-    assert.equal(resolveModel("opus"), "opus");
-  });
-
-  it("passes through the native 'fable' alias", () => {
-    assert.equal(resolveModel("fable"), "fable");
-  });
-
-  it("MODEL_ALIASES map has expected entries", () => {
+  it("normalizes and forwards native aliases without pinning a version", () => {
     assert.equal(MODEL_ALIASES.size, 4);
     for (const alias of ["opus", "sonnet", "haiku", "fable"]) {
       assert.equal(MODEL_ALIASES.get(alias), alias);
+      assert.equal(resolveModel(` ${alias.toUpperCase()} `), alias);
+      const args = buildArgs("p", { model: alias });
+      assert.equal(args[args.indexOf("--model") + 1], alias);
     }
   });
 });
@@ -1461,13 +1531,10 @@ describe("buildArgs", () => {
   });
 
   it("includes --json-schema as stringified JSON", () => {
-    const schema = JSON.parse(
-      fs.readFileSync(
-        new URL("../schemas/review-output.schema.json", import.meta.url),
-        "utf8"
-      )
-    );
-    assert.equal(schema.$schema, "http://json-schema.org/draft-07/schema#");
+    const schema = {
+      type: "object",
+      properties: { answer: { type: "string" } },
+    };
     const args = buildArgs("p", { jsonSchema: schema });
     const idx = args.indexOf("--json-schema");
     assert.ok(idx >= 0);

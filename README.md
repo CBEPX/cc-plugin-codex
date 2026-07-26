@@ -135,6 +135,8 @@ $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 
 **Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version, or use `--effort` to override the family default.
 
+JSON task and review results keep `requestedModel` as the forwarded alias or full ID, report `finalModel` from Claude's terminal result, and expose the terminal `contextWindow` reported in `modelUsage` (`null` when Claude does not provide it). The plugin does not infer a context limit from a floating alias.
+
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
 In foreground, review returns the result directly. In background, the plugin uses a Codex built-in subagent, tracks the review as a job, and nudges you to open the result when it completes.

@@ -81,7 +81,7 @@ Background flow:
 - Spawn exactly one transient forwarding child through `spawn_agent` with:
   - `fork_context: false`
   - `reasoning_effort: "medium"`
-- Use the built-in default role implicitly; omit `agent_type` because newer Codex runtimes no longer expose that parameter.
+- Use the built-in default role implicitly and omit `agent_type` when it is optional or absent. If the runtime schema marks `agent_type` required, pass `agent_type: "default"`.
 - Omit `model` so the forwarding child inherits the current Codex runtime model.
 - Prefer a self-contained child message over inheriting parent history. The built-in adversarial-review child should not rely on full parent thread replay for normal operation.
 - Only consider `fork_context: true` as a last resort for a short follow-up where essential context truly cannot be summarized. Avoid it for large or long-lived threads because it can exhaust the child context window.

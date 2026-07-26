@@ -45,7 +45,7 @@ Background contract:
 Spawn-agent defaults:
 - `fork_context: false`
 - `reasoning_effort: "medium"`
-- Use the implicit default role and omit `agent_type`.
+- Use the implicit default role and omit `agent_type` when it is optional or absent. If the runtime schema marks `agent_type` required, pass `agent_type: "default"`.
 - Omit `model` so the child inherits the current Codex runtime model.
 - Do not add a fixed-version model fallback.
 

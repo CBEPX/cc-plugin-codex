@@ -480,6 +480,14 @@ function getToolNames(body) {
         .filter(Boolean);
 }
 
+function getToolParameters(body, name) {
+  const tool = flattenTools(body.tools).find(
+    (candidate) =>
+      (candidate.name || candidate.function?.name || candidate.type) === name
+  );
+  return tool?.parameters ?? tool?.function?.parameters ?? null;
+}
+
 function chooseShellTool(body) {
   const toolNames = getToolNames(body);
   if (toolNames.includes("exec_command")) {
@@ -839,6 +847,22 @@ function startMockProvider({
           assert.ok(
             getToolNames(body).includes("spawn_agent"),
             "spawn_agent should be available in the parent turn"
+          );
+          const spawnAgentParameters = getToolParameters(body, "spawn_agent");
+          assert.ok(
+            spawnAgentParameters,
+            "spawn_agent should expose its live parameter schema"
+          );
+          const requiredSpawnFields = Array.isArray(spawnAgentParameters.required)
+            ? spawnAgentParameters.required
+            : [];
+          assert.ok(
+            !requiredSpawnFields.includes("agent_type"),
+            "spawn_agent.agent_type must not be required"
+          );
+          assert.ok(
+            !requiredSpawnFields.includes("model"),
+            "spawn_agent.model must not be required"
           );
           if (mode === "builtin-alias") {
             assert.ok(

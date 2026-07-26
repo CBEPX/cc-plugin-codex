@@ -30,6 +30,9 @@ test("README model alias docs match runtime aliases", () => {
   }
   assert.match(readme, /Claude Code resolves aliases to the current model/i);
   assert.match(readme, /full model ID to pin a version/i);
+  assert.match(readme, /requestedModel.*forwarded alias or full ID/i);
+  assert.match(readme, /terminal `contextWindow` reported in `modelUsage`/i);
+  assert.match(readme, /does not infer a context limit from a floating alias/i);
 });
 
 test("internal runtime references keep the active-root and notification invariants", () => {
@@ -48,7 +51,8 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(reviewRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
   assert.match(reviewRuntime, /do not silently drop the completion notification path when the parent provided a non-empty parent thread id/i);
   assert.match(reviewRuntime, /Use that same steering message as the child's own final assistant message for background mode/i);
-  assert.match(reviewRuntime, /Use the implicit default role and omit `agent_type`/i);
+  assert.match(reviewRuntime, /Use the implicit default role and omit `agent_type` when it is optional or absent/i);
+  assert.match(reviewRuntime, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
   assert.match(reviewRuntime, /Omit `model` so the child inherits the current Codex runtime model/i);
   assert.match(reviewRuntime, /Do not add a fixed-version model fallback/i);
   assert.doesNotMatch(reviewRuntime, /gpt-5\.\d+/i);
@@ -103,7 +107,8 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /spawn_agent/i);
   assert.match(review, /`fork_context: false`/i);
   assert.match(review, /`reasoning_effort: "medium"`/i);
-  assert.match(review, /Use the built-in default role implicitly; omit `agent_type`/i);
+  assert.match(review, /Use the built-in default role implicitly and omit `agent_type` when it is optional or absent/i);
+  assert.match(review, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
   assert.match(review, /Omit `model` so the forwarding child inherits the current Codex runtime model/i);
   assert.match(review, /Prefer a self-contained child message over inheriting parent history/i);
   assert.match(review, /Only consider `fork_context: true` as a last resort/i);
@@ -159,7 +164,8 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /spawn_agent/i);
   assert.match(adversarial, /`fork_context: false`/i);
   assert.match(adversarial, /`reasoning_effort: "medium"`/i);
-  assert.match(adversarial, /Use the built-in default role implicitly; omit `agent_type`/i);
+  assert.match(adversarial, /Use the built-in default role implicitly and omit `agent_type` when it is optional or absent/i);
+  assert.match(adversarial, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
   assert.match(adversarial, /Omit `model` so the forwarding child inherits the current Codex runtime model/i);
   assert.match(adversarial, /Prefer a self-contained child message over inheriting parent history/i);
   assert.match(adversarial, /Only consider `fork_context: true` as a last resort/i);
@@ -239,7 +245,8 @@ test("rescue skill documents the experimental built-in-agent forwarding path", (
   assert.match(rescue, /compatibility alias for the default built-in path/i);
   assert.match(rescue, /Prefer `fork_context: false` for the built-in rescue child/i);
   assert.match(rescue, /Only consider `fork_context: true` as a last resort/i);
-  assert.match(rescue, /implicit default role\. Omit `agent_type`/i);
+  assert.match(rescue, /implicit default role and omit `agent_type` when it is optional or absent/i);
+  assert.match(rescue, /If the runtime schema marks `agent_type` required, pass `agent_type: "default"`/i);
   assert.match(rescue, /must omit `model` and set `reasoning_effort: "medium"` on `spawn_agent`/i);
   assert.match(rescue, /inherits the current Codex runtime model/i);
   assert.match(rescue, /Do not retry with an explicit model override if spawning fails/i);
