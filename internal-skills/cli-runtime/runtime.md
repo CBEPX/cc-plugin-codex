@@ -2,7 +2,7 @@
 
 Use this document only inside the rescue forwarding worker spawned by `$cc:rescue` as defined in `../../skills/rescue/SKILL.md`.
 This is an internal execution contract, not a public skill. It owns execution and routing. It does not own prompt rewriting beyond deciding when to consult the prompt-shaping reference.
-The public rescue skill already resolved the active plugin root from its `SKILL.md` path and passed the parent shell's `"$PWD"` into `background-routing-context`. Reuse the helper's canonical `workspaceRoot`. Never derive the workspace from the plugin root or the directory used to read this document.
+The public rescue skill already resolved the active plugin root from its `SKILL.md` path and ran `background-routing-context` from the parent user workspace. Reuse the helper's canonical `workspaceRoot`. Never derive the workspace from the plugin root or the directory used to read this document.
 
 Primary helper:
 - `node "<plugin-root>/scripts/claude-companion.mjs" task --cwd "<workspaceRoot>" ...`

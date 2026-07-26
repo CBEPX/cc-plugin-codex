@@ -8,7 +8,7 @@ description: 'Show the stored final output for a finished Claude Code job in thi
 Use this skill when the user wants the stored final output for a finished Claude Code job.
 
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Always run:
-`node "<plugin-root>/scripts/claude-companion.mjs" result --cwd "$PWD" $ARGUMENTS`
+`node "<plugin-root>/scripts/claude-companion.mjs" result $ARGUMENTS`
 
 Supported arguments: `[job-id]`
 

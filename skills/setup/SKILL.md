@@ -7,7 +7,7 @@ description: 'Check whether Claude Code CLI is ready in this environment and opt
 
 Use this skill when the user wants to verify Claude Code readiness or toggle the review gate.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Always pass that shell's absolute current workspace through `--cwd "$PWD"`.
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. The companion uses that shell's current directory as the workspace.
 
 Supported arguments:
 - `--enable-review-gate`
@@ -15,13 +15,13 @@ Supported arguments:
 
 Workflow:
 - First run the machine-readable probe:
-  `node "<plugin-root>/scripts/claude-companion.mjs" setup --cwd "$PWD" --json $ARGUMENTS`
+  `node "<plugin-root>/scripts/claude-companion.mjs" setup --json $ARGUMENTS`
 - If it reports that Claude Code is unavailable and `npm` is available, ask whether to install Claude Code now.
 - If the user agrees, run `npm install -g @anthropic-ai/claude-code` and rerun setup.
 - If Claude Code is already installed or `npm` is unavailable, do not ask about installation.
 - If setup reports missing native plugin hook features or hook trust, rerun setup once. The companion repairs `[features].hooks`, `[features].plugin_hooks`, and this plugin's native hook trust hashes itself.
 - After the decision flow is complete, run the final user-facing command without `--json`:
-  `node "<plugin-root>/scripts/claude-companion.mjs" setup --cwd "$PWD" $ARGUMENTS`
+  `node "<plugin-root>/scripts/claude-companion.mjs" setup $ARGUMENTS`
 
 Output:
 - Present the final non-JSON setup output exactly as returned by the companion.

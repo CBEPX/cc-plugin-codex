@@ -51,9 +51,9 @@ test("public skills keep plugin and user workspace roots separate", () => {
   for (const skillPath of skillPaths) {
     const skillText = read(skillPath);
     assert.match(skillText, /Keep the shell tool in the active Codex user workspace/i, skillPath);
-    assert.match(skillText, /--cwd "\$PWD"/i, skillPath);
     assert.match(skillText, /never set its working directory to `<plugin-root>`/i, skillPath);
     assert.doesNotMatch(skillText, /--cwd "<plugin-root>"/i, skillPath);
+    assert.doesNotMatch(skillText, /--cwd "\$PWD"/i, skillPath);
     assert.doesNotMatch(skillText, /<workspace-root>/i, skillPath);
   }
 });
@@ -115,7 +115,7 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /The companion review process itself always runs in the foreground/i);
   assert.match(review, /internal runtime reference at `\.\.\/\.\.\/internal-skills\/review-runtime\/runtime\.md`/i);
   assert.match(review, /It is an internal reference document, not a public skill to invoke/i);
-  assert.match(review, /review --cwd "\$PWD" --view-state on-success/i);
+  assert.match(review, /review --view-state on-success/i);
   assert.match(review, /Foreground review belongs to the main Codex thread/i);
   assert.match(review, /Do not spawn a review subagent/i);
   assert.match(review, /do not invoke a generic review-runner role/i);
@@ -125,7 +125,7 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /Do not satisfy background review by using a generic `claude_review_runner`-style helper role/i);
   assert.match(review, /Never satisfy background review by running the companion command itself with shell backgrounding/i);
   assert.match(review, /Background here means "spawn the forwarding child via `spawn_agent` and do not wait in the parent turn\."/i);
-  assert.match(review, /background-routing-context --kind review --cwd "\$PWD" --json/i);
+  assert.match(review, /background-routing-context --kind review --json/i);
   assert.match(review, /helper's non-empty `workspaceRoot` as the canonical workspace/i);
   assert.match(review, /review --cwd "<workspaceRoot>" --view-state defer/i);
   assert.match(review, /internal `--job-id <reserved-job-id>` routing flag/i);
@@ -174,7 +174,7 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /The companion review process itself always runs in the foreground/i);
   assert.match(adversarial, /internal runtime reference at `\.\.\/\.\.\/internal-skills\/review-runtime\/runtime\.md`/i);
   assert.match(adversarial, /It is an internal reference document, not a public skill to invoke/i);
-  assert.match(adversarial, /adversarial-review --cwd "\$PWD" --view-state on-success/i);
+  assert.match(adversarial, /adversarial-review --view-state on-success/i);
   assert.match(adversarial, /Foreground adversarial review belongs to the main Codex thread/i);
   assert.match(adversarial, /Do not spawn a review subagent/i);
   assert.match(adversarial, /do not invoke a generic review-runner role/i);
@@ -184,7 +184,7 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /Do not satisfy background adversarial review by using a generic `claude_review_runner`-style helper role/i);
   assert.match(adversarial, /Never satisfy background adversarial review by running the companion command itself with shell backgrounding/i);
   assert.match(adversarial, /Background here means "spawn the forwarding child via `spawn_agent` and do not wait in the parent turn\."/i);
-  assert.match(adversarial, /background-routing-context --kind review --cwd "\$PWD" --json/i);
+  assert.match(adversarial, /background-routing-context --kind review --json/i);
   assert.match(adversarial, /helper's non-empty `workspaceRoot` as the canonical workspace/i);
   assert.match(adversarial, /adversarial-review --cwd "<workspaceRoot>" --view-state defer/i);
   assert.match(adversarial, /internal `--job-id <reserved-job-id>` routing flag/i);
@@ -242,7 +242,7 @@ test("rescue skill keeps --background and --wait as host-side controls only", ()
   assert.match(rescue, /If the user task text itself begins with a slash command such as `\/simplify`/i);
   assert.match(rescue, /Remove `--background` and `--wait` before spawning the subagent/i);
   assert.match(rescue, /If the free-text task begins with `\/`, preserve it verbatim/i);
-  assert.match(rescue, /background-routing-context --kind task --cwd "\$PWD" --json/i);
+  assert.match(rescue, /background-routing-context --kind task --json/i);
   assert.match(rescue, /helper's non-empty `workspaceRoot` as the canonical workspace/i);
   assert.match(rescue, /--cwd "<workspaceRoot>"/i);
   assert.match(rescue, /non-empty `ownerSessionId`/i);
@@ -369,7 +369,7 @@ test("rescue parent skill owns resume-candidate exploration", () => {
   const rescue = read("skills/rescue/SKILL.md");
   const runtimeSkill = read("internal-skills/cli-runtime/runtime.md");
 
-  assert.match(rescue, /task-resume-candidate --cwd "\$PWD" --json/i);
+  assert.match(rescue, /task-resume-candidate --json/i);
   assert.match(rescue, /Continue current Claude Code thread/i);
   assert.match(rescue, /Start a new Claude Code thread/i);
 
@@ -384,7 +384,7 @@ test("setup skill repairs native plugin hook feature gates before the final setu
 
   assert.match(setup, /Resolve `<plugin-root>` as two directories above this `SKILL\.md` file/i);
   assert.match(setup, /<plugin-root>\/scripts\/claude-companion\.mjs/i);
-  assert.match(setup, /setup --cwd "\$PWD" --json/i);
+  assert.match(setup, /setup --json/i);
   assert.match(setup, /missing native plugin hook features/i);
   assert.match(setup, /hook trust/i);
   assert.match(setup, /\[features\]\.hooks/i);
@@ -407,9 +407,9 @@ test("simple runtime skills resolve the active plugin root from the skill path",
     assert.doesNotMatch(skillText, /<installed-plugin-root>/i);
   }
 
-  assert.match(transfer, /claude-companion\.mjs" transfer --cwd "\$PWD" \$ARGUMENTS/i);
+  assert.match(transfer, /claude-companion\.mjs" transfer \$ARGUMENTS/i);
   assert.match(transfer, /codex resume <session-id>/i);
   assert.match(transfer, /--source <claude-jsonl>/i);
-  assert.match(mcpDiagnose, /claude-companion\.mjs" mcp-diagnose --cwd "\$PWD" \$ARGUMENTS/i);
+  assert.match(mcpDiagnose, /claude-companion\.mjs" mcp-diagnose \$ARGUMENTS/i);
   assert.match(mcpDiagnose, /Do not print raw MCP server configs or secrets/i);
 });

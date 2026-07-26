@@ -16,8 +16,7 @@ Prefer `$cc:rescue` when the user wants Claude Code to diagnose the issue, valid
 Do not use rescue for "just review this diff" unless the user also wants follow-through work beyond review findings.
 Do not use rescue merely because the main Codex thread plans to fix things after combining its own review with a separate Claude review. Rescue is only the right delegation when Claude itself is supposed to investigate, edit, test, or otherwise own the follow-through work.
 
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Pass that shell's absolute current workspace explicitly as `--cwd "$PWD"`:
-`node "<plugin-root>/scripts/claude-companion.mjs" task --cwd "$PWD" ...`
+Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Parent helpers use that shell's current directory directly; the forwarding child uses the canonical `workspaceRoot` returned by `background-routing-context`.
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -42,7 +41,7 @@ Main-thread routing rules:
 - Default to `--write` unless the user explicitly wants read-only behavior or only review, diagnosis, or research without edits.
 - If `--resume` or `--resume-last` is present, continue the latest tracked Claude Code task. If `--fresh` is present, start a new task.
 - If none of `--resume`, `--resume-last`, or `--fresh` is present, first run:
-  `node "<plugin-root>/scripts/claude-companion.mjs" task-resume-candidate --cwd "$PWD" --json`
+  `node "<plugin-root>/scripts/claude-companion.mjs" task-resume-candidate --json`
 - If that helper reports `available: true`, ask the user once whether to continue the current Claude Code thread or start a new one.
 - Use exactly these two choices:
   - `Continue current Claude Code thread`
@@ -68,7 +67,7 @@ Subagent launch:
 - Pass only the routing and task arguments that actually belong to `claude-companion.mjs task`.
 - If the free-text task begins with `/`, preserve it verbatim in the spawned subagent request. Do not strip the slash or rewrite it into a local Codex command.
 - Before spawning the built-in child, capture the task job id plus routing context in one call:
-  `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind task --cwd "$PWD" --json`
+  `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind task --json`
 - Treat the helper's non-empty `workspaceRoot` as the canonical workspace for the forwarding child. Pass it back as `--cwd "<workspaceRoot>"`; never substitute `<plugin-root>` or the child's default working directory.
 - If that helper returns a non-empty `ownerSessionId`, include `--owner-session-id <owner-session-id>` in the companion command so tracked Claude Code jobs stay attached to the user-facing parent session for `$cc:status` / `$cc:result`.
 - If it returns an empty `ownerSessionId`, omit `--owner-session-id` entirely. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.

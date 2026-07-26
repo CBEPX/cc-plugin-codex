@@ -1326,7 +1326,7 @@ describe("Codex rescue-skill E2E", () => {
         `node ${JSON.stringify(COMPANION_SCRIPT)} task --cwd ${JSON.stringify(PROJECT_ROOT)} --fresh --job-id ${JSON.stringify(reservedJobId)} --view-state defer ${JSON.stringify(taskPrompt)}`,
       expectedChildNeedles: ["--cwd", PROJECT_ROOT, "--view-state defer", "--job-id", reservedJobId],
       expectedParentNeedles: [
-        "background-routing-context --kind task --cwd",
+        "background-routing-context --kind task --json",
         "helper's non-empty `workspaceRoot` as the canonical workspace",
         "blocking foreground shell-tool call, not as a background terminal/session",
         "do not request a shell session id, poll a shell session later, or return before the companion command exits",
@@ -1691,7 +1691,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Review"],
       shellCommands: [
-        `node ${JSON.stringify(companionScript)} review --cwd ${JSON.stringify(workspaceDir)} --view-state on-success --scope working-tree --model haiku`,
+        `node ${JSON.stringify(companionScript)} review --view-state on-success --scope working-tree --model haiku`,
       ],
       cwd: workspaceDir,
     });
@@ -1739,7 +1739,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Review"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --cwd ${JSON.stringify(workspaceDir)} --view-state on-success --scope working-tree --model haiku`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state on-success --scope working-tree --model haiku`,
       ],
       cwd: workspaceDir,
     });
@@ -1794,7 +1794,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       skillTitle: "Claude Code Review",
       expectedParentNeedles: [
-        "background-routing-context --kind review --cwd",
+        "background-routing-context --kind review --json",
         "helper's non-empty `workspaceRoot` as the canonical workspace",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background review by running the companion command itself with shell backgrounding",
@@ -1887,7 +1887,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Adversarial Review"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --cwd ${JSON.stringify(workspaceDir)} --view-state on-success --scope working-tree --model haiku focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state on-success --scope working-tree --model haiku focus on race conditions`,
       ],
       cwd: workspaceDir,
     });
@@ -1946,7 +1946,7 @@ describe("Codex direct-skill E2E", () => {
         "keep the delegated Claude part on `$cc:review`",
       ],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --cwd ${JSON.stringify(workspaceDir)} --view-state on-success --scope working-tree --model haiku focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state on-success --scope working-tree --model haiku focus on race conditions`,
       ],
       cwd: workspaceDir,
     });
@@ -2009,7 +2009,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       skillTitle: "Claude Code Adversarial Review",
       expectedParentNeedles: [
-        "background-routing-context --kind review --cwd",
+        "background-routing-context --kind review --json",
         "helper's non-empty `workspaceRoot` as the canonical workspace",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background adversarial review by running the companion command itself with shell backgrounding",
@@ -2097,8 +2097,8 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Setup"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --cwd ${JSON.stringify(PROJECT_ROOT)} --json --enable-review-gate`,
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --cwd ${JSON.stringify(PROJECT_ROOT)} --enable-review-gate`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --json --enable-review-gate`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --enable-review-gate`,
       ],
     });
     testEnv.providerPort = await provider.listen();
@@ -2136,8 +2136,8 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Setup"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --cwd ${JSON.stringify(PROJECT_ROOT)} --json`,
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --cwd ${JSON.stringify(PROJECT_ROOT)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --json`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup`,
       ],
     });
     testEnv.providerPort = await provider.listen();
@@ -2177,8 +2177,8 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Setup"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --cwd ${JSON.stringify(PROJECT_ROOT)} --json --enable-review-gate`,
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --cwd ${JSON.stringify(PROJECT_ROOT)} --enable-review-gate`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --json --enable-review-gate`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --enable-review-gate`,
       ],
     });
     testEnv.providerPort = await provider.listen();

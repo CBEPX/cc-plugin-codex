@@ -8,7 +8,7 @@ description: 'Transfer the current Claude Code transcript into a resumable Codex
 Use this skill when the user wants to transfer or hand off the current Claude Code session into a Codex thread.
 
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Always run:
-`node "<plugin-root>/scripts/claude-companion.mjs" transfer --cwd "$PWD" $ARGUMENTS`
+`node "<plugin-root>/scripts/claude-companion.mjs" transfer $ARGUMENTS`
 
 Supported arguments: `--source <claude-jsonl>`
 
