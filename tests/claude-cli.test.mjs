@@ -89,6 +89,28 @@ describe("StreamParser", () => {
     assert.equal(parser.state.hasTerminalLimitSignal, true);
   });
 
+  it("marks only synthetic terminal models as limit signals", () => {
+    const syntheticParser = new StreamParser();
+    syntheticParser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "<synthetic>",
+      }) + "\n"
+    );
+    assert.equal(syntheticParser.state.hasTerminalLimitSignal, true);
+
+    const regularParser = new StreamParser();
+    regularParser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        model: "claude-opus-5",
+      }) + "\n"
+    );
+    assert.equal(regularParser.state.hasTerminalLimitSignal, false);
+  });
+
   it("does not guess context telemetry from synthetic limit payloads", () => {
     const parser = new StreamParser();
     const resultEvent = JSON.stringify({
@@ -718,7 +740,7 @@ describe("StreamParser", () => {
     assert.equal(parser.state.unresolvedParseErrors, 0);
   });
 
-  it("does not guess context telemetry when the terminal model is ambiguous", () => {
+  it("uses the observed session model when multi-model terminal usage omits it", () => {
     const parser = new StreamParser();
     parser.feed(
       JSON.stringify({
@@ -738,6 +760,24 @@ describe("StreamParser", () => {
     );
 
     assert.equal(parser.state.finalModel, "claude-opus-5");
+    assert.equal(parser.state.contextWindow, 1000000);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+  });
+
+  it("does not guess context telemetry without an observed terminal model", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "done",
+        modelUsage: {
+          "claude-opus-5": { contextWindow: 1000000 },
+          "claude-sonnet-5": { contextWindow: 1000000 },
+        },
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.finalModel, null);
     assert.equal(parser.state.contextWindow, null);
     assert.equal(parser.state.unresolvedParseErrors, 0);
   });
@@ -1396,14 +1436,17 @@ describe("resolveDefaultModel", () => {
 describe("resolveDefaultEffort", () => {
   it("defaults to xhigh for the opus alias and supported current ids", () => {
     assert.equal(resolveDefaultEffort("opus", null), "xhigh");
+    assert.equal(resolveDefaultEffort("opus[1m]", null), "xhigh");
     assert.equal(resolveDefaultEffort("claude-opus-4-8", null), "xhigh");
     assert.equal(resolveDefaultEffort("claude-opus-5", null), "xhigh");
+    assert.equal(resolveDefaultEffort("claude-opus-5[1m]", null), "xhigh");
     assert.equal(resolveDefaultEffort(" OPUS ", undefined), "xhigh");
   });
 
   it("defaults to high for the sonnet alias and supported current ids", () => {
     assert.equal(resolveDefaultEffort("sonnet", null), "high");
     assert.equal(resolveDefaultEffort("claude-sonnet-5", null), "high");
+    assert.equal(resolveDefaultEffort("claude-sonnet-5[1m]", null), "high");
   });
 
   it("returns undefined for haiku (no effort default)", () => {
@@ -1426,6 +1469,7 @@ describe("resolveDefaultEffort", () => {
       resolveDefaultEffort("claude-opus-4-1-20250805", null),
       undefined
     );
+    assert.equal(resolveDefaultEffort("claude-opus[1m]-5", null), undefined);
   });
 
   it("preserves an explicit effort regardless of model", () => {

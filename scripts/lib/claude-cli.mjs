@@ -551,12 +551,16 @@ export class StreamParser {
             const terminalModel = normalizeObservedModel(
               extractRawObservedModel(event)
             );
-            if (hasSyntheticModelSignal(event)) {
+            const hasSyntheticTerminalModel = hasSyntheticModelSignal(event);
+            if (hasSyntheticTerminalModel) {
               this.state.hasTerminalLimitSignal = true;
             }
             this.state.finalModel = terminalModel ?? this.state.finalModel;
-            this.state.contextWindow = terminalModel
-              ? extractContextWindow(event, terminalModel)
+            const attributionModel =
+              terminalModel ??
+              (hasSyntheticTerminalModel ? null : this.state.finalModel);
+            this.state.contextWindow = attributionModel
+              ? extractContextWindow(event, attributionModel)
               : null;
           }
           if (event.result) {
@@ -1082,7 +1086,10 @@ export function resolveDefaultEffort(model, effort) {
   if (effort != null && String(effort).trim() !== "") {
     return effort;
   }
-  const key = String(model).trim().toLowerCase();
+  const key = String(model)
+    .trim()
+    .toLowerCase()
+    .replace(/\[[^\]]+\]$/u, "");
   return DEFAULT_EFFORT_BY_MODEL.get(key);
 }
 
