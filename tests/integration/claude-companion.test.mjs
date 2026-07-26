@@ -808,7 +808,13 @@ describe("claude-companion integration", () => {
 
   it("setup trusts current native plugin hooks through Codex hooks/list", () => {
     const testEnv = createTestEnvironment();
-    const sourcePath = path.join(PROJECT_ROOT, "hooks", "hooks.json");
+    const projectAlias = path.join(testEnv.rootDir, "plugin-root-link");
+    fs.symlinkSync(
+      PROJECT_ROOT,
+      projectAlias,
+      process.platform === "win32" ? "junction" : "dir"
+    );
+    const sourcePath = path.join(projectAlias, "hooks", "hooks.json");
     const hooks = [
       {
         key: "cc@sendbird:hooks/hooks.json:session_start:0:0",
@@ -862,6 +868,23 @@ describe("claude-companion integration", () => {
         trustStatus: "trusted",
       },
       {
+        key: "cc@sendbird:hooks/hooks.json:outside:0:0",
+        eventName: "session_start",
+        handlerType: "command",
+        matcher: null,
+        command: "node outside.mjs",
+        timeoutSec: 600,
+        statusMessage: null,
+        sourcePath: path.join(testEnv.rootDir, "outside", "hooks.json"),
+        source: "plugin",
+        pluginId: "cc@sendbird",
+        displayOrder: 3,
+        enabled: true,
+        isManaged: false,
+        currentHash: "sha256:outside",
+        trustStatus: "untrusted",
+      },
+      {
         key: "other@sendbird:hooks/hooks.json:session_start:0:0",
         eventName: "session_start",
         handlerType: "command",
@@ -872,7 +895,7 @@ describe("claude-companion integration", () => {
         sourcePath: path.join(testEnv.rootDir, "other", "hooks.json"),
         source: "plugin",
         pluginId: "other@sendbird",
-        displayOrder: 3,
+        displayOrder: 4,
         enabled: true,
         isManaged: false,
         currentHash: "sha256:other",

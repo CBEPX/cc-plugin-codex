@@ -1660,10 +1660,19 @@ describe("Codex direct-skill E2E", () => {
     );
 
     const pluginRoot = installPlugin(testEnv);
+    const pluginCacheRoot = path.join(testEnv.codexHome, "plugins", "cache");
+    const siblingVersionRoot = path.join(path.dirname(pluginRoot), "0.0.0-sibling");
+    fs.mkdirSync(siblingVersionRoot, { recursive: true });
 
     const userRequest = "$cc:review --wait --scope working-tree --model haiku";
     const companionScript = path.join(pluginRoot, "scripts", "claude-companion.mjs");
-    for (const pluginCacheCwd of [pluginRoot, path.join(pluginRoot, "scripts")]) {
+    for (const pluginCacheCwd of [
+      pluginCacheRoot,
+      path.dirname(pluginRoot),
+      siblingVersionRoot,
+      pluginRoot,
+      path.join(pluginRoot, "scripts"),
+    ]) {
       const pluginCacheWorkspace = spawnSync(
         process.execPath,
         [companionScript, "status", "--json"],
@@ -1712,6 +1721,20 @@ describe("Codex direct-skill E2E", () => {
         ),
         "installed plugin review should forward the requested model alias to Claude without running setup first"
       );
+
+      const setupResult = spawnSync(
+        process.execPath,
+        [companionScript, "setup", "--cwd", workspaceDir, "--json"],
+        {
+          cwd: workspaceDir,
+          env: testEnv.env,
+          encoding: "utf8",
+        }
+      );
+      assert.equal(setupResult.status, 0, setupResult.stderr || setupResult.stdout);
+      const setupReport = JSON.parse(setupResult.stdout);
+      assert.equal(setupReport.hookTrust.ready, true);
+      assert.ok(setupReport.hookTrust.found > 0);
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);

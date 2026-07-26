@@ -121,6 +121,7 @@ import {
 } from "./lib/render.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const CANONICAL_ROOT_DIR = fs.realpathSync.native(ROOT_DIR);
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_FOREGROUND_TASK_WAIT_TIMEOUT_MS = 1800000;
@@ -308,9 +309,9 @@ function resolveCommandCwd(options = {}) {
   }
 
   const canonicalCwd = fs.realpathSync.native(resolvedCwd);
-  if (currentPluginCacheInstallInfo()) {
-    const canonicalPluginRoot = fs.realpathSync.native(ROOT_DIR);
-    const relativePath = path.relative(canonicalPluginRoot, canonicalCwd);
+  const pluginInfo = currentPluginCacheInstallInfo();
+  if (pluginInfo) {
+    const relativePath = path.relative(pluginInfo.canonicalCacheRoot, canonicalCwd);
     const isPluginCacheWorkspace =
       !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
     if (isPluginCacheWorkspace) {
@@ -475,7 +476,7 @@ function currentPluginCacheInstallInfo() {
   } catch {}
   const relativePath = path.relative(
     canonicalCacheRoot,
-    fs.realpathSync.native(ROOT_DIR)
+    CANONICAL_ROOT_DIR
   );
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     return null;
@@ -491,6 +492,7 @@ function currentPluginCacheInstallInfo() {
     pluginName,
     version,
     pluginId: `${pluginName}@${marketplaceName}`,
+    canonicalCacheRoot,
   };
 }
 
@@ -505,8 +507,12 @@ function pathIsInsideRoot(filePath) {
   if (typeof filePath !== "string" || !filePath) {
     return false;
   }
-  const relativePath = path.relative(ROOT_DIR, path.resolve(filePath));
-  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+  let canonicalPath = path.resolve(filePath);
+  try {
+    canonicalPath = fs.realpathSync.native(canonicalPath);
+  } catch {}
+  const relativePath = path.relative(CANONICAL_ROOT_DIR, canonicalPath);
+  return !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
 function isCurrentPluginHook(hook, pluginInfo) {
