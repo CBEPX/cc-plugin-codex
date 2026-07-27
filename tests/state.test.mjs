@@ -812,21 +812,23 @@ describe("cleanupOldJobs", () => {
       fs.utimesSync(badReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
       fs.utimesSync(staleReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
 
-      fs.statSync = (targetPath, ...args) => {
+      Reflect.set(fs, "statSync", (targetPath, ...args) => {
         if (targetPath === badReservation) {
-          const error = new Error("synthetic stat failure");
+          const error = /** @type {NodeJS.ErrnoException} */ (
+            new Error("synthetic stat failure")
+          );
           error.code = "EIO";
           throw error;
         }
         return originalStatSync(targetPath, ...args);
-      };
+      });
 
       cleanupOldJobs(repoDir);
 
       assert.equal(fs.existsSync(badReservation), true);
       assert.equal(fs.existsSync(staleReservation), false);
     } finally {
-      fs.statSync = originalStatSync;
+      Reflect.set(fs, "statSync", originalStatSync);
       fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
       fs.rmSync(repoDir, { recursive: true, force: true });
     }

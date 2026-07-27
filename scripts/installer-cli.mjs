@@ -14,6 +14,7 @@ import { callCodexAppServer } from "./lib/codex-app-server.mjs";
 import { ensureNativePluginHooksEnabled } from "./lib/codex-config.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
 import {
+  getManagedPluginSignals,
   LEGACY_MARKETPLACE_NAME,
   listManagedPluginCacheEntries,
   pluginIdForMarketplace,
@@ -21,7 +22,8 @@ import {
 } from "./lib/plugin-identity.mjs";
 import {
   cleanupManagedGlobalIntegrations,
-  removeManagedSkillWrappers,
+  validateManagedHooks,
+  writeTextAtomic,
 } from "./lib/managed-global-integration.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -52,11 +54,6 @@ function readText(filePath) {
     return "";
   }
   return fs.readFileSync(filePath, "utf8");
-}
-
-function writeText(filePath, content) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, content, "utf8");
 }
 
 function removeIfEmpty(dirPath) {
@@ -91,16 +88,26 @@ function configureNativePluginHooks() {
   const existing = readText(CODEX_CONFIG_FILE);
   const { changed, content } = ensureNativePluginHooksEnabled(existing);
   if (changed || !fs.existsSync(CODEX_CONFIG_FILE)) {
-    writeText(CODEX_CONFIG_FILE, content);
+    writeTextAtomic(CODEX_CONFIG_FILE, content);
   }
   return changed;
 }
 
-function removePersonalMarketplaceCcEntries() {
+function readPersonalMarketplace() {
   if (!fs.existsSync(PERSONAL_MARKETPLACE_FILE)) {
-    return;
+    return null;
   }
-  const parsed = JSON.parse(fs.readFileSync(PERSONAL_MARKETPLACE_FILE, "utf8"));
+  try {
+    return JSON.parse(fs.readFileSync(PERSONAL_MARKETPLACE_FILE, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Cannot update invalid marketplace JSON at ${PERSONAL_MARKETPLACE_FILE}: ${error.message}`
+    );
+  }
+}
+
+function removePersonalMarketplaceCcEntries() {
+  const parsed = readPersonalMarketplace();
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.plugins)) {
     return;
   }
@@ -115,7 +122,7 @@ function removePersonalMarketplaceCcEntries() {
     return;
   }
   parsed.plugins = nextPlugins;
-  writeText(PERSONAL_MARKETPLACE_FILE, `${JSON.stringify(parsed, null, 2)}\n`);
+  writeTextAtomic(PERSONAL_MARKETPLACE_FILE, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
 function normalizeTrailingNewline(text) {
@@ -147,16 +154,83 @@ function removeManagedPluginConfigSections() {
   }
 
   if (changed) {
-    writeText(CODEX_CONFIG_FILE, normalizeTrailingNewline(kept.join("\n").replace(/\n{3,}/g, "\n\n")));
+    writeTextAtomic(
+      CODEX_CONFIG_FILE,
+      normalizeTrailingNewline(kept.join("\n").replace(/\n{3,}/g, "\n\n"))
+    );
   }
 }
 
-function cleanupLegacyLocalInstall() {
-  cleanupManagedGlobalIntegrations(LEGACY_INSTALL_DIR);
-  cleanupManagedGlobalIntegrations(PACKAGE_ROOT);
-  removeManagedSkillWrappers();
+function prepareLegacyLocalCleanup({
+  allowInvalidHooksWithoutLegacyInstall = false,
+  allowSkipLegacyCleanup = false,
+} = {}) {
+  if (
+    allowSkipLegacyCleanup &&
+    process.env.CC_PLUGIN_CODEX_SKIP_LEGACY_CLEANUP === "1"
+  ) {
+    process.stderr.write(
+      "[cc] skipping legacy cleanup by explicit CC_PLUGIN_CODEX_SKIP_LEGACY_CLEANUP=1\n"
+    );
+    return null;
+  }
+
+  readPersonalMarketplace();
+  const cacheEntries = listManagedPluginCacheEntries(CODEX_HOME);
+  if (!validateManagedHooks(CODEX_HOME)) {
+    if (
+      allowInvalidHooksWithoutLegacyInstall &&
+      !fs.existsSync(LEGACY_INSTALL_DIR) &&
+      cacheEntries.length === 0
+    ) {
+      process.stderr.write(
+        `[cc] ${path.join(CODEX_HOME, "hooks.json")} is invalid; installing without legacy managed-hook cleanup\n`
+      );
+      return [];
+    }
+    throw new Error(
+      `Cannot safely remove managed integrations while ${path.join(CODEX_HOME, "hooks.json")} is invalid.` +
+      (allowSkipLegacyCleanup
+        ? " Repair it or retry with CC_PLUGIN_CODEX_SKIP_LEGACY_CLEANUP=1."
+        : "")
+    );
+  }
+  return [...new Set([
+    LEGACY_INSTALL_DIR,
+    PACKAGE_ROOT,
+    ...cacheEntries.map((entry) => entry.cachePath),
+  ])];
+}
+
+function cleanupLegacyLocalInstall(pluginRoots) {
+  if (pluginRoots === null) {
+    return;
+  }
+  for (const pluginRoot of pluginRoots) {
+    if (!cleanupManagedGlobalIntegrations(pluginRoot, CODEX_HOME)) {
+      throw new Error(
+        `Managed integration cleanup was refused for ${path.join(CODEX_HOME, "hooks.json")}.`
+      );
+    }
+  }
   removePersonalMarketplaceCcEntries();
   fs.rmSync(LEGACY_INSTALL_DIR, { recursive: true, force: true });
+}
+
+function isPluginAlreadyAbsent(error) {
+  const message = String(error?.rpcMessage ?? "").trim();
+  const pluginId = String.raw`["']?cc@[\w.-]+["']?`;
+  return new RegExp(
+    String.raw`^(?:(?:unknown|no such)\s+plugin\s*:?\s*${pluginId}|plugin\s+${pluginId}\s+(?:is\s+)?(?:not\s+(?:currently\s+)?installed|not\s+found|does\s+not\s+exist)|plugin\s+(?:not\s+found|does\s+not\s+exist)\s*:?\s*${pluginId})\.?$`,
+    "i"
+  ).test(message);
+}
+
+function isPluginUninstallRefused(error) {
+  const message = String(error?.rpcMessage ?? "");
+  return /\b(?:(?:permission|access)\s+denied|unauthorized|forbidden|not\s+authorized)\b/i.test(
+    message
+  );
 }
 
 async function addMarketplaceThroughCodex({ source, refName, sparsePaths }) {
@@ -200,8 +274,11 @@ async function uninstallPluginThroughCodex(marketplaceName) {
 
 async function installOrUpdate() {
   const marketplaceConfig = resolveInstallerMarketplaceConfig();
+  const legacyPluginRoots = prepareLegacyLocalCleanup({
+    allowInvalidHooksWithoutLegacyInstall: true,
+    allowSkipLegacyCleanup: true,
+  });
   const hooksChanged = configureNativePluginHooks();
-  cleanupLegacyLocalInstall();
 
   const marketplace = await addMarketplaceThroughCodex(marketplaceConfig);
   const marketplacePath = path.join(
@@ -211,6 +288,7 @@ async function installOrUpdate() {
     "marketplace.json"
   );
   await installPluginThroughCodex(marketplacePath);
+  cleanupLegacyLocalInstall(legacyPluginRoots);
 
   console.log(`Installed ${PLUGIN_NAME} from ${marketplaceConfig.source} into the Codex plugin cache.`);
   if (hooksChanged) {
@@ -221,19 +299,51 @@ async function installOrUpdate() {
 
 async function uninstall() {
   const marketplaceConfig = resolveInstallerMarketplaceConfig();
-  cleanupLegacyLocalInstall();
+  const legacyPluginRoots = prepareLegacyLocalCleanup({
+    allowSkipLegacyCleanup: true,
+  });
+  const ignoreUninstallRpc =
+    process.env.CC_PLUGIN_CODEX_IGNORE_UNINSTALL_RPC === "1";
+  const signals = getManagedPluginSignals(CODEX_HOME);
+  const observedMarketplaces = new Set([
+    ...signals.sections.map((section) => section.marketplaceName),
+    ...signals.cacheEntries.map((entry) => entry.marketplaceName),
+  ]);
+  const marketplaceNames = observedMarketplaces.size > 0
+    ? observedMarketplaces
+    : new Set([
+        marketplaceConfig.marketplaceName,
+        DEFAULT_MARKETPLACE_NAME,
+        LEGACY_MARKETPLACE_NAME,
+      ]);
 
-  for (const marketplaceName of [
-    marketplaceConfig.marketplaceName,
-    DEFAULT_MARKETPLACE_NAME,
-    LEGACY_MARKETPLACE_NAME,
-  ]) {
+  for (const marketplaceName of marketplaceNames) {
     try {
       await uninstallPluginThroughCodex(marketplaceName);
-    } catch {
-      // Continue local cleanup across historical install modes.
+    } catch (error) {
+      if (isPluginAlreadyAbsent(error)) {
+        continue;
+      }
+      if (isPluginUninstallRefused(error) && !ignoreUninstallRpc) {
+        throw new Error(
+          `${error.message}\n` +
+          "Retry with CC_PLUGIN_CODEX_IGNORE_UNINSTALL_RPC=1 only if local cleanup is intended."
+        );
+      }
+      if (error?.rpcCode == null || error.rpcCode === -32601) {
+        process.stderr.write(
+          `[cc] Codex plugin/uninstall is unavailable; continuing with validated local cleanup: ${error.message}\n`
+        );
+        continue;
+      }
+      process.stderr.write(
+        `[cc] plugin/uninstall failed for ${pluginIdForMarketplace(marketplaceName)}; ` +
+        `continuing with validated local cleanup: ${error.message}\n`
+      );
     }
   }
+
+  cleanupLegacyLocalInstall(legacyPluginRoots);
   removeManagedPluginConfigSections();
 
   for (const cacheEntry of listManagedPluginCacheEntries(CODEX_HOME)) {
@@ -247,6 +357,14 @@ async function uninstall() {
       removeIfEmpty(path.join(cacheDir, marketplaceName));
     }
     removeIfEmpty(cacheDir);
+  }
+  try {
+    fs.rmSync(
+      path.join(CODEX_HOME, "plugins", "data", "cc", "managed-cleanup-refused"),
+      { recursive: true, force: true }
+    );
+  } catch {
+    // Removing a warning marker must not turn a completed uninstall into a failure.
   }
 
   console.log(`Uninstalled ${PLUGIN_NAME} from Codex plugin cache and removed legacy local installs.`);

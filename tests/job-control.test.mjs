@@ -15,6 +15,7 @@ import {
   enrichJob,
   readJobProgressPreview,
   buildStatusSnapshot,
+  buildSingleJobSnapshot,
   resolveResultJob,
   DEFAULT_MAX_STATUS_JOBS,
   DEFAULT_MAX_PROGRESS_LINES,
@@ -37,6 +38,22 @@ function createTempGitRepo() {
   });
   assert.equal(init.status, 0, init.stderr);
   return repoDir;
+}
+
+function withTempJobRepo(run) {
+  const repoDir = createTempGitRepo();
+  try {
+    return run(repoDir);
+  } finally {
+    clearCurrentSession(repoDir);
+    fs.rmSync(resolveJobsDir(repoDir), { recursive: true, force: true });
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+}
+
+function writeJobAt(repoDir, payload) {
+  const jobFile = writeJobFile(repoDir, payload.id, payload);
+  fs.writeFileSync(jobFile, JSON.stringify(payload), "utf8");
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +177,47 @@ describe("buildStatusSnapshot", () => {
       clearCurrentSession(repoDir);
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
+  });
+
+  it("separates running/latest/recent jobs and honors display limits", () => {
+    withTempJobRepo((repoDir) => {
+      const jobs = [
+        { id: "run", status: "running", updatedAt: "2026-04-03T12:00:00Z" },
+        { id: "latest", status: "completed", updatedAt: "2026-04-03T11:00:00Z" },
+        { id: "older", status: "failed", updatedAt: "2026-04-03T10:00:00Z" },
+        { id: "oldest", status: "cancelled", updatedAt: "2026-04-03T09:00:00Z" },
+      ];
+      for (const job of jobs) {
+        writeJobAt(repoDir, {
+          ...job,
+          jobClass: "task",
+          sessionId: "session-a",
+          workspaceRoot: repoDir,
+          createdAt: job.updatedAt,
+        });
+      }
+      setCurrentSession(repoDir, "session-a");
+      fs.writeFileSync(
+        resolveJobLogFile(repoDir, "run"),
+        "[t1] first\n[t2] second\n[t3] third\n",
+        "utf8"
+      );
+
+      const limited = buildStatusSnapshot(repoDir, {
+        maxJobs: 2,
+        maxProgressLines: 1,
+      });
+      assert.deepEqual(limited.running.map((job) => job.id), ["run"]);
+      assert.deepEqual(limited.running[0].progressPreview, ["third"]);
+      assert.equal(limited.latestFinished.id, "latest");
+      assert.deepEqual(limited.recent.map((job) => job.id), ["older"]);
+
+      const defaults = buildStatusSnapshot(repoDir);
+      assert.deepEqual(defaults.recent.map((job) => job.id), ["older", "oldest"]);
+
+      const all = buildStatusSnapshot(repoDir, { all: true, maxJobs: 1 });
+      assert.deepEqual(all.recent.map((job) => job.id), ["older", "oldest"]);
+    });
   });
 });
 
@@ -334,6 +392,51 @@ describe("enrichJob", () => {
   });
 });
 
+describe("buildSingleJobSnapshot", () => {
+  it("resolves newest, exact, and unique-prefix references", () => {
+    withTempJobRepo((repoDir) => {
+      for (const [id, updatedAt] of [
+        ["review-alpha", "2026-04-03T10:00:00Z"],
+        ["review-beta", "2026-04-03T11:00:00Z"],
+      ]) {
+        writeJobAt(repoDir, {
+          id,
+          status: "completed",
+          jobClass: "review",
+          createdAt: updatedAt,
+          updatedAt,
+        });
+      }
+
+      assert.equal(buildSingleJobSnapshot(repoDir).job.id, "review-beta");
+      assert.equal(buildSingleJobSnapshot(repoDir, "review-alpha").job.id, "review-alpha");
+      assert.equal(buildSingleJobSnapshot(repoDir, "review-a").job.id, "review-alpha");
+    });
+  });
+
+  it("rejects ambiguous and missing references with actionable errors", () => {
+    withTempJobRepo((repoDir) => {
+      for (const id of ["review-alpha", "review-beta"]) {
+        writeJobAt(repoDir, {
+          id,
+          status: "completed",
+          createdAt: "2026-04-03T10:00:00Z",
+          updatedAt: "2026-04-03T10:00:00Z",
+        });
+      }
+
+      assert.throws(
+        () => buildSingleJobSnapshot(repoDir, "review-"),
+        /Job reference "review-" is ambiguous\. Use a longer job id\./
+      );
+      assert.throws(
+        () => buildSingleJobSnapshot(repoDir, "missing"),
+        /No job found for "missing"\. Run status to list known jobs\./
+      );
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // resolveResultJob
 // ---------------------------------------------------------------------------
@@ -381,5 +484,76 @@ describe("resolveResultJob", () => {
     assert.equal(resolved.state, "active");
     assert.equal(resolved.job.id, jobIds[1]);
     assert.equal(resolved.job.status, "queued");
+  });
+
+  it("returns terminal state for an explicit completed job", () => {
+    withTempJobRepo((repoDir) => {
+      writeJobAt(repoDir, {
+        id: "finished",
+        status: "completed",
+        jobClass: "review",
+        createdAt: "2026-04-03T09:00:00Z",
+        updatedAt: "2026-04-03T09:01:00Z",
+      });
+
+      const resolved = resolveResultJob(repoDir, "finished");
+      assert.equal(resolved.state, "terminal");
+      assert.equal(resolved.job.id, "finished");
+    });
+  });
+
+  it("selects the latest finished job from the current session", () => {
+    withTempJobRepo((repoDir) => {
+      for (const job of [
+        {
+          id: "mine",
+          status: "failed",
+          sessionId: "session-a",
+          updatedAt: "2026-04-03T10:00:00Z",
+        },
+        {
+          id: "other",
+          status: "completed",
+          sessionId: "session-b",
+          updatedAt: "2026-04-03T12:00:00Z",
+        },
+        {
+          id: "active",
+          status: "running",
+          sessionId: "session-a",
+          updatedAt: "2026-04-03T11:00:00Z",
+        },
+      ]) {
+        writeJobAt(repoDir, {
+          ...job,
+          createdAt: job.updatedAt,
+        });
+      }
+      setCurrentSession(repoDir, "session-a");
+
+      const resolved = resolveResultJob(repoDir);
+      assert.equal(resolved.state, "terminal");
+      assert.equal(resolved.job.id, "mine");
+    });
+  });
+
+  it("rejects unsupported states and an empty finished-job history", () => {
+    withTempJobRepo((repoDir) => {
+      writeJobAt(repoDir, {
+        id: "paused",
+        status: "paused",
+        createdAt: "2026-04-03T09:00:00Z",
+        updatedAt: "2026-04-03T09:00:00Z",
+      });
+
+      assert.throws(
+        () => resolveResultJob(repoDir, "paused"),
+        /Job paused is paused\. Check status for more details\./
+      );
+      assert.throws(
+        () => resolveResultJob(repoDir),
+        /No finished Claude Code jobs found for this repository yet\./
+      );
+    });
   });
 });

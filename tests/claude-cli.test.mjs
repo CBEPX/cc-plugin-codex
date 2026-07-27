@@ -430,7 +430,7 @@ describe("StreamParser", () => {
       },
     ];
     const events = parser.feed(
-      subagentEvents.map(JSON.stringify).join("\n") + "\n"
+      subagentEvents.map((event) => JSON.stringify(event)).join("\n") + "\n"
     );
 
     assert.equal(events.length, 7);
@@ -527,7 +527,7 @@ describe("StreamParser", () => {
       },
     ];
     const events = parser.feed(
-      subagentEvents.map(JSON.stringify).join("\n") + "\n"
+      subagentEvents.map((event) => JSON.stringify(event)).join("\n") + "\n"
     );
 
     assert.equal(events.length, 0);
@@ -1192,6 +1192,41 @@ describe("classifyClaudeFailure", () => {
       classifyClaudeFailure({ stderr: "rate_limit exceeded" })?.kind,
       "claude_rate_limit"
     );
+  });
+
+  it("accepts the supported spacing and separator variants", () => {
+    const finalMessages = [
+      "youve   hit  your   weekly limit",
+      "you have hit your limit",
+      "session   limit after a cooldown resets tomorrow",
+      "usage  limit  reached",
+    ];
+    for (const finalMessage of finalMessages) {
+      assert.equal(
+        classifyClaudeFailure({
+          finalMessage,
+          finalMessageHasLimitSignal: true,
+        })?.kind,
+        "claude_rate_limit",
+        finalMessage
+      );
+    }
+
+    for (const stderr of ["ratelimit exceeded", "rate limit exceeded", "rate-limit exceeded"]) {
+      assert.equal(classifyClaudeFailure({ stderr })?.kind, "claude_rate_limit", stderr);
+    }
+  });
+
+  it("uses source order across textual and canonical reset markers", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage:
+        "You've hit your session limit · resets 4:50pm (Europe/Moscow). " +
+        "Claude AI usage limit reached|1751558400",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.equal(failure.resetText, "2025-07-03T16:00:00.000Z");
   });
 
   it("ignores loose rate-limit markers from final model output", () => {

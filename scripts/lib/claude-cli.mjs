@@ -228,7 +228,7 @@ function extractClaudeLimitResetText(text) {
 const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b.{0,120}\bresets(?:\s+at)?\b|\b(?:session|usage)\s+limit\s+reached\b/i;
 const CLAUDE_ERROR_LIMIT_RE =
-  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i;
+  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|\b429\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
@@ -236,7 +236,7 @@ const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
 const CLAUDE_LIMIT_RESET_TEXT_RE =
   /(?:(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+[^\r\n.]*?limit|\b(?:session|usage)\s+limit(?:\s+reached)?\b)[^\r\n.]*?\bresets(?:\s+at)?\s+([^\r\n.]+)/gi;
 const CLAUDE_ERROR_RESET_TEXT_RE =
-  /(?:rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b)[^\r\n.]{0,120}?\bresets\s+at\s+([^\r\n.]+)/gi;
+  /(?:rate[_ -]?limit|\b429\b)[^\r\n.]{0,120}?\bresets\s+at\s+([^\r\n.]+)/gi;
 
 function formatClaudeLimitEpoch(rawEpoch) {
   const epoch = String(rawEpoch ?? "");

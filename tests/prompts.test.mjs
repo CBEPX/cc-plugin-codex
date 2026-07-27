@@ -110,7 +110,9 @@ describe("loadPromptTemplate", () => {
   it("throws for non-existent prompt", () => {
     assert.throws(
       () => loadPromptTemplate(tmpRoot, "nonexistent"),
-      (err) => err.code === "ENOENT"
+      (err) =>
+        err instanceof Error &&
+        /** @type {NodeJS.ErrnoException} */ (err).code === "ENOENT"
     );
   });
 

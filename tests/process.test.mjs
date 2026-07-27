@@ -60,6 +60,7 @@ describe("runCommand", () => {
   });
 
   it("does not route commands through a shell", () => {
+    /** @type {{ shell?: boolean } | null} */
     let capturedOptions = null;
     const result = runCommand("echo", ["hello"], {
       spawnSyncImpl: (_command, _args, options) => {
@@ -79,6 +80,7 @@ describe("runCommand", () => {
   });
 
   it("passes maxBuffer through to spawnSync", () => {
+    /** @type {{ maxBuffer?: number } | null} */
     let capturedOptions = null;
     const result = runCommand("echo", ["hello"], {
       maxBuffer: 1234,
@@ -120,7 +122,9 @@ describe("runCommandChecked", () => {
   it("throws the actual Error for ENOENT", () => {
     assert.throws(
       () => runCommandChecked("no-such-binary-xyz"),
-      (err) => err.code === "ENOENT"
+      (err) =>
+        err instanceof Error &&
+        /** @type {NodeJS.ErrnoException} */ (err).code === "ENOENT"
     );
   });
 });
@@ -234,7 +238,7 @@ describe("terminateProcessTree", () => {
         platform: "linux",
         killImpl: (pid, sig) => {
           if (pid < 0) {
-            const err = new Error("EPERM");
+            const err = /** @type {NodeJS.ErrnoException} */ (new Error("EPERM"));
             err.code = "EPERM";
             throw err;
           }
@@ -250,7 +254,7 @@ describe("terminateProcessTree", () => {
       const result = terminateProcessTree(12345, {
         platform: "linux",
         killImpl: () => {
-          const err = new Error("ESRCH");
+          const err = /** @type {NodeJS.ErrnoException} */ (new Error("ESRCH"));
           err.code = "ESRCH";
           throw err;
         },

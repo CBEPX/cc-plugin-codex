@@ -48,6 +48,34 @@ if (process.env.CLAUDE_ARGS_FILE) {
   if (process.env.CLAUDE_SILENT_FAIL === "1") {
     process.exit(7);
   }
+  if (process.env.CLAUDE_UNAUTHENTICATED === "1") {
+    process.stderr.write("Not logged in. Run claude auth login.\\n");
+    process.exit(1);
+  }
+  if (process.env.CLAUDE_EMPTY_RESULT === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      result: ""
+    }) + "\\n");
+    process.exit(0);
+  }
+  if (process.env.CLAUDE_BLOCK_RESULT === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      result: "BLOCK: fix the failing regression"
+    }) + "\\n");
+    process.exit(0);
+  }
+  if (process.env.CLAUDE_PREFIXED_BLOCK_RESULT === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      result: "Review complete.\\nBLOCK: fix the failing regression"
+    }) + "\\n");
+    process.exit(0);
+  }
   if (process.env.CLAUDE_PREFIXED_ALLOW_RESULT === "1") {
     process.stdout.write(JSON.stringify({
       type: "stream_event",
@@ -96,7 +124,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
 }
 
 if (args[0] === "--version") {
-  process.stdout.write("2.1.90 (Claude Code)\\n");
+  process.stdout.write("2.1.220 (Claude Code)\\n");
   process.exit(0);
 }
 
@@ -157,12 +185,14 @@ function createHookEnvironment(options = {}) {
 
   return {
     rootDir,
+    binDir,
     homeDir,
     workspaceDir,
     env: {
       ...process.env,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      CODEX_HOME: path.join(homeDir, ".codex"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
@@ -202,6 +232,16 @@ function runHook(scriptPath, args, input, env) {
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result;
+}
+
+function enableReviewGate(testEnv) {
+  const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, "config.json"),
+    `${JSON.stringify({ version: 1, stopReviewGate: true }, null, 2)}\n`,
+    "utf8"
+  );
 }
 
 function readCurrentSessionMarker(testEnv) {
@@ -702,6 +742,112 @@ describe("hooks", () => {
     }
   });
 
+  it("stop-review hook blocks BLOCK contracts with or without prefix chatter", async (t) => {
+    for (const [name, envName] of [
+      ["direct", "CLAUDE_BLOCK_RESULT"],
+      ["prefixed", "CLAUDE_PREFIXED_BLOCK_RESULT"],
+    ]) {
+      await t.test(name, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          enableReviewGate(testEnv);
+          const result = runHook(
+            STOP_HOOK,
+            [],
+            {
+              cwd: testEnv.workspaceDir,
+              session_id: "hook-session",
+              last_assistant_message: "review me",
+            },
+            {
+              ...testEnv.env,
+              [envName]: "1",
+            }
+          );
+
+          const payload = JSON.parse(result.stdout);
+          assert.equal(payload.decision, "block");
+          assert.match(payload.reason, /fix the failing regression/);
+          const snapshot = readStopReviewSnapshot(testEnv);
+          assert.equal(snapshot.firstLine, "BLOCK: fix the failing regression");
+          assert.equal(snapshot.status, "blocked");
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
+    }
+  });
+
+  it("stop-review hook blocks empty and unauthenticated Claude results", async (t) => {
+    for (const scenario of [
+      {
+        name: "empty result",
+        envName: "CLAUDE_EMPTY_RESULT",
+        reason: /returned no output/i,
+      },
+      {
+        name: "unauthenticated",
+        envName: "CLAUDE_UNAUTHENTICATED",
+        reason: /Not logged in|review failed/i,
+      },
+    ]) {
+      await t.test(scenario.name, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          enableReviewGate(testEnv);
+          const result = runHook(
+            STOP_HOOK,
+            [],
+            {
+              cwd: testEnv.workspaceDir,
+              session_id: "hook-session",
+              last_assistant_message: "review me",
+            },
+            {
+              ...testEnv.env,
+              [scenario.envName]: "1",
+            }
+          );
+
+          const payload = JSON.parse(result.stdout);
+          assert.equal(payload.decision, "block");
+          assert.match(payload.reason, scenario.reason);
+          assert.equal(readStopReviewSnapshot(testEnv).status, "blocked");
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
+    }
+  });
+
+  it("stop-review hook records a setup-required skip when Claude is missing", () => {
+    const testEnv = createHookEnvironment({ createClaude: false });
+    try {
+      enableReviewGate(testEnv);
+      const result = runHook(
+        STOP_HOOK,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+          last_assistant_message: "review me",
+        },
+        {
+          ...testEnv.env,
+          PATH: `${testEnv.binDir}${path.delimiter}/usr/bin:/bin`,
+        }
+      );
+
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /claude CLI not found in PATH/i);
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "skipped_claude_not_ready");
+      assert.equal(snapshot.claudeInvoked, false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
   it("stop-review hook accepts an ALLOW contract after streamed prefix chatter", () => {
     const testEnv = createHookEnvironment();
 
@@ -837,6 +983,31 @@ describe("hooks", () => {
 
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /Hook input exceeds/i);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("hook input parser accepts empty input and rejects malformed JSON", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const empty = spawnSync(process.execPath, [UNREAD_HOOK], {
+        cwd: PROJECT_ROOT,
+        env: testEnv.env,
+        input: "",
+        encoding: "utf8",
+      });
+      assert.equal(empty.status, 0, empty.stderr);
+      assert.equal(empty.stdout, "");
+
+      const malformed = spawnSync(process.execPath, [UNREAD_HOOK], {
+        cwd: PROJECT_ROOT,
+        env: testEnv.env,
+        input: "{invalid\n",
+        encoding: "utf8",
+      });
+      assert.notEqual(malformed.status, 0);
+      assert.match(malformed.stderr, /Invalid hook input JSON/i);
     } finally {
       cleanupHookEnvironment(testEnv);
     }

@@ -1,0 +1,53 @@
+name: Mutation
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 0"
+
+jobs:
+  pull-request:
+    if: github.event_name == 'pull_request'
+    name: Pull-request mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:mutation:pr:force
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutation-pull-request
+          path: reports/mutation/
+          if-no-files-found: error
+          retention-days: 14
+
+  full:
+    if: github.event_name != 'pull_request'
+    name: Full mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:mutation:full:force
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutation-full
+          path: reports/mutation/
+          if-no-files-found: error
+          retention-days: 14

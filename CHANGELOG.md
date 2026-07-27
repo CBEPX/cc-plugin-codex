@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## v1.5.2
+
+### Added
+
+- Isolate every test process behind a temporary `CODEX_HOME` preload and add a sentinel regression test proving production state helpers cannot write into the user's real Codex state.
+- Add enforced C8 coverage gates with a 89/89/79/96 ratchet, test-source type checking, full macOS/Linux and Node.js 18 unit coverage, a curated Windows-safe suite, and retained CI reports.
+- Gate pull requests with Stryker's parser contracts at an 80% break threshold plus managed-cleanup and installer shards at 55%; run all seven shards on the weekly/manual job and fail if line-range scopes drift away from their named functions.
+
+### Changed
+
+- Replace broad prose snapshots with focused executable skill-contract checks while retaining workspace, foreground execution, empty-placeholder, model-inheritance, notification, routing, raw-CLI fallback, and background-launch invariants.
+- Expand regression coverage for current Claude Code behavior, Opus aliases, hook block/error paths, installer RPC failures, job selection, managed cleanup, and the existing normalized `contextWindow` JSON contract.
+
+### Fixed
+
+- Refuse managed global cleanup when `hooks.json` is malformed or has an invalid shape, preserving hook and wrapper data instead of partially deleting it.
+- Preserve unrelated hook document keys and entries while removing only plugin-managed hooks and wrappers after confirmed official uninstall signals.
+- Validate marketplace and hook documents before mutation, tolerate unavailable or unrecognized Codex `plugin/uninstall` failures, and keep explicit RPC permission/auth refusals fail-closed unless the recovery override is set.
+- Derive uninstall targets from observed config/cache state, attempt every installed marketplace even when an earlier uninstall RPC is unavailable, and continue validated local cleanup when stale Codex state or future RPC wording would otherwise make uninstall permanently unrepeatable.
+- Match only anchored plugin-absence RPC messages so unexpected errors containing words such as `unknown` or `not found` are handled by the explicit recovery policy instead of being misclassified as confirmed absence.
+- Keep install/update/uninstall recoverable when foreign hook data is malformed, with an explicit escape hatch that preserves risky legacy hook files while still removing official plugin config and cache state.
+- Rewrite retained global `hooks.json`, shared `config.toml`, and personal `marketplace.json` documents through synced same-directory temporary files and atomic renames when inode identity can change; follow existing symlinks, preserve file modes, and recover hard-linked in-place rewrites from synced backups.
+- Defer destructive legacy-install cleanup until the replacement Codex marketplace/plugin install succeeds, so an unavailable remote update leaves the working legacy install intact.
+- Stop obsolete hooks after confirmed official uninstall even when malformed hook data blocks cleanup, with a resettable one-time repair warning.
+- Keep refusal-marker cleanup best-effort so permissions or Windows file locking cannot fail healthy native hook invocations or an otherwise completed uninstall.
+- Preserve foreign hook shapes and empty entries, and make the shipped legacy hook installer fail before changing config when cleanup is unsafe.
+- Match managed hook paths case-insensitively on Windows, exercise cleanup and line-range guards in Windows CI, and validate complete function spans for mutation scopes.
+
 ## v1.5.1
 
 ### Fixed

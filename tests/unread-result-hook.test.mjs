@@ -89,6 +89,7 @@ function runHook(testEnv, payload) {
       ...process.env,
       HOME: testEnv.homeDir,
       USERPROFILE: testEnv.homeDir,
+      CODEX_HOME: path.join(testEnv.homeDir, ".codex"),
     },
     input: JSON.stringify(payload),
     encoding: "utf8",
@@ -440,6 +441,7 @@ test("skips unread-result announcements when nested-session hook suppression is 
         ...process.env,
         HOME: testEnv.homeDir,
         USERPROFILE: testEnv.homeDir,
+        CODEX_HOME: path.join(testEnv.homeDir, ".codex"),
         CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS: "1",
       },
       input: JSON.stringify({
