@@ -1266,13 +1266,13 @@ describe("runClaudeTurn", () => {
       if (process.platform === "win32") {
         fs.writeFileSync(
           path.join(tmpDir, "claude.cmd"),
-          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs" %*\r\n`
+          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs"\r\n`
         );
       } else {
         const launcher = path.join(tmpDir, "claude");
         fs.writeFileSync(
           launcher,
-          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs" "$@"\n`
+          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs"\n`
         );
         fs.chmodSync(launcher, 0o755);
       }
@@ -1306,13 +1306,13 @@ describe("runClaudeTurn", () => {
       if (process.platform === "win32") {
         fs.writeFileSync(
           path.join(tmpDir, "claude.cmd"),
-          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs" %*\r\n`
+          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs"\r\n`
         );
       } else {
         const launcher = path.join(tmpDir, "claude");
         fs.writeFileSync(
           launcher,
-          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs" "$@"\n`
+          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs"\n`
         );
         fs.chmodSync(launcher, 0o755);
       }
