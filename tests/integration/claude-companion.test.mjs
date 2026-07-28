@@ -228,6 +228,7 @@ function createTestEnvironment() {
       ...process.env,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      CODEX_HOME: path.join(homeDir, ".codex"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };

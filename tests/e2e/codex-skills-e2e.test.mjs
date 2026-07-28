@@ -31,6 +31,14 @@ function codexAvailable() {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+  if (
+    result.status !== 0 &&
+    process.env.CC_PLUGIN_ALLOW_E2E_SKIP !== "1"
+  ) {
+    throw new Error(
+      "codex CLI is required for E2E tests; set CC_PLUGIN_ALLOW_E2E_SKIP=1 for an explicit local opt-out"
+    );
+  }
   return result.status === 0;
 }
 
@@ -735,7 +743,11 @@ function startDirectSkillProvider({
     requests,
     listen() {
       return new Promise((resolve) => {
-        server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          assert.ok(address && typeof address !== "string");
+          resolve(address.port);
+        });
       });
     },
     close() {
@@ -1085,7 +1097,9 @@ function startMockProvider({
     listen() {
       return new Promise((resolve) => {
         server.listen(0, "127.0.0.1", () => {
-          resolve(server.address().port);
+          const address = server.address();
+          assert.ok(address && typeof address !== "string");
+          resolve(address.port);
         });
       });
     },

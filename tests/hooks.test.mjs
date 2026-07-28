@@ -4,14 +4,15 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SANDBOX_STOP_REVIEW_TOOLS } from "../scripts/lib/claude-cli.mjs";
+import { getProcessIdentity } from "../scripts/lib/process.mjs";
 import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
 const PROJECT_ROOT = path.resolve(
@@ -22,6 +23,7 @@ const SESSION_HOOK = path.join(
   "hooks",
   "session-lifecycle-hook.mjs"
 );
+const HOOKS_MANIFEST = path.join(PROJECT_ROOT, "hooks", "hooks.json");
 const STOP_HOOK = path.join(
   PROJECT_ROOT,
   "hooks",
@@ -47,6 +49,34 @@ if (process.env.CLAUDE_ARGS_FILE) {
   if (args[0] === "-p") {
   if (process.env.CLAUDE_SILENT_FAIL === "1") {
     process.exit(7);
+  }
+  if (process.env.CLAUDE_UNAUTHENTICATED === "1") {
+    process.stderr.write("Not logged in. Run claude auth login.\\n");
+    process.exit(1);
+  }
+  if (process.env.CLAUDE_EMPTY_RESULT === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      result: ""
+    }) + "\\n");
+    process.exit(0);
+  }
+  if (process.env.CLAUDE_BLOCK_RESULT === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      result: "BLOCK: fix the failing regression"
+    }) + "\\n");
+    process.exit(0);
+  }
+  if (process.env.CLAUDE_PREFIXED_BLOCK_RESULT === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      result: "Review complete.\\nBLOCK: fix the failing regression"
+    }) + "\\n");
+    process.exit(0);
   }
   if (process.env.CLAUDE_PREFIXED_ALLOW_RESULT === "1") {
     process.stdout.write(JSON.stringify({
@@ -96,7 +126,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
 }
 
 if (args[0] === "--version") {
-  process.stdout.write("2.1.90 (Claude Code)\\n");
+  process.stdout.write("2.1.220 (Claude Code)\\n");
   process.exit(0);
 }
 
@@ -157,12 +187,14 @@ function createHookEnvironment(options = {}) {
 
   return {
     rootDir,
+    binDir,
     homeDir,
     workspaceDir,
     env: {
       ...process.env,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      CODEX_HOME: path.join(homeDir, ".codex"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
@@ -202,6 +234,16 @@ function runHook(scriptPath, args, input, env) {
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result;
+}
+
+function enableReviewGate(testEnv) {
+  const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, "config.json"),
+    `${JSON.stringify({ version: 1, stopReviewGate: true }, null, 2)}\n`,
+    "utf8"
+  );
 }
 
 function readCurrentSessionMarker(testEnv) {
@@ -425,6 +467,14 @@ describe("hooks", () => {
     }
   });
 
+  it("bounds SessionEnd outside the internal cleanup deadline", () => {
+    const manifest = JSON.parse(fs.readFileSync(HOOKS_MANIFEST, "utf8"));
+    const handler = manifest.hooks.SessionEnd[0].hooks[0];
+
+    assert.equal(handler.timeout, 45);
+    assert.match(handler.command, /session-lifecycle-hook\.mjs.*SessionEnd/u);
+  });
+
   it("session lifecycle hook refuses to kill a stored PID without a matching identity", () => {
     const testEnv = createHookEnvironment();
 
@@ -455,6 +505,177 @@ describe("hooks", () => {
       assert.equal(job.pid, process.pid);
       assert.match(job.errorMessage ?? "", /without a matching PID identity/i);
     } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session lifecycle hook preserves recovery handles after its cleanup budget", () => {
+    const testEnv = createHookEnvironment();
+    const createdAt = new Date().toISOString();
+
+    try {
+      for (const jobId of ["budget-job-one", "budget-job-two"]) {
+        writeStateJob(testEnv, jobId, {
+          id: jobId,
+          status: "running",
+          sessionId: "hook-session",
+          workspaceRoot: testEnv.workspaceDir,
+          createdAt,
+          startedAt: createdAt,
+          pid: process.pid,
+          pidIdentity: `${jobId}-identity`,
+        });
+      }
+      writeStateJob(testEnv, "budget-job-without-pid", {
+        id: "budget-job-without-pid",
+        status: "queued",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt,
+      });
+
+      const clockPreload = path.join(testEnv.rootDir, "cleanup-clock.mjs");
+      fs.writeFileSync(
+        clockPreload,
+        `const realNow = Date.now.bind(Date);
+let cleanupReads = 0;
+Date.now = () => {
+  const caller = new Error().stack?.split("\\n")[2] ?? "";
+  if (caller.includes("cleanupSessionJobs")) {
+    cleanupReads += 1;
+    return cleanupReads === 1 ? 1_000_000 : 1_020_000;
+  }
+  return realNow();
+};
+`,
+        "utf8"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+        },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [
+            process.env.NODE_OPTIONS,
+            `--import=${pathToFileURL(clockPreload).href}`,
+          ]
+            .filter(Boolean)
+            .join(" "),
+        }
+      );
+
+      for (const jobId of ["budget-job-one", "budget-job-two"]) {
+        const job = readStateJob(testEnv, jobId);
+        assert.equal(job.status, "cancel_failed");
+        assert.equal(job.phase, "cancel_failed");
+        assert.equal(job.pid, process.pid);
+        assert.equal(job.pidIdentity, `${jobId}-identity`);
+        assert.match(job.errorMessage ?? "", /cleanup budget was exhausted/i);
+      }
+      assert.equal(
+        readStateJob(testEnv, "budget-job-without-pid").status,
+        "cancelled"
+      );
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session lifecycle hook marks an already-exited stored process cancelled", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      writeStateJob(testEnv, "exited-running-job", {
+        id: "exited-running-job",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        startedAt: "2026-04-04T01:00:01Z",
+        pid: 99_999_999,
+        pidIdentity: "exited-process-identity",
+      });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+        },
+        testEnv.env
+      );
+
+      const job = readStateJob(testEnv, "exited-running-job");
+      assert.equal(job.status, "cancelled");
+      assert.equal(job.phase, "cancelled");
+      assert.equal(job.pid, null);
+      assert.equal(job.pidIdentity, null);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session lifecycle hook preserves a live PID when POSIX identity lookup fails", async () => {
+    if (process.platform !== "darwin") {
+      return;
+    }
+
+    const testEnv = createHookEnvironment();
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" }
+    );
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+
+    try {
+      const identity = getProcessIdentity(child.pid);
+      const failingBin = path.join(testEnv.rootDir, "failing-ps");
+      fs.mkdirSync(failingBin);
+      const fakePs = path.join(failingBin, "ps");
+      fs.writeFileSync(fakePs, "#!/bin/sh\nexit 2\n", "utf8");
+      fs.chmodSync(fakePs, 0o755);
+      writeStateJob(testEnv, "identity-unavailable-job", {
+        id: "identity-unavailable-job",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        startedAt: "2026-04-04T01:00:01Z",
+        pid: child.pid,
+        pidIdentity: identity,
+      });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+        },
+        {
+          ...testEnv.env,
+          PATH: `${failingBin}${path.delimiter}${testEnv.env.PATH}`,
+        }
+      );
+
+      const job = readStateJob(testEnv, "identity-unavailable-job");
+      assert.equal(job.status, "cancel_failed");
+      assert.equal(job.phase, "cancel_failed");
+      assert.equal(job.pid, child.pid);
+      assert.equal(job.pidIdentity, identity);
+      assert.doesNotThrow(() => process.kill(child.pid, 0));
+    } finally {
+      child.kill();
       cleanupHookEnvironment(testEnv);
     }
   });
@@ -702,6 +923,112 @@ describe("hooks", () => {
     }
   });
 
+  it("stop-review hook blocks BLOCK contracts with or without prefix chatter", async (t) => {
+    for (const [name, envName] of [
+      ["direct", "CLAUDE_BLOCK_RESULT"],
+      ["prefixed", "CLAUDE_PREFIXED_BLOCK_RESULT"],
+    ]) {
+      await t.test(name, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          enableReviewGate(testEnv);
+          const result = runHook(
+            STOP_HOOK,
+            [],
+            {
+              cwd: testEnv.workspaceDir,
+              session_id: "hook-session",
+              last_assistant_message: "review me",
+            },
+            {
+              ...testEnv.env,
+              [envName]: "1",
+            }
+          );
+
+          const payload = JSON.parse(result.stdout);
+          assert.equal(payload.decision, "block");
+          assert.match(payload.reason, /fix the failing regression/);
+          const snapshot = readStopReviewSnapshot(testEnv);
+          assert.equal(snapshot.firstLine, "BLOCK: fix the failing regression");
+          assert.equal(snapshot.status, "blocked");
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
+    }
+  });
+
+  it("stop-review hook blocks empty and unauthenticated Claude results", async (t) => {
+    for (const scenario of [
+      {
+        name: "empty result",
+        envName: "CLAUDE_EMPTY_RESULT",
+        reason: /returned no output/i,
+      },
+      {
+        name: "unauthenticated",
+        envName: "CLAUDE_UNAUTHENTICATED",
+        reason: /Not logged in|review failed/i,
+      },
+    ]) {
+      await t.test(scenario.name, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          enableReviewGate(testEnv);
+          const result = runHook(
+            STOP_HOOK,
+            [],
+            {
+              cwd: testEnv.workspaceDir,
+              session_id: "hook-session",
+              last_assistant_message: "review me",
+            },
+            {
+              ...testEnv.env,
+              [scenario.envName]: "1",
+            }
+          );
+
+          const payload = JSON.parse(result.stdout);
+          assert.equal(payload.decision, "block");
+          assert.match(payload.reason, scenario.reason);
+          assert.equal(readStopReviewSnapshot(testEnv).status, "blocked");
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
+    }
+  });
+
+  it("stop-review hook records a setup-required skip when Claude is missing", () => {
+    const testEnv = createHookEnvironment({ createClaude: false });
+    try {
+      enableReviewGate(testEnv);
+      const result = runHook(
+        STOP_HOOK,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+          last_assistant_message: "review me",
+        },
+        {
+          ...testEnv.env,
+          PATH: `${testEnv.binDir}${path.delimiter}/usr/bin:/bin`,
+        }
+      );
+
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /claude CLI not found in PATH/i);
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "skipped_claude_not_ready");
+      assert.equal(snapshot.claudeInvoked, false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
   it("stop-review hook accepts an ALLOW contract after streamed prefix chatter", () => {
     const testEnv = createHookEnvironment();
 
@@ -837,6 +1164,31 @@ describe("hooks", () => {
 
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /Hook input exceeds/i);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("hook input parser accepts empty input and rejects malformed JSON", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const empty = spawnSync(process.execPath, [UNREAD_HOOK], {
+        cwd: PROJECT_ROOT,
+        env: testEnv.env,
+        input: "",
+        encoding: "utf8",
+      });
+      assert.equal(empty.status, 0, empty.stderr);
+      assert.equal(empty.stdout, "");
+
+      const malformed = spawnSync(process.execPath, [UNREAD_HOOK], {
+        cwd: PROJECT_ROOT,
+        env: testEnv.env,
+        input: "{invalid\n",
+        encoding: "utf8",
+      });
+      assert.notEqual(malformed.status, 0);
+      assert.match(malformed.stderr, /Invalid hook input JSON/i);
     } finally {
       cleanupHookEnvironment(testEnv);
     }

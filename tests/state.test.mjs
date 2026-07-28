@@ -4,8 +4,9 @@
  */
 import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import childProcess, { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -42,6 +43,7 @@ import {
   resolveJobLogFile,
   nowIso,
 } from "../scripts/lib/state.mjs";
+import { getProcessIdentity } from "../scripts/lib/process.mjs";
 
 // We'll use the project root as a known git-repo cwd for workspace resolution.
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -57,6 +59,14 @@ function createTempGitRepo() {
     throw new Error(`git init failed: ${result.stderr || result.stdout}`);
   }
   return dir;
+}
+
+function isLockBusyError(error) {
+  const lockError =
+    /** @type {NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }} */ (
+      error
+    );
+  return lockError.code === "ELOCKBUSY" && lockError.cause?.code === "EEXIST";
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +558,596 @@ describe("casJobStatus", () => {
     const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
     assert.ok(!fs.existsSync(lockFile), "Lock file should be removed after CAS");
   });
+
+  it("does not remove a lock whose ownership token changed", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    const originalReadFileSync = fs.readFileSync;
+    Reflect.set(fs, "readFileSync", (filePath, ...args) => {
+      if (String(filePath) === lockFile && fs.existsSync(lockFile)) {
+        return JSON.stringify({ token: "replacement-owner" });
+      }
+      return originalReadFileSync(filePath, ...args);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      assert.equal(
+        casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        true
+      );
+      assert.equal(fs.existsSync(lockFile), true);
+    } finally {
+      Reflect.set(fs, "readFileSync", originalReadFileSync);
+      syncBuiltinESMExports();
+    }
+  });
+
+  it("does not unlink stale lock contents that another owner replaced", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    const replacement = JSON.stringify({
+      pid: process.pid,
+      identity: null,
+      timestamp: Date.now(),
+      token: "replacement-owner",
+    });
+    fs.writeFileSync(lockFile, "{");
+    const hardStaleTime = new Date(Date.now() - 121_000);
+    fs.utimesSync(lockFile, hardStaleTime, hardStaleTime);
+
+    const originalReadFileSync = fs.readFileSync;
+    const originalWriteFileSync = fs.writeFileSync;
+    let lockReads = 0;
+    Reflect.set(fs, "readFileSync", (filePath, ...args) => {
+      if (String(filePath) === lockFile && ++lockReads === 2) {
+        originalWriteFileSync(lockFile, replacement);
+        return replacement;
+      }
+      return originalReadFileSync(filePath, ...args);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      assert.throws(
+        () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        isLockBusyError
+      );
+      assert.equal(fs.readFileSync(lockFile, "utf8"), replacement);
+    } finally {
+      Reflect.set(fs, "readFileSync", originalReadFileSync);
+      syncBuiltinESMExports();
+    }
+  });
+
+  it("retries a transient atomic-publication collision", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    const originalLinkSync = fs.linkSync;
+    let lockLinks = 0;
+    Reflect.set(fs, "linkSync", (existingPath, newPath) => {
+      if (String(newPath) === lockFile && ++lockLinks === 1) {
+        throw Object.assign(new Error("synthetic collision"), {
+          code: "EEXIST",
+        });
+      }
+      return originalLinkSync(existingPath, newPath);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      assert.equal(
+        casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        true
+      );
+      assert.equal(lockLinks, 2);
+    } finally {
+      Reflect.set(fs, "linkSync", originalLinkSync);
+      syncBuiltinESMExports();
+    }
+  });
+
+  it("stops after the configured number of lock collisions", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: null,
+        timestamp: Date.now(),
+      })
+    );
+    const originalLinkSync = fs.linkSync;
+    let lockLinks = 0;
+    Reflect.set(fs, "linkSync", (existingPath, newPath) => {
+      if (String(newPath) === lockFile) {
+        lockLinks += 1;
+      }
+      return originalLinkSync(existingPath, newPath);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      assert.throws(
+        () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        isLockBusyError
+      );
+      assert.equal(lockLinks, 3);
+    } finally {
+      Reflect.set(fs, "linkSync", originalLinkSync);
+      syncBuiltinESMExports();
+    }
+  });
+
+  it("removes the staged lock when its ownership write fails", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    const originalWriteFileSync = fs.writeFileSync;
+    Reflect.set(fs, "writeFileSync", (filePath, ...args) => {
+      if (String(filePath).startsWith(`${lockFile}.publish.`)) {
+        throw Object.assign(new Error("synthetic ownership write failure"), {
+          code: "EIO",
+        });
+      }
+      return originalWriteFileSync(filePath, ...args);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      assert.throws(
+        () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        (error) => /** @type {NodeJS.ErrnoException} */ (error).code === "EIO"
+      );
+      assert.equal(fs.existsSync(lockFile), false);
+      assert.equal(
+        fs.readdirSync(resolveJobsDir(PROJECT_CWD)).some(
+          (name) => name.startsWith(`${jobId}.json.lock.publish.`)
+        ),
+        false
+      );
+    } finally {
+      Reflect.set(fs, "writeFileSync", originalWriteFileSync);
+      syncBuiltinESMExports();
+    }
+  });
+
+  it("captures owner identity and stages a populated lock before atomic publication", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+import childProcess from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+
+const originalReadFileSync = fs.readFileSync;
+const originalLinkSync = fs.linkSync;
+const originalWriteFileSync = fs.writeFileSync;
+const originalSpawnSync = childProcess.spawnSync;
+let identityResolved = false;
+let linkSawIdentity = false;
+let linkSawPopulatedSource = false;
+let ownershipWriteTarget = null;
+
+Reflect.set(fs, "readFileSync", (target, ...args) => {
+  if (String(target) === \`/proc/\${process.pid}/stat\`) {
+    identityResolved = true;
+  }
+  return originalReadFileSync(target, ...args);
+});
+Reflect.set(childProcess, "spawnSync", (command, ...args) => {
+  if (command === "ps" || command === "powershell.exe") {
+    identityResolved = true;
+  }
+  return originalSpawnSync(command, ...args);
+});
+Reflect.set(fs, "linkSync", (existingPath, newPath) => {
+  if (String(newPath).endsWith(".json.lock")) {
+    linkSawIdentity = identityResolved;
+    linkSawPopulatedSource =
+      originalReadFileSync(existingPath, "utf8").includes('"token"');
+  }
+  return originalLinkSync(existingPath, newPath);
+});
+Reflect.set(fs, "writeFileSync", (target, data, ...args) => {
+  if (String(data).includes('"token"')) {
+    ownershipWriteTarget = typeof target;
+  }
+  return originalWriteFileSync(target, data, ...args);
+});
+syncBuiltinESMExports();
+
+const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "cc-lock-publication-"));
+process.env.CODEX_HOME = stateHome;
+try {
+  const state = await import(${JSON.stringify(STATE_MODULE_URL)} + "?lock-publication=" + Date.now());
+  state.writeJobFile(process.env.TEST_PROJECT_CWD, "lock-publication-job", {
+    id: "lock-publication-job",
+    status: "running"
+  });
+  const transitioned = state.casJobStatus(
+    process.env.TEST_PROJECT_CWD,
+    "lock-publication-job",
+    "running",
+    "completed"
+  );
+  process.stdout.write(JSON.stringify({
+    transitioned,
+    linkSawIdentity,
+    linkSawPopulatedSource,
+    ownershipWriteTarget
+  }));
+} finally {
+  fs.rmSync(stateHome, { recursive: true, force: true });
+}
+`,
+      ],
+      {
+        cwd: PROJECT_CWD,
+        env: {
+          ...process.env,
+          TEST_PROJECT_CWD: PROJECT_CWD,
+        },
+        encoding: "utf8",
+      }
+    );
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      transitioned: true,
+      linkSawIdentity: true,
+      linkSawPopulatedSource: true,
+      ownershipWriteTarget: "string",
+    });
+  });
+
+  it("keeps a live owner's lock when its identity is unavailable", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: null,
+        timestamp: Date.now(),
+      })
+    );
+
+    assert.throws(
+      () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      isLockBusyError
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "running");
+  });
+
+  it("recovers a lock whose owner process is dead", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: 99_999_999,
+        identity: "dead-owner",
+        timestamp: Date.now(),
+      })
+    );
+
+    assert.equal(
+      casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      true
+    );
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "completed");
+  });
+
+  it("recovers a live recycled-PID lock with a mismatched identity", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: "not-this-process",
+        timestamp: Date.now() - 31_000,
+      })
+    );
+
+    assert.equal(
+      casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      true
+    );
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "completed");
+  });
+
+  it("keeps a live lock whose stored identity still matches", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: getProcessIdentity(process.pid),
+        timestamp: Date.now(),
+      })
+    );
+
+    assert.throws(
+      () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      isLockBusyError
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "running");
+  });
+
+  it("keeps a fresh malformed lock fail-closed", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(lockFile, "{");
+
+    assert.throws(
+      () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      isLockBusyError
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+  });
+
+  it("keeps a malformed lock throughout the Windows identity timeout window", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(lockFile, "");
+    const stillPublishing = new Date(Date.now() - 11_000);
+    fs.utimesSync(lockFile, stillPublishing, stillPublishing);
+
+    assert.throws(
+      () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      isLockBusyError
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+  });
+
+  it("recovers a malformed lock after the stale grace period", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(lockFile, "{");
+    const staleTime = new Date(Date.now() - 16_000);
+    fs.utimesSync(lockFile, staleTime, staleTime);
+
+    assert.equal(
+      casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      true
+    );
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "completed");
+  });
+
+  it("recovers a stale lock with an invalid owner PID", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: 0,
+        identity: null,
+        timestamp: Date.now(),
+      })
+    );
+    const staleTime = new Date(Date.now() - 16_000);
+    fs.utimesSync(lockFile, staleTime, staleTime);
+
+    assert.equal(
+      casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      true
+    );
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "completed");
+  });
+
+  it("keeps a fresh lock with an invalid owner PID fail-closed", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: 0,
+        identity: null,
+        timestamp: Date.now(),
+      })
+    );
+
+    assert.throws(
+      () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      isLockBusyError
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "running");
+  });
+
+  it("keeps an old live-owner lock without a verifiable identity", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: null,
+        timestamp: Date.now() - 31_000,
+      })
+    );
+
+    assert.throws(
+      () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      isLockBusyError
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "running");
+  });
+
+  it("keeps an old live-owner lock with a non-string identity", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: 42,
+        timestamp: Date.now() - 31_000,
+      })
+    );
+
+    assert.throws(
+      () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      isLockBusyError
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "running");
+  });
+
+  it("recovers an unverifiable live-PID lock after the hard age cap", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: null,
+        timestamp: Date.now() - 121_000,
+      })
+    );
+    const hardStaleTime = new Date(Date.now() - 121_000);
+    fs.utimesSync(lockFile, hardStaleTime, hardStaleTime);
+
+    assert.equal(
+      casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+      true
+    );
+    assert.equal(readJobFile(PROJECT_CWD, jobId).status, "completed");
+  });
+
+  it("leases a lock when owner identity lookup throws", async () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const owner = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore", windowsHide: true }
+    );
+    await new Promise((resolve, reject) => {
+      owner.once("spawn", resolve);
+      owner.once("error", reject);
+    });
+
+    const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: owner.pid,
+        identity: "unverifiable-owner",
+        timestamp: Date.now(),
+      })
+    );
+
+    const originalReadFileSync = fs.readFileSync;
+    const originalSpawnSync = childProcess.spawnSync;
+    let identityLookups = 0;
+    Reflect.set(fs, "readFileSync", (filePath, ...args) => {
+      if (String(filePath) === `/proc/${owner.pid}/stat`) {
+        identityLookups += 1;
+        throw Object.assign(new Error("synthetic identity failure"), {
+          code: "EIO",
+        });
+      }
+      return originalReadFileSync(filePath, ...args);
+    });
+    Reflect.set(childProcess, "spawnSync", (command, args, ...rest) => {
+      const targetsOwner =
+        (command === "ps" && args?.at(-1) === String(owner.pid)) ||
+        (command === "powershell.exe" &&
+          args?.at(-1)?.includes(`ProcessId = ${owner.pid}`));
+      if (targetsOwner) {
+        identityLookups += 1;
+        return {
+          error: Object.assign(new Error("synthetic identity failure"), {
+            code: "EIO",
+          }),
+          status: null,
+          signal: null,
+          stdout: "",
+          stderr: "",
+        };
+      }
+      return originalSpawnSync(command, args, ...rest);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      assert.throws(
+        () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        isLockBusyError
+      );
+      assert.equal(fs.existsSync(lockFile), true);
+      assert.equal(identityLookups, 0);
+      fs.writeFileSync(
+        lockFile,
+        JSON.stringify({
+          pid: owner.pid,
+          identity: "unverifiable-owner",
+          timestamp: Date.now() - 31_000,
+        })
+      );
+      assert.throws(
+        () => casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        isLockBusyError
+      );
+      assert.equal(fs.existsSync(lockFile), true);
+      assert.equal(readJobFile(PROJECT_CWD, jobId).status, "running");
+      assert.ok(identityLookups >= 1);
+
+      const hardStaleTime = new Date(Date.now() - 121_000);
+      fs.utimesSync(lockFile, hardStaleTime, hardStaleTime);
+      assert.equal(
+        casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        true
+      );
+      assert.equal(readJobFile(PROJECT_CWD, jobId).status, "completed");
+    } finally {
+      Reflect.set(fs, "readFileSync", originalReadFileSync);
+      Reflect.set(childProcess, "spawnSync", originalSpawnSync);
+      syncBuiltinESMExports();
+      owner.kill();
+    }
+  });
+
+  it("falls back to exclusive lock creation when hard links are unsupported", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const originalLinkSync = fs.linkSync;
+    let linkAttempts = 0;
+    Reflect.set(fs, "linkSync", () => {
+      linkAttempts += 1;
+      throw Object.assign(new Error("hard links unavailable"), {
+        code: "EPERM",
+      });
+    });
+    syncBuiltinESMExports();
+
+    try {
+      assert.equal(
+        casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        true
+      );
+      writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+      assert.equal(
+        casJobStatus(PROJECT_CWD, jobId, "running", "completed"),
+        true
+      );
+      assert.equal(linkAttempts, 1);
+      assert.equal(readJobFile(PROJECT_CWD, jobId).status, "completed");
+    } finally {
+      Reflect.set(fs, "linkSync", originalLinkSync);
+      syncBuiltinESMExports();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -699,6 +1299,21 @@ describe("cleanupOldJobs", () => {
         logFile: resolveJobLogFile(repoDir, prunedId),
       });
       fs.writeFileSync(resolveJobLogFile(repoDir, prunedId), "old log\n", "utf8");
+      const prunedIdentityCheck = path.join(
+        resolveJobsDir(repoDir),
+        `${prunedId}.json.identity-check`
+      );
+      const prunedIdentityProbe = path.join(
+        resolveJobsDir(repoDir),
+        `${prunedId}.json.identity-probe`
+      );
+      const prunedIdentityUnavailable = path.join(
+        resolveJobsDir(repoDir),
+        `${prunedId}.json.identity-unavailable`
+      );
+      fs.writeFileSync(prunedIdentityCheck, "", "utf8");
+      fs.writeFileSync(prunedIdentityProbe, "", "utf8");
+      fs.writeFileSync(prunedIdentityUnavailable, "", "utf8");
 
       for (let i = 0; i < 100; i++) {
         const sessionAId = `test-retain-session-a-keep-${i}`;
@@ -727,6 +1342,9 @@ describe("cleanupOldJobs", () => {
       assert.ok(readJobFile(repoDir, runningId), "running job should be preserved");
       assert.equal(readJobFile(repoDir, prunedId), null);
       assert.equal(fs.existsSync(resolveJobLogFile(repoDir, prunedId)), false);
+      assert.equal(fs.existsSync(prunedIdentityCheck), false);
+      assert.equal(fs.existsSync(prunedIdentityProbe), false);
+      assert.equal(fs.existsSync(prunedIdentityUnavailable), false);
       assert.equal(sessionAJobs.length, 100);
       assert.equal(sessionBJobs.length, 100);
       assert.ok(sessionBJobs.some((job) => job.id === "test-retain-session-b-keep-99"));
@@ -774,23 +1392,45 @@ describe("cleanupOldJobs", () => {
     }
   });
 
-  it("removes stale reserved job marker files", () => {
+  it("removes stale reservation and staged-lock files", () => {
     const repoDir = createTempGitRepo();
     try {
       const jobsDir = resolveJobsDir(repoDir);
       fs.mkdirSync(jobsDir, { recursive: true });
       const staleReservation = path.join(jobsDir, "review-stale.reserve");
       const freshReservation = path.join(jobsDir, "review-fresh.reserve");
+      const staleStagedLock = path.join(
+        jobsDir,
+        `review-stale.json.lock.publish.123.${"a".repeat(32)}`
+      );
+      const freshStagedLock = path.join(
+        jobsDir,
+        `review-fresh.json.lock.publish.123.${"b".repeat(32)}`
+      );
+      const deceptiveId = "review.json.lock.publish.123";
+      const deceptiveJobFile = path.join(jobsDir, `${deceptiveId}.json`);
       fs.writeFileSync(staleReservation, "{}", "utf8");
       fs.writeFileSync(freshReservation, "{}", "utf8");
+      fs.writeFileSync(staleStagedLock, "{}", "utf8");
+      fs.writeFileSync(freshStagedLock, "{}", "utf8");
+      writeJobFile(repoDir, deceptiveId, {
+        id: deceptiveId,
+        status: "running",
+        createdAt: nowIso(),
+      });
 
       const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
       fs.utimesSync(staleReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
+      fs.utimesSync(staleStagedLock, twoHoursAgo / 1000, twoHoursAgo / 1000);
+      fs.utimesSync(deceptiveJobFile, twoHoursAgo / 1000, twoHoursAgo / 1000);
 
       cleanupOldJobs(repoDir);
 
       assert.equal(fs.existsSync(staleReservation), false);
       assert.equal(fs.existsSync(freshReservation), true);
+      assert.equal(fs.existsSync(staleStagedLock), false);
+      assert.equal(fs.existsSync(freshStagedLock), true);
+      assert.ok(readJobFile(repoDir, deceptiveId));
     } finally {
       fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
       fs.rmSync(repoDir, { recursive: true, force: true });
@@ -812,21 +1452,23 @@ describe("cleanupOldJobs", () => {
       fs.utimesSync(badReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
       fs.utimesSync(staleReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
 
-      fs.statSync = (targetPath, ...args) => {
+      Reflect.set(fs, "statSync", (targetPath, ...args) => {
         if (targetPath === badReservation) {
-          const error = new Error("synthetic stat failure");
+          const error = /** @type {NodeJS.ErrnoException} */ (
+            new Error("synthetic stat failure")
+          );
           error.code = "EIO";
           throw error;
         }
         return originalStatSync(targetPath, ...args);
-      };
+      });
 
       cleanupOldJobs(repoDir);
 
       assert.equal(fs.existsSync(badReservation), true);
       assert.equal(fs.existsSync(staleReservation), false);
     } finally {
-      fs.statSync = originalStatSync;
+      Reflect.set(fs, "statSync", originalStatSync);
       fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
@@ -955,6 +1597,480 @@ describe("reapStaleJobs", () => {
 
     assert.equal(result.length, 1);
     assert.equal(result[0].status, "running");
+  });
+
+  it("keeps Windows read paths cheap for a live PID with stored identity", () => {
+    const id = "test-reap-windows-alive";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+    let identityChecks = 0;
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "win32",
+        isProcessAliveImpl: () => true,
+        getProcessIdentityImpl: () => {
+          identityChecks += 1;
+          return "different-identity";
+        },
+      }
+    );
+
+    assert.equal(identityChecks, 0);
+    assert.equal(result[0].status, "running");
+  });
+
+  it("rechecks a silent Windows job after the bounded liveness shortcut", () => {
+    const id = "test-reap-windows-recycled";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "old-process-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 301_000).toISOString());
+    let identityChecks = 0;
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "win32",
+        isProcessAliveImpl: () => true,
+        getProcessIdentityImpl: () => {
+          identityChecks += 1;
+          return "different-identity";
+        },
+      }
+    );
+
+    assert.equal(identityChecks, 1);
+    assert.equal(result[0].status, "failed");
+  });
+
+  it("does not look up identity after liveness already failed", () => {
+    const id = "test-reap-dead-no-identity";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: 99_999_999,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 301_000).toISOString());
+    let identityChecks = 0;
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "win32",
+        isProcessAliveImpl: () => false,
+        getProcessIdentityImpl: () => {
+          identityChecks += 1;
+          return "stored-identity";
+        },
+      }
+    );
+
+    assert.equal(identityChecks, 0);
+    assert.equal(result[0].status, "failed");
+  });
+
+  it("reaps a live PID when its directly read identity mismatches", () => {
+    const id = "test-reap-direct-identity-mismatch";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "linux",
+        isProcessAliveImpl: () => true,
+        getProcessIdentityImpl: () => "different-identity",
+      }
+    );
+
+    assert.equal(result[0].status, "failed");
+  });
+
+  it("does not refresh POSIX jobs whose identity matches", () => {
+    const id = "test-reap-posix-match";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    const timestamp = staleTimestamp();
+    backdateJob(id, timestamp);
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "linux",
+        isProcessAliveImpl: () => true,
+        getProcessIdentityImpl: () => "stored-identity",
+      }
+    );
+
+    assert.equal(result[0].status, "running");
+    assert.equal(result[0].updatedAt, timestamp);
+    assert.equal(readJobFile(PROJECT_CWD, id).updatedAt, timestamp);
+  });
+
+  it("rate-limits successful Windows identity rechecks across job reads", () => {
+    const id = "test-reap-windows-cooldown";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 301_000).toISOString());
+    let identityChecks = 0;
+    const options = {
+      platform: "win32",
+      isProcessAliveImpl: () => true,
+      getProcessIdentityImpl: () => {
+        identityChecks += 1;
+        return "stored-identity";
+      },
+    };
+
+    const first = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+    const second = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+
+    assert.equal(first[0].status, "running");
+    assert.equal(second[0].status, "running");
+    assert.equal(first[0].updatedAt, readJobFile(PROJECT_CWD, id).updatedAt);
+    assert.equal(first[0].updatedAt, first[0].createdAt);
+    assert.equal(identityChecks, 1);
+    assert.equal(
+      fs.readFileSync(
+        path.join(resolveJobsDir(PROJECT_CWD), `${id}.json.identity-check`),
+        "utf8"
+      ),
+      "verified\n"
+    );
+  });
+
+  it("starts the Windows unverifiable ceiling at the first unavailable probe", () => {
+    const id = "test-reap-windows-first-unavailable";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 301_000).toISOString());
+    let identityUnavailable = false;
+    const options = {
+      platform: "win32",
+      isProcessAliveImpl: () => true,
+      getProcessIdentityImpl: () => {
+        if (identityUnavailable) {
+          throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+        }
+        return "stored-identity";
+      },
+    };
+
+    const verified = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+    const identityCheckFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-check`
+    );
+    const identityProbeFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-probe`
+    );
+    const identityUnavailableFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-unavailable`
+    );
+    const leaseExpired = new Date(Date.now() - 301_000);
+    fs.utimesSync(identityCheckFile, leaseExpired, leaseExpired);
+    fs.utimesSync(identityProbeFile, leaseExpired, leaseExpired);
+    identityUnavailable = true;
+
+    const firstUnavailable = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+    const firstUnavailableMtime =
+      fs.statSync(identityUnavailableFile).mtimeMs;
+
+    const fourteenMinutesAgo = new Date(Date.now() - 14 * 60 * 1000);
+    fs.utimesSync(
+      identityUnavailableFile,
+      fourteenMinutesAgo,
+      fourteenMinutesAgo
+    );
+    fs.utimesSync(identityProbeFile, leaseExpired, leaseExpired);
+    const beforeCeiling = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+
+    const sixteenMinutesAgo = new Date(Date.now() - 16 * 60 * 1000);
+    fs.utimesSync(
+      identityUnavailableFile,
+      sixteenMinutesAgo,
+      sixteenMinutesAgo
+    );
+    fs.utimesSync(identityProbeFile, leaseExpired, leaseExpired);
+    const afterCeiling = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+
+    assert.equal(verified[0].status, "running");
+    assert.equal(firstUnavailable[0].status, "running");
+    assert.ok(firstUnavailableMtime > leaseExpired.getTime());
+    assert.equal(beforeCeiling[0].status, "running");
+    assert.equal(afterCeiling[0].status, "failed");
+    assert.equal(afterCeiling[0].reapedUnverifiable, true);
+  });
+
+  it("keeps timed-out Windows identity checks alive and rate-limited", () => {
+    const id = "test-reap-windows-timeout";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 301_000).toISOString());
+    let identityChecks = 0;
+    const options = {
+      platform: "win32",
+      isProcessAliveImpl: () => true,
+      getProcessIdentityImpl: (_pid, identityOptions) => {
+        identityChecks += 1;
+        assert.equal(identityOptions.timeout, 2_000);
+        throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+      },
+    };
+
+    const first = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+    const identityUnavailableFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-unavailable`
+    );
+    const identityProbeFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-probe`
+    );
+    const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
+    fs.utimesSync(identityUnavailableFile, sixMinutesAgo, sixMinutesAgo);
+    const firstUnavailableMtime =
+      fs.statSync(identityUnavailableFile).mtimeMs;
+    const firstProbeMtime = fs.statSync(identityProbeFile).mtimeMs;
+    const second = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      options
+    );
+
+    assert.equal(first[0].status, "running");
+    assert.equal(second[0].status, "running");
+    assert.equal(identityChecks, 1);
+    assert.equal(
+      fs.readFileSync(identityUnavailableFile, "utf8"),
+      "unavailable\n"
+    );
+    assert.equal(fs.readFileSync(identityProbeFile, "utf8"), "unavailable\n");
+    assert.equal(
+      fs.statSync(identityUnavailableFile).mtimeMs,
+      firstUnavailableMtime
+    );
+    assert.equal(fs.statSync(identityProbeFile).mtimeMs, firstProbeMtime);
+  });
+
+  it("fails open when a Windows identity marker cannot be created", () => {
+    const id = "test-reap-windows-marker-unwritable";
+    const originalWriteFileSync = fs.writeFileSync;
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 901_000).toISOString());
+    const identityUnavailableFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-unavailable`
+    );
+
+    try {
+      Reflect.set(fs, "writeFileSync", (filePath, ...args) => {
+        if (filePath === identityUnavailableFile) {
+          throw Object.assign(new Error("marker denied"), { code: "EACCES" });
+        }
+        return originalWriteFileSync(filePath, ...args);
+      });
+
+      const result = reapStaleJobs(
+        PROJECT_CWD,
+        [readJobFile(PROJECT_CWD, id)],
+        {
+          platform: "win32",
+          isProcessAliveImpl: () => true,
+          getProcessIdentityImpl: () => {
+            throw Object.assign(new Error("timed out"), {
+              code: "ETIMEDOUT",
+            });
+          },
+        }
+      );
+
+      assert.equal(result[0].status, "running");
+      assert.equal(fs.existsSync(identityUnavailableFile), false);
+    } finally {
+      Reflect.set(fs, "writeFileSync", originalWriteFileSync);
+    }
+  });
+
+  it("fails a Windows job after identity stays unverifiable beyond the hard ceiling", () => {
+    const id = "test-reap-windows-unverifiable-expired";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 301_000).toISOString());
+    const identityUnavailableFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-unavailable`
+    );
+    fs.writeFileSync(identityUnavailableFile, "unavailable\n");
+    const expired = new Date(Date.now() - 901_000);
+    fs.utimesSync(identityUnavailableFile, expired, expired);
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "win32",
+        isProcessAliveImpl: () => true,
+        getProcessIdentityImpl: () => {
+          throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+        },
+      }
+    );
+
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].pid, process.pid);
+    assert.equal(result[0].pidIdentity, "stored-identity");
+    assert.equal(result[0].reapedUnverifiable, true);
+    assert.match(result[0].errorMessage, /identity remained unverifiable/i);
+  });
+
+  it("preserves manual cleanup handles when cancelling identity stays unverifiable", () => {
+    const id = "test-reap-windows-cancelling-unverifiable";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "cancelling",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, new Date(Date.now() - 301_000).toISOString());
+    const identityUnavailableFile = path.join(
+      resolveJobsDir(PROJECT_CWD),
+      `${id}.json.identity-unavailable`
+    );
+    fs.writeFileSync(identityUnavailableFile, "unavailable\n");
+    const expired = new Date(Date.now() - 901_000);
+    fs.utimesSync(identityUnavailableFile, expired, expired);
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "win32",
+        isProcessAliveImpl: () => true,
+        getProcessIdentityImpl: () => {
+          throw new Error("CIM unavailable");
+        },
+      }
+    );
+
+    assert.equal(result[0].status, "cancel_failed");
+    assert.equal(result[0].pid, process.pid);
+    assert.equal(result[0].pidIdentity, "stored-identity");
+    assert.equal(result[0].pgid, process.pid);
+  });
+
+  it("keeps jobs alive when identity lookup races cannot be verified", () => {
+    const id = "test-reap-identity-race";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: process.pid,
+      pidIdentity: "stored-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "linux",
+        isProcessAliveImpl: () => true,
+        getProcessIdentityImpl: () => {
+          throw new Error("process exited between checks");
+        },
+      }
+    );
+
+    assert.equal(result[0].status, "running");
+    assert.equal(result[0].pid, process.pid);
   });
 
   it("keeps recently updated running job alive during the reap grace window", () => {

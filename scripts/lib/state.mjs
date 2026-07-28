@@ -16,6 +16,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 
 import {
   LEGACY_PLUGIN_DATA_NAMESPACES,
@@ -24,7 +25,10 @@ import {
   resolvePluginsDataRoot,
 } from "./codex-paths.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
-import { isProcessAlive, validateProcessIdentity, getProcessIdentity } from "./process.mjs";
+import {
+  getProcessIdentity,
+  isProcessAlive,
+} from "./process.mjs";
 
 const STATE_VERSION = 1;
 let ensuredPluginDataRoot = null;
@@ -37,8 +41,26 @@ const TURN_BASELINE_FILE_PREFIX = "turn-baseline";
 const MAX_TERMINAL_JOBS_PER_SESSION = 100;
 export const MAX_STOP_REVIEW_HISTORY_ENTRIES = 200;
 const REAP_GRACE_MS = 2_000;
+const WINDOWS_IDENTITY_RECHECK_MS = 5 * 60 * 1000;
+const WINDOWS_IDENTITY_UNVERIFIABLE_MAX_MS =
+  WINDOWS_IDENTITY_RECHECK_MS * 3;
+const WINDOWS_IDENTITY_CHECK_SUFFIX = ".identity-check";
+const WINDOWS_IDENTITY_PROBE_SUFFIX = ".identity-probe";
+const WINDOWS_IDENTITY_UNAVAILABLE_SUFFIX = ".identity-unavailable";
+const WINDOWS_REAPER_IDENTITY_TIMEOUT_MS = 2_000;
 const QUEUED_WITHOUT_PID_REAP_GRACE_MS = 30_000;
+const INVALID_LOCK_STALE_MS = 15_000;
+const LIVE_LOCK_LEASE_MS = 30_000;
+const LOCK_HARD_STALE_MS = LIVE_LOCK_LEASE_MS * 4;
 const RESERVED_JOB_FILE_MAX_AGE_MS = 60 * 60 * 1000;
+const HARD_LINK_UNSUPPORTED_CODES = new Set([
+  "EPERM",
+  "ENOSYS",
+  "EOPNOTSUPP",
+  "ENOTSUP",
+  "EXDEV",
+]);
+let hardLinksUnsupported = false;
 export const JOB_RESERVATION_SUFFIX = ".reserve";
 export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
 const NO_SESSION_RETENTION_BUCKET = "__no-session__";
@@ -460,7 +482,12 @@ function isWithinReapGracePeriod(job, now = Date.now(), graceMs = REAP_GRACE_MS)
  * Detect zombie jobs whose PID has died and auto-transition them to "failed".
  * Called from listJobs() so every job-reading path benefits automatically.
  */
-export function reapStaleJobs(cwd, jobs) {
+export function reapStaleJobs(cwd, jobs, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const isProcessAliveImpl = options.isProcessAliveImpl ?? isProcessAlive;
+  const getProcessIdentityImpl =
+    options.getProcessIdentityImpl ?? getProcessIdentity;
+
   return jobs.map((job) => {
     if (isWithinReapGracePeriod(job)) return job;
     if (!REAPABLE_STATUSES.has(job.status)) return job;
@@ -488,24 +515,186 @@ export function reapStaleJobs(cwd, jobs) {
       }
     }
 
-    // Use pidIdentity if available (PID-reuse safe), otherwise fall back to isProcessAlive
-    const alive = job.pidIdentity
-      ? validateProcessIdentity(job.pid, job.pidIdentity)
-      : isProcessAlive(job.pid);
-    if (alive) return job;
+    const now = Date.now();
+    const processExists = isProcessAliveImpl(job.pid);
+    let withinWindowsIdentityLease = false;
+    let windowsIdentityCheckFile = null;
+    let windowsIdentityProbeFile = null;
+    let windowsIdentityUnavailableFile = null;
+    let windowsIdentityUnavailableExists = false;
+    let windowsIdentityUnavailableAgeMs = null;
+    if (platform === "win32") {
+      windowsIdentityCheckFile =
+        resolveJobFile(cwd, job.id) + WINDOWS_IDENTITY_CHECK_SUFFIX;
+      windowsIdentityProbeFile =
+        resolveJobFile(cwd, job.id) + WINDOWS_IDENTITY_PROBE_SUFFIX;
+      windowsIdentityUnavailableFile =
+        resolveJobFile(cwd, job.id) + WINDOWS_IDENTITY_UNAVAILABLE_SUFFIX;
+      let windowsIdentityCheckAgeMs = null;
+      try {
+        windowsIdentityCheckAgeMs =
+          now - fs.statSync(windowsIdentityCheckFile).mtimeMs;
+      } catch {}
+      let windowsIdentityProbeAgeMs = windowsIdentityCheckAgeMs;
+      try {
+        windowsIdentityProbeAgeMs =
+          now - fs.statSync(windowsIdentityProbeFile).mtimeMs;
+      } catch {}
+      try {
+        windowsIdentityUnavailableAgeMs =
+          now - fs.statSync(windowsIdentityUnavailableFile).mtimeMs;
+        windowsIdentityUnavailableExists = true;
+      } catch {}
+      if (Number.isFinite(windowsIdentityProbeAgeMs)) {
+        withinWindowsIdentityLease =
+          windowsIdentityProbeAgeMs < WINDOWS_IDENTITY_RECHECK_MS;
+      } else {
+        withinWindowsIdentityLease = isWithinReapGracePeriod(
+          job,
+          now,
+          WINDOWS_IDENTITY_RECHECK_MS
+        );
+      }
+    }
+    const needsIdentityCheck =
+      processExists &&
+      job.pidIdentity &&
+      (platform !== "win32" || !withinWindowsIdentityLease);
+    let identityMatches = true;
+    let identityUnavailable = false;
+    if (needsIdentityCheck) {
+      try {
+        identityMatches =
+          getProcessIdentityImpl(
+            job.pid,
+            platform === "win32"
+              ? { timeout: WINDOWS_REAPER_IDENTITY_TIMEOUT_MS }
+              : undefined
+          ) === job.pidIdentity;
+      } catch {
+        identityMatches = false;
+        identityUnavailable = true;
+        if (
+          windowsIdentityUnavailableFile &&
+          !windowsIdentityUnavailableExists
+        ) {
+          let inheritedLegacyMarker = false;
+          try {
+            if (
+              windowsIdentityCheckFile &&
+              fs.readFileSync(windowsIdentityCheckFile, "utf8") ===
+                "unavailable\n"
+            ) {
+              windowsIdentityUnavailableAgeMs =
+                now - fs.statSync(windowsIdentityCheckFile).mtimeMs;
+              inheritedLegacyMarker = true;
+            }
+          } catch {}
+          try {
+            if (!inheritedLegacyMarker) {
+              fs.writeFileSync(
+                windowsIdentityUnavailableFile,
+                "unavailable\n",
+                {
+                  mode: 0o600,
+                  flag: "wx",
+                }
+              );
+              windowsIdentityUnavailableExists = true;
+              windowsIdentityUnavailableAgeMs = 0;
+            }
+          } catch {
+            try {
+              windowsIdentityUnavailableAgeMs =
+                now - fs.statSync(windowsIdentityUnavailableFile).mtimeMs;
+              windowsIdentityUnavailableExists = true;
+            } catch {}
+          }
+        }
+        if (windowsIdentityProbeFile) {
+          try {
+            fs.writeFileSync(windowsIdentityProbeFile, "unavailable\n", {
+              mode: 0o600,
+            });
+          } catch {}
+        }
+      }
+    }
+    // POSIX stays fail-open: a restricted `ps` is indistinguishable from a
+    // transient identity lookup failure and is not evidence of PID reuse.
+    const identityUnavailableTooLong =
+      platform === "win32" &&
+      identityUnavailable &&
+      Number.isFinite(windowsIdentityUnavailableAgeMs) &&
+      windowsIdentityUnavailableAgeMs >=
+        WINDOWS_IDENTITY_UNVERIFIABLE_MAX_MS;
+    const alive =
+      processExists &&
+      (!needsIdentityCheck ||
+        identityMatches ||
+        (identityUnavailable && !identityUnavailableTooLong));
+    if (alive) {
+      if (
+        windowsIdentityCheckFile &&
+        needsIdentityCheck &&
+        identityMatches &&
+        !identityUnavailable
+      ) {
+        try {
+          fs.writeFileSync(
+            windowsIdentityCheckFile,
+            "verified\n",
+            { mode: 0o600 }
+          );
+        } catch {}
+        if (windowsIdentityProbeFile) {
+          try {
+            fs.writeFileSync(windowsIdentityProbeFile, "verified\n", {
+              mode: 0o600,
+            });
+          } catch {}
+        }
+        if (windowsIdentityUnavailableFile) {
+          try {
+            fs.unlinkSync(windowsIdentityUnavailableFile);
+          } catch {}
+        }
+      }
+      return job;
+    }
 
     // Process is dead — transition via CAS
     try {
-      const nextStatus = job.status === "cancelling" ? "cancelled" : "failed";
-      const transitioned = transitionJob(cwd, job.id, [job.status], nextStatus, {
-        errorMessage: job.status === "cancelling"
-          ? "Cancelled by user. Auto-reaped after process exit."
-          : `Process ${job.pid} died without completing. Auto-reaped.`,
-        completedAt: nowIso(),
-        pid: null,
-        pidIdentity: null,
-        phase: nextStatus === "cancelled" ? "cancelled" : "failed",
-      });
+      const nextStatus = identityUnavailableTooLong
+        ? (job.status === "cancelling" ? "cancel_failed" : "failed")
+        : (job.status === "cancelling" ? "cancelled" : "failed");
+      const terminalData = identityUnavailableTooLong
+        ? {
+            errorMessage:
+              `Process ${job.pid} identity remained unverifiable beyond the bounded Windows recheck window. Manual cleanup may be required.`,
+            completedAt: nowIso(),
+            phase: nextStatus,
+            reapedUnverifiable: true,
+            ...(nextStatus === "cancel_failed"
+              ? { pgid: job.pgid ?? job.pid }
+              : {}),
+          }
+        : {
+            errorMessage: job.status === "cancelling"
+              ? "Cancelled by user. Auto-reaped after process exit."
+              : `Process ${job.pid} died without completing. Auto-reaped.`,
+            completedAt: nowIso(),
+            pid: null,
+            pidIdentity: null,
+            phase: nextStatus === "cancelled" ? "cancelled" : "failed",
+          };
+      const transitioned = transitionJob(
+        cwd,
+        job.id,
+        [job.status],
+        nextStatus,
+        terminalData
+      );
       if (transitioned.transitioned) {
         return readJobFile(cwd, job.id) ?? job;
       }
@@ -564,67 +753,142 @@ function sleepSync(ms) {
   }
 }
 
-function recoverStaleLock(lockFile) {
-  if (!fs.existsSync(lockFile)) {
-    return;
-  }
+function unlinkLockIfUnchanged(lockFile, expectedSource) {
   try {
-    const lockData = JSON.parse(fs.readFileSync(lockFile, "utf8"));
-    const ownerMatch = validateProcessIdentity(lockData.pid, lockData.identity);
-    if (!ownerMatch) {
+    if (fs.readFileSync(lockFile, "utf8") === expectedSource) {
       fs.unlinkSync(lockFile);
     }
-  } catch {
-    try {
-      fs.unlinkSync(lockFile);
-    } catch {}
-  }
+  } catch {}
 }
 
-function writeLockOwnership(lockFile) {
-  let myIdentity = null;
+function recoverStaleLock(lockFile) {
+  let lockSource;
+  let lockFileAgeMs;
   try {
-    myIdentity = getProcessIdentity(process.pid);
+    lockSource = fs.readFileSync(lockFile, "utf8");
+    lockFileAgeMs = Date.now() - fs.statSync(lockFile).mtimeMs;
+  } catch {
+    return;
+  }
+
+  if (lockFileAgeMs >= LOCK_HARD_STALE_MS) {
+    unlinkLockIfUnchanged(lockFile, lockSource);
+    return;
+  }
+
+  let lockData;
+  try {
+    lockData = JSON.parse(lockSource);
+  } catch {
+    if (lockFileAgeMs >= INVALID_LOCK_STALE_MS) {
+      unlinkLockIfUnchanged(lockFile, lockSource);
+    }
+    return;
+  }
+
+  const pid = lockData?.pid;
+  if (!Number.isInteger(pid) || pid <= 0) {
+    if (lockFileAgeMs >= INVALID_LOCK_STALE_MS) {
+      unlinkLockIfUnchanged(lockFile, lockSource);
+    }
+    return;
+  }
+
+  if (!isProcessAlive(pid)) {
+    unlinkLockIfUnchanged(lockFile, lockSource);
+    return;
+  }
+
+  const timestamp = Number(lockData.timestamp);
+  const liveLockLeaseExpired =
+    Number.isFinite(timestamp) &&
+    Date.now() - timestamp >= LIVE_LOCK_LEASE_MS;
+  if (!liveLockLeaseExpired) {
+    return;
+  }
+  if (typeof lockData.identity !== "string" || !lockData.identity) {
+    return;
+  }
+
+  try {
+    if (getProcessIdentity(pid) !== lockData.identity) {
+      unlinkLockIfUnchanged(lockFile, lockSource);
+    }
   } catch {}
-  fs.writeFileSync(
-    lockFile,
-    JSON.stringify({
-      pid: process.pid,
-      identity: myIdentity,
-      timestamp: Date.now(),
-    }),
-    { mode: 0o600 }
-  );
 }
 
 function acquireJobLock(lockFile) {
-  for (let attempt = 0; attempt < CAS_MAX_RETRIES; attempt++) {
-    recoverStaleLock(lockFile);
-    try {
-      const fd = fs.openSync(lockFile, "wx");
-      writeLockOwnership(lockFile);
-      return fd;
-    } catch (err) {
-      if (err.code === "EEXIST" && attempt < CAS_MAX_RETRIES - 1) {
-        const delay =
-          CAS_RETRY_DELAY_MS + Math.random() * CAS_RETRY_DELAY_MS;
-        sleepSync(delay);
-        continue;
-      }
-      throw err;
-    }
-  }
-  return null;
-}
+  let lockOwnerIdentity = null;
+  try {
+    lockOwnerIdentity = getProcessIdentity(process.pid);
+  } catch {}
+  const token = randomBytes(16).toString("hex");
+  const stagedLockFile =
+    `${lockFile}.publish.${process.pid}.${token}`;
+  const lockSource = JSON.stringify({
+    pid: process.pid,
+    identity: lockOwnerIdentity,
+    timestamp: Date.now(),
+    token,
+  });
 
-function releaseJobLock(lockFile, fd) {
-  if (fd != null) {
+  try {
+    fs.writeFileSync(
+      stagedLockFile,
+      lockSource,
+      { encoding: "utf8", mode: 0o600, flag: "wx" }
+    );
+
+    for (let attempt = 0; ; attempt += 1) {
+      recoverStaleLock(lockFile);
+      try {
+        if (hardLinksUnsupported) {
+          fs.writeFileSync(lockFile, lockSource, {
+            encoding: "utf8",
+            mode: 0o600,
+            flag: "wx",
+          });
+        } else {
+          fs.linkSync(stagedLockFile, lockFile);
+        }
+        return token;
+      } catch (err) {
+        if (
+          !hardLinksUnsupported &&
+          HARD_LINK_UNSUPPORTED_CODES.has(err.code)
+        ) {
+          hardLinksUnsupported = true;
+          attempt -= 1;
+          continue;
+        }
+        if (err.code === "EEXIST" && attempt < CAS_MAX_RETRIES - 1) {
+          const delay =
+            CAS_RETRY_DELAY_MS + Math.random() * CAS_RETRY_DELAY_MS;
+          sleepSync(delay);
+          continue;
+        }
+        if (err.code === "EEXIST") {
+          throw Object.assign(
+            new Error(`Job state lock remained busy: ${lockFile}`),
+            { code: "ELOCKBUSY", cause: err }
+          );
+        }
+        throw err;
+      }
+    }
+  } finally {
     try {
-      fs.closeSync(fd);
+      fs.unlinkSync(stagedLockFile);
     } catch {}
   }
+}
+
+function releaseJobLock(lockFile, token) {
   try {
-    fs.unlinkSync(lockFile);
+    const current = JSON.parse(fs.readFileSync(lockFile, "utf8"));
+    if (current.token === token) {
+      fs.unlinkSync(lockFile);
+    }
   } catch {}
 }
 
@@ -702,7 +966,7 @@ export function transitionJob(cwd, jobId, expectedStatuses, next, extra = {}) {
   const expectedList = Array.isArray(expectedStatuses)
     ? expectedStatuses
     : [expectedStatuses];
-  const fd = acquireJobLock(lockFile);
+  const lockToken = acquireJobLock(lockFile);
 
   try {
     const job = JSON.parse(fs.readFileSync(jobFile, "utf8"));
@@ -727,7 +991,7 @@ export function transitionJob(cwd, jobId, expectedStatuses, next, extra = {}) {
       job: updatedJob,
     };
   } finally {
-    releaseJobLock(lockFile, fd);
+    releaseJobLock(lockFile, lockToken);
   }
 }
 
@@ -756,6 +1020,15 @@ export function cleanupOldJobs(cwd) {
     try {
       fs.unlinkSync(jobFile);
     } catch {}
+    try {
+      fs.unlinkSync(jobFile + WINDOWS_IDENTITY_CHECK_SUFFIX);
+    } catch {}
+    try {
+      fs.unlinkSync(jobFile + WINDOWS_IDENTITY_PROBE_SUFFIX);
+    } catch {}
+    try {
+      fs.unlinkSync(jobFile + WINDOWS_IDENTITY_UNAVAILABLE_SUFFIX);
+    } catch {}
     const defaultLogFile = resolveJobLogFile(cwd, job.id);
     try {
       fs.unlinkSync(defaultLogFile);
@@ -765,16 +1038,21 @@ export function cleanupOldJobs(cwd) {
   const jobsDir = resolveJobsDir(cwd);
   try {
     for (const entry of fs.readdirSync(jobsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(JOB_RESERVATION_SUFFIX)) {
+      const maxAgeMs = entry.name.endsWith(JOB_RESERVATION_SUFFIX)
+        ? RESERVED_JOB_FILE_MAX_AGE_MS
+        : /\.json\.lock\.publish\.\d+\.[0-9a-f]{32}$/u.test(entry.name)
+          ? LOCK_HARD_STALE_MS
+          : null;
+      if (!entry.isFile() || maxAgeMs === null) {
         continue;
       }
       try {
-        const reservationPath = path.join(jobsDir, entry.name);
-        const stat = fs.statSync(reservationPath);
-        if (Date.now() - stat.mtimeMs <= RESERVED_JOB_FILE_MAX_AGE_MS) {
+        const transientPath = path.join(jobsDir, entry.name);
+        const stat = fs.statSync(transientPath);
+        if (Date.now() - stat.mtimeMs <= maxAgeMs) {
           continue;
         }
-        fs.unlinkSync(reservationPath);
+        fs.unlinkSync(transientPath);
       } catch {
         continue;
       }

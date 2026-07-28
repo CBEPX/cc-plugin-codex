@@ -18,7 +18,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureNativePluginHooksEnabled } from "./lib/codex-config.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
-import { removeManagedHooks } from "./lib/managed-global-integration.mjs";
+import {
+  removeManagedHooks,
+  writeTextAtomic,
+} from "./lib/managed-global-integration.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -36,16 +39,11 @@ function readTextFile(filePath) {
   return fs.readFileSync(filePath, "utf8");
 }
 
-function writeTextFile(filePath, content) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, content, "utf8");
-}
-
 function configureNativePluginHooks() {
   const existing = readTextFile(CODEX_CONFIG_TOML) ?? "";
   const { changed, content } = ensureNativePluginHooksEnabled(existing);
   if (changed || !fs.existsSync(CODEX_CONFIG_TOML)) {
-    writeTextFile(CODEX_CONFIG_TOML, content);
+    writeTextAtomic(CODEX_CONFIG_TOML, content);
   }
   return changed;
 }
@@ -55,8 +53,12 @@ function configureNativePluginHooks() {
 // ---------------------------------------------------------------------------
 
 function main() {
+  if (!removeManagedHooks(PLUGIN_ROOT)) {
+    throw new Error(
+      `Cannot safely remove legacy hooks while ${path.join(CODEX_DIR, "hooks.json")} is invalid.`
+    );
+  }
   const nativeHooksChanged = configureNativePluginHooks();
-  removeManagedHooks(PLUGIN_ROOT);
 
   if (nativeHooksChanged) {
     console.log("Enabled native Codex plugin hooks in ~/.codex/config.toml.");

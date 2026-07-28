@@ -19,6 +19,7 @@
           {
             "type": "command",
             "command": "node \"$PLUGIN_ROOT/hooks/session-lifecycle-hook.mjs\" SessionEnd",
+            "timeout": 45,
             "statusMessage": "Cleaning up Claude Code bridge jobs"
           }
         ]

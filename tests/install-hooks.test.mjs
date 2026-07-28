@@ -26,6 +26,7 @@ function runInstallHooks(homeDir, scriptPath = SCRIPT_PATH, cwd = PROJECT_ROOT) 
       ...process.env,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      CODEX_HOME: path.join(homeDir, ".codex"),
     },
     encoding: "utf8",
   });
@@ -155,5 +156,31 @@ describe("install-hooks.mjs", () => {
 
     const hooks = JSON.parse(fs.readFileSync(path.join(codexDir, "hooks.json"), "utf8"));
     assert.equal(hooks.hooks.SessionStart[0].hooks[0].command, "echo custom-hook");
+  });
+
+  it("fails before changing config when global hooks JSON is malformed", () => {
+    const homeDir = makeTempHome();
+    tempHomes.push(homeDir);
+    const codexDir = path.join(homeDir, ".codex");
+    const hooksFile = path.join(codexDir, "hooks.json");
+    const configFile = path.join(codexDir, "config.toml");
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(hooksFile, "{invalid\n", "utf8");
+
+    const result = spawnSync(process.execPath, [SCRIPT_PATH], {
+      cwd: PROJECT_ROOT,
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        CODEX_HOME: codexDir,
+      },
+      encoding: "utf8",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Cannot safely remove legacy hooks/);
+    assert.equal(fs.readFileSync(hooksFile, "utf8"), "{invalid\n");
+    assert.equal(fs.existsSync(configFile), false);
   });
 });

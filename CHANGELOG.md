@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## v1.5.2
+
+### Added
+
+- Isolate every test process behind a temporary `CODEX_HOME` preload and add a sentinel regression test proving production state helpers cannot write into the user's real Codex state.
+- Add enforced C8 coverage gates with a 89/89/79/96 ratchet, test-source type checking, full macOS/Linux and Node.js 18 unit coverage, a curated Windows-safe suite, and retained CI reports.
+- Gate pull requests with Stryker's parser contracts at an 80% break threshold plus managed-cleanup and installer shards at 55%; run all seven shards on the weekly/manual job and fail if line-range scopes drift away from their named functions.
+
+### Changed
+
+- Replace broad prose snapshots with focused executable skill-contract checks while retaining workspace, foreground execution, empty-placeholder, model-inheritance, notification, routing, raw-CLI fallback, and background-launch invariants.
+- Expand regression coverage for current Claude Code behavior, Opus aliases, hook block/error paths, installer RPC failures, job selection, managed cleanup, and the existing normalized `contextWindow` JSON contract.
+
+### Fixed
+
+- Refuse managed global cleanup when `hooks.json` is malformed or has an invalid shape, preserving hook and wrapper data instead of partially deleting it.
+- Preserve unrelated hook document keys and entries while removing only plugin-managed hooks and wrappers after confirmed official uninstall signals.
+- Validate marketplace and hook documents before mutation, tolerate unavailable or unrecognized Codex `plugin/uninstall` failures, and keep explicit RPC permission/auth refusals fail-closed unless the recovery override is set.
+- Derive uninstall targets from observed config/cache state, attempt every installed marketplace even when an earlier uninstall RPC is unavailable, and continue validated local cleanup when stale Codex state or future RPC wording would otherwise make uninstall permanently unrepeatable.
+- Match only anchored plugin-absence RPC messages so unexpected errors containing words such as `unknown` or `not found` are handled by the explicit recovery policy instead of being misclassified as confirmed absence.
+- Keep install/update/uninstall recoverable when foreign hook data is malformed, with an explicit escape hatch that preserves risky legacy hook files while still removing official plugin config and cache state.
+- Rewrite retained global `hooks.json`, shared `config.toml`, and personal `marketplace.json` documents through synced same-directory temporary files and atomic renames when inode identity can change; follow existing symlinks, preserve file modes, and recover hard-linked in-place rewrites from synced backups.
+- Defer destructive legacy-install cleanup until the replacement Codex marketplace/plugin install succeeds, so an unavailable remote update leaves the working legacy install intact.
+- Stop obsolete hooks after confirmed official uninstall even when malformed hook data blocks cleanup, with a resettable one-time repair warning.
+- Keep refusal-marker cleanup best-effort so permissions or Windows file locking cannot fail healthy native hook invocations or an otherwise completed uninstall.
+- Preserve foreign hook shapes and empty entries, and make the shipped legacy hook installer fail before changing config when cleanup is unsafe.
+- Match managed hook paths case-insensitively on Windows, exercise cleanup and line-range guards in Windows CI, and validate complete function spans for mutation scopes.
+- Launch both legacy JavaScript and current native Claude Code npm shims directly on Windows, skipping stale or unsupported shims when a later PATH entry is usable, avoiding Node.js `.cmd` spawn failures without routing prompts through a command shell.
+- Record Windows process identities through CIM and atomically compare the stored identity before dispatching `taskkill`, re-checking failed terminations so processes that exit during cancellation are reported accurately.
+- Keep Windows hooks responsive with a time-bounded, half-open circuit breaker for read-only CIM probes while bypassing it for required spawn-time identity capture, persist failed reaper-probe throttling across one-shot hook processes with a two-second read-only timeout, always attempt atomic identity-checked cancellation for every job, distinguish pre-check absence, CIM failure, and exit during `taskkill`, grant five-minute identity leases only after successful verification, retain the first unavailable-check timestamp without refreshing it, fail open when that timestamp cannot be persisted, stop treating the job as active after a fifteen-minute unverifiable ceiling while preserving late successful results and requiring explicit CIM verification before rendering any destructive Windows cleanup command, bound cancellation identity and termination calls to ten seconds, cap aggregate SessionEnd process cleanup at twenty seconds before preserving remaining jobs for manual recovery, and hide every spawned command window.
+- Resolve lock-owner identity before publication, stage the complete ownership record privately and atomically hard-link it into place, fall back once per process to exclusive-create publication on filesystems that reject hard links, use per-owner tokens so stale holders cannot remove replacement locks, retry tagged lock contention without rewriting successful executions as raw filesystem failures, clean up only crash-orphaned staging files whose names exactly match the writer's format, protect legacy malformed locks with a fifteen-second grace period, and recover otherwise unverifiable locks after a two-minute hard ceiling.
+- Keep unverifiable live-owner locks fail-closed within that ceiling, treat identity lookup races and timeouts as unverifiable instead of PID mismatches, deliberately keep POSIX job reaping fail-open when identity lookup is unavailable, treat `EPERM` liveness probes as proof that POSIX processes and process groups still exist, preserve recovery PIDs when POSIX cancellation cannot verify a live process group, re-check a surviving leader's identity before SIGKILL while still escalating orphaned child groups after their leader exits, classify already-exited POSIX and Windows process trees accurately, and render platform-correct manual cleanup commands against the same PID that was verified.
+- Run the process lifecycle suite in Windows CI with platform-neutral Node.js fixtures, including a real CIM lookup and identity-checked child-process tree termination, and expand mutation shards across the complete changed process, reaper, and lock-recovery functions.
+
 ## v1.5.1
 
 ### Fixed

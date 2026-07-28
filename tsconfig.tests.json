@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "tests/**/*.mjs"
+  ],
+  "exclude": [
+    "node_modules",
+    "tasks"
+  ]
+}

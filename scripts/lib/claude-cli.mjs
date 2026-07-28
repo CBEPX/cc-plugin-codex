@@ -14,7 +14,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
-import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
+import {
+  getProcessIdentity,
+  getSpawnedProcessIdentity,
+  isProcessAlive,
+  isProcessGroupAlive,
+  terminateProcessTreeIfIdentityMatches,
+} from "./process.mjs";
 
 const CLAUDE_BIN = "claude";
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
@@ -34,6 +40,79 @@ const MODEL_FIELD_NAMES = [
   "selected_model",
   "selectedModel",
 ];
+
+function resolveClaudeNpmShim(shimPath) {
+  let source;
+  try {
+    source = fs.readFileSync(shimPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const match = source.match(
+    /"%(?:dp0%|~dp0)[\\/]([^"\r\n]*@anthropic-ai[\\/]claude-code[\\/](?:cli\.js|bin[\\/]claude\.exe))"/iu
+  );
+  if (!match) {
+    return null;
+  }
+
+  const parts = match[1].split(/[\\/]/u);
+  const target = path.resolve(path.dirname(shimPath), ...parts);
+  try {
+    if (!fs.statSync(target).isFile()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return target.toLowerCase().endsWith(".exe")
+    ? { executable: target, prefixArgs: [] }
+    : { executable: process.execPath, prefixArgs: [target] };
+}
+
+export function resolveClaudeCommand(platform = process.platform, env = process.env) {
+  if (platform !== "win32") {
+    return { executable: CLAUDE_BIN, prefixArgs: [] };
+  }
+
+  const searchPath = env.PATH ?? env.Path ?? "";
+  let firstShimError = null;
+  for (const entry of searchPath.split(";")) {
+    const directory = entry.trim().replace(/^"(.*)"$/u, "$1");
+    if (!directory) {
+      continue;
+    }
+
+    const nativeExecutable = path.join(directory, `${CLAUDE_BIN}.exe`);
+    try {
+      if (fs.statSync(nativeExecutable).isFile()) {
+        return { executable: nativeExecutable, prefixArgs: [] };
+      }
+    } catch {
+      // Keep searching PATH.
+    }
+
+    const npmShim = path.join(directory, `${CLAUDE_BIN}.cmd`);
+    const resolvedShim = resolveClaudeNpmShim(npmShim);
+    if (resolvedShim) {
+      return resolvedShim;
+    }
+    try {
+      if (fs.statSync(npmShim).isFile()) {
+        firstShimError ??= {
+          executable: null,
+          prefixArgs: [],
+          error: `Found Claude command shim at ${npmShim}, but its target could not be resolved safely`,
+        };
+      }
+    } catch {
+      // Keep searching PATH.
+    }
+  }
+
+  return firstShimError ?? { executable: CLAUDE_BIN, prefixArgs: [] };
+}
 
 function pushBoundedTail(list, value, maxEntries) {
   list.push(value);
@@ -228,7 +307,7 @@ function extractClaudeLimitResetText(text) {
 const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b.{0,120}\bresets(?:\s+at)?\b|\b(?:session|usage)\s+limit\s+reached\b/i;
 const CLAUDE_ERROR_LIMIT_RE =
-  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b/i;
+  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|\b429\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
@@ -236,7 +315,7 @@ const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
 const CLAUDE_LIMIT_RESET_TEXT_RE =
   /(?:(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+[^\r\n.]*?limit|\b(?:session|usage)\s+limit(?:\s+reached)?\b)[^\r\n.]*?\bresets(?:\s+at)?\s+([^\r\n.]+)/gi;
 const CLAUDE_ERROR_RESET_TEXT_RE =
-  /(?:rate[_ -]?limit|apierrorstatus"?\s*:?\s*429|\b429\b)[^\r\n.]{0,120}?\bresets\s+at\s+([^\r\n.]+)/gi;
+  /(?:rate[_ -]?limit|\b429\b)[^\r\n.]{0,120}?\bresets\s+at\s+([^\r\n.]+)/gi;
 
 function formatClaudeLimitEpoch(rawEpoch) {
   const epoch = String(rawEpoch ?? "");
@@ -427,10 +506,15 @@ export function areModelIdsEquivalent(left, right) {
 
 export function getClaudeAvailability(cwd) {
   try {
-    const result = spawnSync(CLAUDE_BIN, ["--version"], {
+    const command = resolveClaudeCommand();
+    if (command.error) {
+      return { available: false, detail: command.error };
+    }
+    const result = spawnSync(command.executable, [...command.prefixArgs, "--version"], {
       cwd,
       encoding: "utf8",
       timeout: 10_000,
+      windowsHide: true,
     });
     if (result.status !== 0) throw new Error("non-zero exit");
     return { available: true, detail: (result.stdout ?? "").trim() };
@@ -444,10 +528,15 @@ export function getClaudeAuthStatus(cwd) {
     return { available: true, loggedIn: true, detail: "API key configured" };
   }
   try {
-    const result = spawnSync(CLAUDE_BIN, ["auth", "status"], {
+    const command = resolveClaudeCommand();
+    if (command.error) {
+      return { available: false, loggedIn: false, detail: command.error };
+    }
+    const result = spawnSync(command.executable, [...command.prefixArgs, "auth", "status"], {
       cwd,
       encoding: "utf8",
       timeout: 10_000,
+      windowsHide: true,
     });
     if (result.status !== 0) throw new Error("not authenticated");
     return { available: true, loggedIn: true, detail: "authenticated" };
@@ -1192,11 +1281,33 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     ...options,
   });
   const requestedModel = options.model ? resolveModel(options.model) : null;
+  const command = resolveClaudeCommand();
+  if (command.error) {
+    return {
+      status: "failed",
+      exitCode: -1,
+      sessionId: null,
+      finalMessage: "",
+      structuredOutput: null,
+      toolUses: [],
+      touchedFiles: [],
+      requestedModel,
+      finalModel: null,
+      contextWindow: null,
+      modelEvents: [],
+      failure: classifyClaudeFailure({ stderr: command.error }),
+      stderr: command.error,
+      pid: null,
+      pidIdentity: null,
+    };
+  }
+  const executableArgs = [...command.prefixArgs, ...args];
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(CLAUDE_BIN, args, {
+    const proc = spawn(command.executable, executableArgs, {
       cwd,
       detached: true, // new process group for safe cancellation
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"], // stdin ignored — prompt is passed as CLI arg
       env: {
         ...process.env,
@@ -1209,7 +1320,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
 
     let pidIdentity = null;
     try {
-      pidIdentity = getProcessIdentity(proc.pid);
+      pidIdentity = getSpawnedProcessIdentity(proc.pid);
     } catch {
       // Best-effort — may fail on some platforms
     }
@@ -1378,41 +1489,119 @@ export async function runClaudeAdversarialReview(
  * Cancel a running Claude Code process.
  * Uses process group kill with PID identity verification.
  */
-export async function cancelClaudeProcess(pid, pidIdentity) {
+export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
+  const platform = options.platform ?? process.platform;
+
+  if (platform === "win32") {
+    try {
+      const terminate =
+        options.terminateProcessTreeIfIdentityMatchesImpl ??
+        terminateProcessTreeIfIdentityMatches;
+      const result = terminate(pid, pidIdentity, { platform });
+      if (result.delivered) {
+        return { cancelled: true };
+      }
+      if (result.reason === "process-missing") {
+        return { cancelled: true, note: "Process already exited" };
+      }
+      if (result.reason === "identity-mismatch") {
+        return {
+          cancelled: true,
+          note: "Process already exited (PID recycled)",
+        };
+      }
+      return {
+        cancelled: false,
+        note: "Refused to terminate process tree without a matching PID identity",
+      };
+    } catch (error) {
+      return {
+        cancelled: false,
+        note: `Failed to terminate process tree: ${error.message}`,
+      };
+    }
+  }
+
+  if (!pidIdentity) {
+    return {
+      cancelled: false,
+      note: "Refused to terminate process group without a matching PID identity",
+    };
+  }
+
+  const getIdentity = options.getProcessIdentityImpl ?? getProcessIdentity;
+  const isAlive = options.isProcessAliveImpl ?? isProcessAlive;
+  const isGroupAlive =
+    options.isProcessGroupAliveImpl ?? isProcessGroupAlive;
+
   // Verify PID identity to prevent killing recycled PIDs
-  if (pidIdentity && !validateProcessIdentity(pid, pidIdentity)) {
+  let actualIdentity;
+  try {
+    actualIdentity = getIdentity(pid);
+  } catch (error) {
+    if (isAlive(pid) || isGroupAlive(pid)) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        cancelled: false,
+        note: `Unable to verify process identity: ${detail}`,
+      };
+    }
+    return { cancelled: true, note: "Process already exited" };
+  }
+  if (actualIdentity !== pidIdentity) {
     return {
       cancelled: true,
       note: "Process already exited (PID recycled)",
     };
   }
 
+  const kill = options.killImpl ?? process.kill.bind(process);
+  const wait = options.waitForProcessGroupImpl ?? waitForProcessGroup;
+
   // SIGTERM to entire process group
   try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
-    return { cancelled: true, note: "Process not found" };
+    kill(-pid, "SIGTERM");
+  } catch (error) {
+    return error?.code === "ESRCH"
+      ? { cancelled: true, note: "Process not found" }
+      : { cancelled: false, note: `Failed to send SIGTERM: ${error.message}` };
   }
 
   // Wait for process group to die
-  const dead = await waitForProcessGroup(pid, 5000);
+  const dead = await wait(pid, 5000);
   if (dead) {
     return { cancelled: true };
   }
 
-  // Escalate to SIGKILL
-  if (pidIdentity && !validateProcessIdentity(pid, pidIdentity)) {
+  // The leader can exit while children remain in the original process group.
+  if (!isGroupAlive(pid)) {
     return {
       cancelled: true,
       note: "Process exited during SIGTERM wait",
     };
   }
+  if (isAlive(pid)) {
+    try {
+      if (getIdentity(pid) !== pidIdentity) {
+        return {
+          cancelled: true,
+          note: "Process exited during SIGTERM wait (PID recycled)",
+        };
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        cancelled: false,
+        note: `Unable to re-verify process identity before SIGKILL: ${detail}`,
+      };
+    }
+  }
 
   try {
-    process.kill(-pid, "SIGKILL");
+    kill(-pid, "SIGKILL");
   } catch {}
 
-  const killedDead = await waitForProcessGroup(pid, 3000);
+  const killedDead = await wait(pid, 3000);
   if (killedDead) {
     return { cancelled: true };
   }
@@ -1421,15 +1610,6 @@ export async function cancelClaudeProcess(pid, pidIdentity) {
     cancelled: false,
     note: `Process group ${pid} still alive after SIGKILL`,
   };
-}
-
-function isProcessGroupAlive(pgid) {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function waitForProcessGroup(pgid, timeoutMs) {

@@ -1,8 +1,11 @@
 .claude/
+.serena/
 node_modules/
 .stryker-tmp/
 reports/mutation/
+reports/coverage/
 reports/stryker-incremental.json
+reports/stryker-*-incremental.json
 stryker.log
 *.log
 .DS_Store

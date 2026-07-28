@@ -46,7 +46,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.2
 codex plugin add cc@cbepx
 ```
 
@@ -59,12 +59,14 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.5.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.5.1/cc-plugin-codex-1.5.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.5.2 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.5.2/cc-plugin-codex-1.5.2.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
 Codex CLI's official guidance still treats Windows support as experimental and recommends a WSL workspace for the best Codex experience. Claude Code supports both native Windows and WSL.
+
+If install/update/uninstall reports an invalid global `hooks.json` while a legacy cc install is present, repair that JSON before retrying. To continue without touching risky legacy hook files, set `CC_PLUGIN_CODEX_SKIP_LEGACY_CLEANUP=1`; uninstall still removes official plugin config/cache state but deliberately leaves the legacy files for manual repair. An explicit Codex RPC permission/auth refusal remains fail-closed; use `CC_PLUGIN_CODEX_IGNORE_UNINSTALL_RPC=1` only when you intentionally want local uninstall cleanup despite that refusal.
 
 > **Prerequisites:** Node.js 18+, Codex with hook support, and `claude` CLI installed and authenticated.
 > If you don't have the Claude CLI yet:
@@ -332,7 +334,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.2
 codex plugin add cc@cbepx
 ```
 
@@ -353,8 +355,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.5.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.5.1/cc-plugin-codex-1.5.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.5.2 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.5.2/cc-plugin-codex-1.5.2.tgz install
 ```
 
 After install, run:
@@ -384,7 +386,7 @@ $cc:setup
 Re-run the fork marketplace install flow, pinned to the release you want:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.2
 codex plugin add cc@cbepx
 ```
 
@@ -442,9 +444,13 @@ Run the normal project gate before publishing or opening a PR:
 
 ```bash
 npm run check
+npm run test:coverage
 ```
 
-Mutation testing is available as an advisory local signal for the high-risk CLI parsing and prompt-rendering modules:
+`npm run check` requires a working `codex` executable for its real E2E suite. Constrained local environments may opt out explicitly with `CC_PLUGIN_ALLOW_E2E_SKIP=1 npm run check`; CI never uses that opt-out.
+Coverage stays a separate instrumented run because `npm run check` already executes the full unit, integration, and Codex E2E suites. CI fails below 89% lines/statements, 79% branches, or 96% functions.
+
+Mutation testing enforces the same pull-request profile used in CI:
 
 ```bash
 npm run test:mutation:dry-run
@@ -452,7 +458,7 @@ npm run test:mutation
 npm run test:mutation:force
 ```
 
-Stryker runs through the native `node:test` command runner, so coverage analysis is disabled and the mutation score does not fail the build. The generated report is written under `reports/mutation/`. Use `test:mutation:force` after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; either improve the focused tests or use a `// Stryker disable ...: reason` comment for an intentional equivalent mutant.
+`test:mutation` checks the critical parser contracts plus managed cleanup and installer orchestration. `test:mutation:force` runs all seven shards, matching the weekly/manual workflow. Scores below each configured break threshold fail the command, and reports are written under `reports/mutation/`. Use the force variant after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; improve the focused tests or use a `// Stryker disable ...: reason` comment only for an intentional equivalent mutant.
 
 Mutation testing requires Node.js 20+ because Stryker 9 has a newer development-time engine requirement. The plugin runtime still supports the Node.js version listed in the prerequisites.
 

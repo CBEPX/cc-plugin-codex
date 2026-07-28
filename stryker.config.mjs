@@ -1,14 +1,12 @@
 export default {
   testRunner: "command",
   commandRunner: {
-    command: "npm run test:mutation:unit",
+    command: "npm run test:mutation:critical:unit",
   },
   coverageAnalysis: "off",
   mutate: [
     "scripts/lib/args.mjs",
     "scripts/lib/structured-output.mjs",
-    "scripts/lib/render.mjs",
-    "scripts/lib/claude-cli.mjs",
   ],
   reporters: ["progress", "clear-text", "html", "json"],
   clearTextReporter: {
@@ -19,9 +17,10 @@ export default {
   },
   thresholds: {
     high: 80,
-    low: 60,
-    break: null,
+    low: 55,
+    break: 55,
   },
+  concurrency: 4,
   incremental: true,
   incrementalFile: "reports/stryker-incremental.json",
   htmlReporter: {

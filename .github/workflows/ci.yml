@@ -1,20 +1,20 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
   pull_request:
 
 jobs:
-  core-cross-platform:
-    name: Core checks (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - windows-latest
+  windows-unit:
+    name: Unit (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -26,11 +26,13 @@ jobs:
       - run: npm run check:changelog
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run typecheck:tests
       - run: npm run test:cross-platform
 
   macos-full:
     name: Full CI (macos-latest)
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -40,17 +42,12 @@ jobs:
       - run: npm install -g @openai/codex
       - run: codex --version
       - run: npm ci
-      - run: npm run check:version-sync
-      - run: npm run check:changelog
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run test
-      - run: npm run test:integration
-      - run: npm run test:e2e
+      - run: npm run check
 
-  linux-full:
-    name: Full CI (ubuntu-latest)
+  linux-coverage:
+    name: Coverage (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -64,6 +61,27 @@ jobs:
       - run: npm run check:changelog
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run typecheck:tests
+      - run: npm run test:coverage
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage
+          path: reports/coverage/
+          if-no-files-found: error
+          retention-days: 14
+
+  node18-runtime:
+    name: Runtime compatibility (Node 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 18
+          cache: npm
+      - run: npm ci
+      - run: node --version
       - run: npm run test
       - run: npm run test:integration
-      - run: npm run test:e2e

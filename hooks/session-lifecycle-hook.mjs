@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
 import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
-import { terminateProcessTree, validateProcessIdentity } from "../scripts/lib/process.mjs";
+import { terminateProcessTreeIfIdentityMatches } from "../scripts/lib/process.mjs";
 import {
   ACTIVE_JOB_STATUSES,
   clearCurrentSession,
@@ -39,6 +39,7 @@ export { SESSION_ID_ENV };
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SESSION_CLEANUP_SOFT_BUDGET_MS = 20_000;
 
 function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
@@ -80,24 +81,45 @@ function cleanupSessionJobs(cwd, sessionId) {
     return;
   }
 
+  const cleanupStartedAt = Date.now();
   for (const job of sessionJobs) {
     const stillRunning = ACTIVE_JOB_STATUSES.has(job.status);
     if (!stillRunning) {
       continue;
     }
     const hasPid = Number.isFinite(job.pid);
-    const hasTrustedPid =
+    let canSafelyCancel = !hasPid;
+    let cancellationFailure =
+      "Refused to terminate a stored process without a matching PID identity.";
+    const cleanupBudgetExhausted =
+      hasPid &&
+      Date.now() - cleanupStartedAt >= SESSION_CLEANUP_SOFT_BUDGET_MS;
+    if (cleanupBudgetExhausted) {
+      cancellationFailure =
+        "Skipped process-tree termination because the SessionEnd cleanup budget was exhausted.";
+    } else if (
       hasPid &&
       typeof job.pidIdentity === "string" &&
-      job.pidIdentity &&
-      validateProcessIdentity(job.pid, job.pidIdentity);
-    const canSafelyCancel = !hasPid || hasTrustedPid;
-    try {
-      if (hasTrustedPid) {
-        terminateProcessTree(job.pid);
+      job.pidIdentity
+    ) {
+      try {
+        const result = terminateProcessTreeIfIdentityMatches(
+          job.pid,
+          job.pidIdentity
+        );
+        canSafelyCancel =
+          result.delivered ||
+          result.reason === "process-missing" ||
+          result.reason === "identity-mismatch";
+        if (!canSafelyCancel) {
+          cancellationFailure =
+            "Identity-checked process-tree termination did not complete.";
+        }
+      } catch (error) {
+        canSafelyCancel = false;
+        const detail = error instanceof Error ? error.message : String(error);
+        cancellationFailure = `Failed to terminate the stored process tree: ${detail}`;
       }
-    } catch {
-      // Ignore teardown failures during session shutdown.
     }
     try {
       transitionJob(
@@ -106,14 +128,14 @@ function cleanupSessionJobs(cwd, sessionId) {
         [job.status],
         canSafelyCancel ? "cancelled" : "cancel_failed",
         {
-        completedAt: nowIso(),
-        errorMessage: canSafelyCancel
-          ? "Cancelled when the Codex session ended."
-          : "Refused to terminate a stored process without a matching PID identity.",
-        pid: canSafelyCancel ? null : job.pid ?? null,
-        pidIdentity: canSafelyCancel ? null : job.pidIdentity ?? null,
-        phase: canSafelyCancel ? "cancelled" : "cancel_failed",
-      }
+          completedAt: nowIso(),
+          errorMessage: canSafelyCancel
+            ? "Cancelled when the Codex session ended."
+            : cancellationFailure,
+          pid: canSafelyCancel ? null : job.pid ?? null,
+          pidIdentity: canSafelyCancel ? null : job.pidIdentity ?? null,
+          phase: canSafelyCancel ? "cancelled" : "cancel_failed",
+        }
       );
     } catch {
       // Ignore state transition races during session shutdown.

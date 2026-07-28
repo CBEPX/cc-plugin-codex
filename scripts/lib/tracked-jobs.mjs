@@ -21,6 +21,22 @@ export const SESSION_ID_ENV = "CLAUDE_COMPANION_SESSION_ID";
 export const MAX_JOB_LOG_BYTES = 1024 * 1024;
 export const MAX_JOB_MODEL_FALLBACK_EVENTS = 50;
 const LOG_TRUNCATION_MARKER = "[... earlier log output truncated ...]\n";
+const TRACKED_JOB_TRANSITION_RETRIES = 3;
+
+function transitionTrackedJob(...args) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return transitionJob(...args);
+    } catch (error) {
+      if (
+        error?.code !== "ELOCKBUSY" ||
+        attempt >= TRACKED_JOB_TRANSITION_RETRIES - 1
+      ) {
+        throw error;
+      }
+    }
+  }
+}
 
 function sliceTextTailByBytes(text, maxBytes) {
   const normalized = typeof text === "string" ? text : String(text ?? "");
@@ -347,21 +363,47 @@ export async function runTrackedJob(job, runner, options = {}) {
     pidIdentity: job.pidIdentity ?? null,
     logFile: options.logFile ?? job.logFile ?? null
   };
-  writeJobFile(job.workspaceRoot, job.id, runningRecord);
+  const storedJob = readJobFile(job.workspaceRoot, job.id);
+  if (storedJob) {
+    const started = transitionTrackedJob(
+      job.workspaceRoot,
+      job.id,
+      ["queued", "running"],
+      "running",
+      {
+        startedAt: runningRecord.startedAt,
+        phase: runningRecord.phase,
+        logFile: runningRecord.logFile,
+      }
+    );
+    if (!started.transitioned) {
+      throw new Error(
+        `Job ${job.id} left the queue before execution started (${started.job?.status ?? "unknown"}).`
+      );
+    }
+  } else {
+    writeJobFile(job.workspaceRoot, job.id, runningRecord);
+  }
 
   // onSpawn callback: persist Claude child PID/identity at spawn time
   // Guarded by status check — only write if job is still running (cancel may have won)
   const onSpawn = ({ pid, pidIdentity }) => {
-    const transition = transitionJob(
-      job.workspaceRoot,
-      job.id,
-      ["running"],
-      "running",
-      {
-        pid,
-        pidIdentity,
-      }
-    );
+    let transition;
+    try {
+      transition = transitionTrackedJob(
+        job.workspaceRoot,
+        job.id,
+        ["running"],
+        "running",
+        {
+          pid,
+          pidIdentity,
+        }
+      );
+    } catch (error) {
+      try { terminateProcessTree(pid); } catch {}
+      throw error;
+    }
     if (!transition.transitioned) {
       // Job already left running state (cancel won the race) — kill the child immediately
       try { terminateProcessTree(pid); } catch {}
@@ -389,13 +431,30 @@ export async function runTrackedJob(job, runner, options = {}) {
       ...(modelFallbacks.length > 0 ? { modelFallbacks } : {}),
     };
 
-    const transitioned = transitionJob(
+    let transitioned = transitionTrackedJob(
       job.workspaceRoot,
       job.id,
       ["running"],
       completionStatus,
       terminalData
     );
+    if (
+      !transitioned.transitioned &&
+      transitioned.previousStatus === "failed" &&
+      transitioned.job?.reapedUnverifiable === true
+    ) {
+      transitioned = transitionTrackedJob(
+        job.workspaceRoot,
+        job.id,
+        ["failed"],
+        completionStatus,
+        {
+          ...terminalData,
+          errorMessage: null,
+          reapedUnverifiable: false,
+        }
+      );
+    }
     // If CAS failed, another actor (cancel) already moved the job to a different state — respect that
 
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
@@ -406,14 +465,16 @@ export async function runTrackedJob(job, runner, options = {}) {
     const completedAt = nowIso();
 
     // Use CAS: running → failed
-    transitionJob(job.workspaceRoot, job.id, ["running"], "failed", {
-      errorMessage,
-      pid: null,
-      pidIdentity: null,
-      phase: "failed",
-      completedAt,
-      logFile: options.logFile ?? job.logFile ?? null
-    });
+    if (error?.code !== "ELOCKBUSY") {
+      transitionTrackedJob(job.workspaceRoot, job.id, ["running"], "failed", {
+        errorMessage,
+        pid: null,
+        pidIdentity: null,
+        phase: "failed",
+        completedAt,
+        logFile: options.logFile ?? job.logFile ?? null
+      });
+    }
     cleanupOldJobs(job.workspaceRoot);
 
     throw error;
