@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
 
@@ -1804,7 +1804,7 @@ fs.renameSync = (source, destination) => {
     );
 
     const result = spawnProjectInstaller("install", homeDir, {
-      NODE_OPTIONS: `--import=${preload}`,
+      NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
       CC_PLUGIN_ATOMIC_RENAME_FAIL_PATH: configFile,
     });
 

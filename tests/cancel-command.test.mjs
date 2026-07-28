@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, test } from "node:test";
 
 import { getProcessIdentity } from "../scripts/lib/process.mjs";
@@ -16,12 +16,9 @@ import {
 
 const ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMPANION = path.join(ROOT, "scripts", "claude-companion.mjs");
-const SWAP_PRELOAD = path.join(
-  ROOT,
-  "tests",
-  "fixtures",
-  "swap-job-after-read.mjs"
-);
+const SWAP_PRELOAD = pathToFileURL(
+  path.join(ROOT, "tests", "fixtures", "swap-job-after-read.mjs")
+).href;
 const cleanup = [];
 
 afterEach(() => {
