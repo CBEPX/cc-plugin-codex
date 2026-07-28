@@ -599,6 +599,81 @@ describe("renderJobStatusReport", () => {
 
     assert.ok(output.includes("| Model fallback | claude-opus-4-8 -> claude-sonnet-5 (capacity) |"));
   });
+
+  it("shows Windows process-tree cleanup for failed cancellation", () => {
+    const output = renderJobStatusReport(
+      {
+        id: "j4",
+        status: "cancel_failed",
+        pid: 12345,
+        pgid: 54321,
+        pidIdentity: "133820000000000000",
+      },
+      "win32"
+    );
+
+    assert.ok(output.includes("Verify process"));
+    assert.ok(output.includes("133820000000000000"));
+    assert.ok(output.includes("Manual cleanup (after verification)"));
+    assert.ok(output.includes("taskkill /PID 54321 /T /F"));
+    assert.ok(!output.includes("12345"));
+    assert.ok(!output.includes("kill -9"));
+  });
+
+  it("shows Windows cleanup for a failed job that retains a live PID", () => {
+    const output = renderJobStatusReport(
+      {
+        id: "j5",
+        status: "failed",
+        pid: 12345,
+        pidIdentity: "2026-07-27T00:00:00.000Z",
+      },
+      "win32"
+    );
+
+    assert.ok(output.includes("Verify process"));
+    assert.ok(output.includes("Get-CimInstance Win32_Process"));
+    assert.ok(output.includes("2026-07-27T00:00:00.000Z"));
+    assert.ok(output.includes("Manual cleanup (after verification)"));
+    assert.ok(output.includes("taskkill /PID 12345 /T /F"));
+  });
+
+  it("does not suggest cleanup without a failed live Windows process", () => {
+    const reports = [
+      renderJobStatusReport(
+        { id: "j6", status: "failed", pid: 12345 },
+        "linux"
+      ),
+      renderJobStatusReport({ id: "j7", status: "failed" }, "win32"),
+      renderJobStatusReport(
+        { id: "j8", status: "completed", pid: 12345 },
+        "win32"
+      ),
+    ];
+
+    for (const output of reports) {
+      assert.ok(!output.includes("Manual cleanup"));
+    }
+  });
+
+  it("shows POSIX group cleanup for cancel_failed status", () => {
+    const output = renderJobStatusReport(
+      { id: "j9", status: "cancel_failed", pgid: 12345 },
+      "linux"
+    );
+    assert.ok(output.includes("Manual cleanup"));
+    assert.ok(output.includes("kill -9 -12345"));
+    assert.ok(!output.includes("Verify process"));
+  });
+
+  it("omits status cleanup when cancel_failed has no recorded process", () => {
+    const output = renderJobStatusReport(
+      { id: "j10", status: "cancel_failed" },
+      "linux"
+    );
+    assert.ok(!output.includes("Manual cleanup"));
+    assert.ok(!output.includes("kill -9"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -763,8 +838,41 @@ describe("renderCancelReport", () => {
   });
 
   it("shows manual cleanup warning for cancel_failed", () => {
-    const output = renderCancelReport({ id: "j1", status: "cancel_failed", pgid: 12345 });
+    const output = renderCancelReport(
+      { id: "j1", status: "cancel_failed", pgid: 12345 },
+      "linux"
+    );
     assert.ok(output.includes("Manual cleanup"));
     assert.ok(output.includes("kill -9 -12345"));
+    assert.ok(!output.includes("Verify process"));
+  });
+
+  it("shows Windows process-tree cleanup for cancel_failed", () => {
+    const output = renderCancelReport(
+      {
+        id: "j1",
+        status: "cancel_failed",
+        pid: 12345,
+        pgid: 54321,
+        pidIdentity: "133820000000000000",
+      },
+      "win32"
+    );
+    assert.ok(output.includes("Verify process before cleanup"));
+    assert.ok(output.includes("Get-CimInstance Win32_Process"));
+    assert.ok(output.includes("133820000000000000"));
+    assert.ok(output.includes("Manual cleanup (after verification)"));
+    assert.ok(output.includes("taskkill /PID 54321 /T /F"));
+    assert.ok(!output.includes("12345"));
+    assert.ok(!output.includes("kill -9"));
+  });
+
+  it("does not render a destructive command when cancel_failed has no PID", () => {
+    const output = renderCancelReport(
+      { id: "j1", status: "cancel_failed" },
+      "win32"
+    );
+    assert.ok(output.includes("no cleanup PID was recorded"));
+    assert.ok(!output.includes("taskkill"));
   });
 });

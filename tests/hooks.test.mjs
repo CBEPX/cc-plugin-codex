@@ -4,14 +4,15 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SANDBOX_STOP_REVIEW_TOOLS } from "../scripts/lib/claude-cli.mjs";
+import { getProcessIdentity } from "../scripts/lib/process.mjs";
 import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
 const PROJECT_ROOT = path.resolve(
@@ -22,6 +23,7 @@ const SESSION_HOOK = path.join(
   "hooks",
   "session-lifecycle-hook.mjs"
 );
+const HOOKS_MANIFEST = path.join(PROJECT_ROOT, "hooks", "hooks.json");
 const STOP_HOOK = path.join(
   PROJECT_ROOT,
   "hooks",
@@ -465,6 +467,14 @@ describe("hooks", () => {
     }
   });
 
+  it("bounds SessionEnd outside the internal cleanup deadline", () => {
+    const manifest = JSON.parse(fs.readFileSync(HOOKS_MANIFEST, "utf8"));
+    const handler = manifest.hooks.SessionEnd[0].hooks[0];
+
+    assert.equal(handler.timeout, 45);
+    assert.match(handler.command, /session-lifecycle-hook\.mjs.*SessionEnd/u);
+  });
+
   it("session lifecycle hook refuses to kill a stored PID without a matching identity", () => {
     const testEnv = createHookEnvironment();
 
@@ -495,6 +505,177 @@ describe("hooks", () => {
       assert.equal(job.pid, process.pid);
       assert.match(job.errorMessage ?? "", /without a matching PID identity/i);
     } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session lifecycle hook preserves recovery handles after its cleanup budget", () => {
+    const testEnv = createHookEnvironment();
+    const createdAt = new Date().toISOString();
+
+    try {
+      for (const jobId of ["budget-job-one", "budget-job-two"]) {
+        writeStateJob(testEnv, jobId, {
+          id: jobId,
+          status: "running",
+          sessionId: "hook-session",
+          workspaceRoot: testEnv.workspaceDir,
+          createdAt,
+          startedAt: createdAt,
+          pid: process.pid,
+          pidIdentity: `${jobId}-identity`,
+        });
+      }
+      writeStateJob(testEnv, "budget-job-without-pid", {
+        id: "budget-job-without-pid",
+        status: "queued",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt,
+      });
+
+      const clockPreload = path.join(testEnv.rootDir, "cleanup-clock.mjs");
+      fs.writeFileSync(
+        clockPreload,
+        `const realNow = Date.now.bind(Date);
+let cleanupReads = 0;
+Date.now = () => {
+  const caller = new Error().stack?.split("\\n")[2] ?? "";
+  if (caller.includes("cleanupSessionJobs")) {
+    cleanupReads += 1;
+    return cleanupReads === 1 ? 1_000_000 : 1_020_000;
+  }
+  return realNow();
+};
+`,
+        "utf8"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+        },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [
+            process.env.NODE_OPTIONS,
+            `--import=${pathToFileURL(clockPreload).href}`,
+          ]
+            .filter(Boolean)
+            .join(" "),
+        }
+      );
+
+      for (const jobId of ["budget-job-one", "budget-job-two"]) {
+        const job = readStateJob(testEnv, jobId);
+        assert.equal(job.status, "cancel_failed");
+        assert.equal(job.phase, "cancel_failed");
+        assert.equal(job.pid, process.pid);
+        assert.equal(job.pidIdentity, `${jobId}-identity`);
+        assert.match(job.errorMessage ?? "", /cleanup budget was exhausted/i);
+      }
+      assert.equal(
+        readStateJob(testEnv, "budget-job-without-pid").status,
+        "cancelled"
+      );
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session lifecycle hook marks an already-exited stored process cancelled", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      writeStateJob(testEnv, "exited-running-job", {
+        id: "exited-running-job",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        startedAt: "2026-04-04T01:00:01Z",
+        pid: 99_999_999,
+        pidIdentity: "exited-process-identity",
+      });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+        },
+        testEnv.env
+      );
+
+      const job = readStateJob(testEnv, "exited-running-job");
+      assert.equal(job.status, "cancelled");
+      assert.equal(job.phase, "cancelled");
+      assert.equal(job.pid, null);
+      assert.equal(job.pidIdentity, null);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session lifecycle hook preserves a live PID when POSIX identity lookup fails", async () => {
+    if (process.platform !== "darwin") {
+      return;
+    }
+
+    const testEnv = createHookEnvironment();
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" }
+    );
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+
+    try {
+      const identity = getProcessIdentity(child.pid);
+      const failingBin = path.join(testEnv.rootDir, "failing-ps");
+      fs.mkdirSync(failingBin);
+      const fakePs = path.join(failingBin, "ps");
+      fs.writeFileSync(fakePs, "#!/bin/sh\nexit 2\n", "utf8");
+      fs.chmodSync(fakePs, 0o755);
+      writeStateJob(testEnv, "identity-unavailable-job", {
+        id: "identity-unavailable-job",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        startedAt: "2026-04-04T01:00:01Z",
+        pid: child.pid,
+        pidIdentity: identity,
+      });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+        },
+        {
+          ...testEnv.env,
+          PATH: `${failingBin}${path.delimiter}${testEnv.env.PATH}`,
+        }
+      );
+
+      const job = readStateJob(testEnv, "identity-unavailable-job");
+      assert.equal(job.status, "cancel_failed");
+      assert.equal(job.phase, "cancel_failed");
+      assert.equal(job.pid, child.pid);
+      assert.equal(job.pidIdentity, identity);
+      assert.doesNotThrow(() => process.kill(child.pid, 0));
+    } finally {
+      child.kill();
       cleanupHookEnvironment(testEnv);
     }
   });

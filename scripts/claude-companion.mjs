@@ -61,7 +61,10 @@ import {
   ensureGitRepository,
   resolveReviewTarget
 } from "./lib/git.mjs";
-import { binaryAvailable, getProcessIdentity } from "./lib/process.mjs";
+import {
+  binaryAvailable,
+  getSpawnedProcessIdentity,
+} from "./lib/process.mjs";
 import { callCodexAppServer } from "./lib/codex-app-server.mjs";
 import {
   importExternalAgentSession,
@@ -1558,7 +1561,7 @@ function enqueueBackgroundReview(cwd, job, request) {
   if (child.pid != null) {
     let pidIdentity = null;
     try {
-      pidIdentity = getProcessIdentity(child.pid);
+      pidIdentity = getSpawnedProcessIdentity(child.pid);
     } catch {}
     patchJob(job.workspaceRoot, job.id, {
       pid: child.pid,
@@ -1817,7 +1820,7 @@ function enqueueDetachedTask(cwd, job, request, options = {}) {
   if (child.pid != null) {
     let pidIdentity = null;
     try {
-      pidIdentity = getProcessIdentity(child.pid);
+      pidIdentity = getSpawnedProcessIdentity(child.pid);
     } catch {}
     patchJob(job.workspaceRoot, job.id, {
       pid: child.pid,
@@ -2664,7 +2667,6 @@ async function handleCancel(argv) {
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference);
-  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
 
   // CAS: running/queued → cancelling
   const transition = transitionJob(
@@ -2674,17 +2676,18 @@ async function handleCancel(argv) {
     "cancelling"
   );
   if (!transition.transitioned) {
+    const currentStatus = transition.job?.status ?? job.status;
     outputCommandResult(
-      { jobId: job.id, status: job.status },
-      `Job ${job.id} is already ${job.status}.\n`,
+      { jobId: job.id, status: currentStatus },
+      `Job ${job.id} is already ${currentStatus}.\n`,
       options.json
     );
     return;
   }
 
   // Cancel via process group kill with PID identity verification
-  const pid = existing.pid ?? job.pid;
-  const pidIdentity = existing.pidIdentity ?? null;
+  const pid = transition.job.pid ?? null;
+  const pidIdentity = transition.job.pidIdentity ?? null;
   /** @type {{ cancelled: boolean, note?: string }} */
   let cancelResult = { cancelled: true, note: "No PID to cancel" };
   const jobLogFile = resolveJobLogFile(workspaceRoot, job.id);
@@ -2737,7 +2740,7 @@ async function handleCancel(argv) {
   appendLogLine(jobLogFile, `Cancel result: ${effectiveStatus}`);
   cleanupOldJobs(workspaceRoot);
 
-  const nextJob = { ...job, status: effectiveStatus, phase: effectiveStatus };
+  const nextJob = finalTransition.job;
   const payload = {
     jobId: job.id,
     status: effectiveStatus,

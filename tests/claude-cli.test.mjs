@@ -33,8 +33,39 @@ import {
   MAX_STREAM_PARSER_TOUCHED_FILES,
   MAX_STREAM_PARSER_MODEL_EVENTS,
   MAX_STDERR_BYTES,
+  getClaudeAvailability,
+  getClaudeAuthStatus,
+  resolveClaudeCommand,
+  cancelClaudeProcess,
   runClaudeTurn,
 } from "../scripts/lib/claude-cli.mjs";
+
+function createFakeClaudeCommand(tmpDir, source) {
+  const packageRoot = path.join(
+    tmpDir,
+    "node_modules",
+    "@anthropic-ai",
+    "claude-code"
+  );
+  const fakeClaude = path.join(packageRoot, "cli.js");
+  fs.mkdirSync(packageRoot, { recursive: true });
+  fs.writeFileSync(fakeClaude, source);
+
+  fs.writeFileSync(
+    path.join(tmpDir, "claude.cmd"),
+    `@ECHO off\r\n"%_prog%" "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n`
+  );
+  if (process.platform !== "win32") {
+    const launcher = path.join(tmpDir, "claude");
+    fs.writeFileSync(
+      launcher,
+      `#!/bin/sh\nexec "${process.execPath}" "${fakeClaude}" "$@"\n`
+    );
+    fs.chmodSync(launcher, 0o755);
+  }
+
+  return fakeClaude;
+}
 
 // ===========================================================================
 // StreamParser
@@ -1257,26 +1288,10 @@ describe("runClaudeTurn", () => {
     const oldPath = process.env.PATH ?? "";
     try {
       const longStderr = `DROP-ME\n${"x".repeat(MAX_STDERR_BYTES + 32)}\nKEEP-ME`;
-      const fakeClaude = path.join(tmpDir, "fake-claude.mjs");
-      fs.writeFileSync(
-        fakeClaude,
+      createFakeClaudeCommand(
+        tmpDir,
         `process.stderr.write(${JSON.stringify(longStderr)}, () => process.exit(1));\n`
       );
-
-      if (process.platform === "win32") {
-        fs.writeFileSync(
-          path.join(tmpDir, "claude.cmd"),
-          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs"\r\n`
-        );
-      } else {
-        const launcher = path.join(tmpDir, "claude");
-        fs.writeFileSync(
-          launcher,
-          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs"\n`
-        );
-        fs.chmodSync(launcher, 0o755);
-      }
-
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
 
       const result = await runClaudeTurn(process.cwd(), "prompt");
@@ -1297,31 +1312,25 @@ describe("runClaudeTurn", () => {
     const oldFlag = process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
     delete process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT;
     try {
-      const fakeClaude = path.join(tmpDir, "fake-claude.mjs");
-      fs.writeFileSync(
-        fakeClaude,
-        `const out = JSON.stringify({ type: "result", result: "env:" + (process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT ?? "unset"), session_id: "sess-env" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+      createFakeClaudeCommand(
+        tmpDir,
+        `const result = JSON.stringify({ env: process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT ?? "unset", argv: process.argv.slice(2) });\nconst out = JSON.stringify({ type: "result", result, session_id: "sess-env" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
-
-      if (process.platform === "win32") {
-        fs.writeFileSync(
-          path.join(tmpDir, "claude.cmd"),
-          `@echo off\r\n"${process.execPath}" "%~dp0fake-claude.mjs"\r\n`
-        );
-      } else {
-        const launcher = path.join(tmpDir, "claude");
-        fs.writeFileSync(
-          launcher,
-          `#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "${process.execPath}" "$DIR/fake-claude.mjs"\n`
-        );
-        fs.chmodSync(launcher, 0o755);
-      }
-
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
 
-      const result = await runClaudeTurn(process.cwd(), "prompt");
+      const options = {
+        model: "claude-opus-5",
+        effort: "xhigh",
+        permissionMode: "dontAsk",
+      };
+      const result = await runClaudeTurn(process.cwd(), "prompt", options);
+      const payload = JSON.parse(result.finalMessage);
 
-      assert.equal(result.finalMessage, "env:1");
+      assert.equal(payload.env, "1");
+      assert.deepEqual(
+        payload.argv,
+        buildArgs("prompt", { outputFormat: "stream-json", ...options })
+      );
     } finally {
       process.env.PATH = oldPath;
       if (oldFlag === undefined) {
@@ -1331,6 +1340,502 @@ describe("runClaudeTurn", () => {
       }
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("uses the same PATH-resolved Claude command for availability and auth", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-status-"));
+    const oldPath = process.env.PATH ?? "";
+    const oldApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `const args = process.argv.slice(2);\nif (args[0] === "--version") process.stdout.write("2.1.220\\n");\nprocess.exit(args[0] === "--version" || (args[0] === "auth" && args[1] === "status") ? 0 : 1);\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      assert.deepEqual(getClaudeAvailability(process.cwd()), {
+        available: true,
+        detail: "2.1.220",
+      });
+      assert.deepEqual(getClaudeAuthStatus(process.cwd()), {
+        available: true,
+        loggedIn: true,
+        detail: "authenticated",
+      });
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldApiKey === undefined) {
+        delete process.env.ANTHROPIC_API_KEY;
+      } else {
+        process.env.ANTHROPIC_API_KEY = oldApiKey;
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves legacy and current npm shims without a command shell", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-shim-"));
+    try {
+      const legacyTarget = createFakeClaudeCommand(tmpDir, "");
+      assert.deepEqual(resolveClaudeCommand("win32", { PATH: tmpDir }), {
+        executable: process.execPath,
+        prefixArgs: [legacyTarget],
+      });
+
+      const nativeTarget = path.join(
+        tmpDir,
+        "node_modules",
+        "@anthropic-ai",
+        "claude-code",
+        "bin",
+        "claude.exe"
+      );
+      fs.mkdirSync(path.dirname(nativeTarget), { recursive: true });
+      fs.writeFileSync(nativeTarget, "");
+      fs.writeFileSync(
+        path.join(tmpDir, "claude.cmd"),
+        `@ECHO off\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe" %*\r\n`
+      );
+
+      assert.deepEqual(resolveClaudeCommand("win32", { PATH: tmpDir }), {
+        executable: nativeTarget,
+        prefixArgs: [],
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a quoted native PATH entry after misses and honors Path casing", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-native-"));
+    try {
+      const missingDir = path.join(tmpDir, "missing");
+      const nativeDir = path.join(tmpDir, "native claude");
+      const nativeExecutable = path.join(nativeDir, "claude.exe");
+      fs.mkdirSync(missingDir);
+      fs.mkdirSync(nativeDir);
+      fs.writeFileSync(nativeExecutable, "");
+
+      assert.deepEqual(
+        resolveClaudeCommand("win32", {
+          Path: `; ${missingDir} ;  "${nativeDir}"  `,
+        }),
+        {
+          executable: nativeExecutable,
+          prefixArgs: [],
+        }
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a local npm shim that uses the %~dp0 form", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-local-"));
+    try {
+      const binDir = path.join(tmpDir, "node_modules", ".bin");
+      const target = path.join(
+        tmpDir,
+        "node_modules",
+        "@anthropic-ai",
+        "claude-code",
+        "cli.js"
+      );
+      fs.mkdirSync(binDir, { recursive: true });
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, "");
+      fs.writeFileSync(
+        path.join(binDir, "claude.cmd"),
+        `@echo off\r\nnode "%~dp0\\..\\@anthropic-ai\\claude-code\\cli.js" %*\r\n`
+      );
+
+      assert.deepEqual(resolveClaudeCommand("win32", { PATH: binDir }), {
+        executable: process.execPath,
+        prefixArgs: [target],
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips an unsupported shim when a later native Claude executable exists", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-invalid-"));
+    try {
+      const firstDir = path.join(tmpDir, "first");
+      const secondDir = path.join(tmpDir, "second");
+      fs.mkdirSync(firstDir);
+      fs.mkdirSync(secondDir);
+      fs.writeFileSync(path.join(firstDir, "claude.cmd"), "@echo off\r\nother-cli %*\r\n");
+      fs.writeFileSync(path.join(secondDir, "claude.exe"), "");
+
+      const resolved = resolveClaudeCommand("win32", {
+        PATH: `${firstDir};${secondDir}`,
+      });
+      assert.equal(resolved.executable, path.join(secondDir, "claude.exe"));
+      assert.deepEqual(resolved.prefixArgs, []);
+      assert.equal(resolved.error, undefined);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a recognized shim with a missing target and preserves non-Windows resolution", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-missing-"));
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, "claude.cmd"),
+        `@echo off\r\nnode "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n`
+      );
+
+      const windowsResult = resolveClaudeCommand("win32", { PATH: tmpDir });
+      assert.equal(windowsResult.executable, null);
+      assert.match(windowsResult.error, /target could not be resolved safely/iu);
+      assert.deepEqual(resolveClaudeCommand("linux", { PATH: tmpDir }), {
+        executable: "claude",
+        prefixArgs: [],
+      });
+      assert.deepEqual(resolveClaudeCommand("win32", { PATH: "" }), {
+        executable: "claude",
+        prefixArgs: [],
+      });
+
+      const targetDirectory = path.join(
+        tmpDir,
+        "node_modules",
+        "@anthropic-ai",
+        "claude-code",
+        "cli.js"
+      );
+      fs.mkdirSync(targetDirectory, { recursive: true });
+      const directoryResult = resolveClaudeCommand("win32", { PATH: tmpDir });
+      assert.equal(directoryResult.executable, null);
+      assert.match(directoryResult.error, /target could not be resolved safely/iu);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("cancelClaudeProcess", () => {
+  it("uses atomic Windows identity-checked process-tree termination", async () => {
+    let terminatedPid = null;
+    let terminatedIdentity = null;
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "win32",
+      terminateProcessTreeIfIdentityMatchesImpl: (pid, identity) => {
+        terminatedPid = pid;
+        terminatedIdentity = identity;
+        return {
+          attempted: true,
+          delivered: true,
+          method: "identity-checked-taskkill",
+        };
+      },
+    });
+
+    assert.equal(terminatedPid, 12345);
+    assert.equal(terminatedIdentity, "identity");
+    assert.deepEqual(result, { cancelled: true });
+  });
+
+  it("treats an already-exited Windows process as cancelled", async () => {
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "win32",
+      terminateProcessTreeIfIdentityMatchesImpl: () => ({
+        attempted: true,
+        delivered: false,
+        method: "identity-checked-taskkill",
+        reason: "process-missing",
+      }),
+    });
+
+    assert.deepEqual(result, {
+      cancelled: true,
+      note: "Process already exited",
+    });
+  });
+
+  it("reports Windows and POSIX termination errors as failures", async () => {
+    const windowsResult = await cancelClaudeProcess(12345, "identity", {
+      platform: "win32",
+      terminateProcessTreeIfIdentityMatchesImpl: () => {
+        throw new Error("access denied");
+      },
+    });
+    const permissionError = Object.assign(new Error("operation not permitted"), {
+      code: "EPERM",
+    });
+    const posixResult = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => "identity",
+      killImpl: () => {
+        throw permissionError;
+      },
+    });
+
+    assert.deepEqual(windowsResult, {
+      cancelled: false,
+      note: "Failed to terminate process tree: access denied",
+    });
+    assert.deepEqual(posixResult, {
+      cancelled: false,
+      note: "Failed to send SIGTERM: operation not permitted",
+    });
+  });
+
+  it("does not terminate a recycled Windows PID", async () => {
+    const result = await cancelClaudeProcess(12345, "old-identity", {
+      platform: "win32",
+      terminateProcessTreeIfIdentityMatchesImpl: () => ({
+        attempted: true,
+        delivered: false,
+        method: "identity-checked-taskkill",
+        reason: "identity-mismatch",
+      }),
+    });
+
+    assert.deepEqual(result, {
+      cancelled: true,
+      note: "Process already exited (PID recycled)",
+    });
+  });
+
+  it("refuses Windows termination without a stable identity", async () => {
+    const result = await cancelClaudeProcess(12345, null, {
+      platform: "win32",
+      terminateProcessTreeIfIdentityMatchesImpl: () => ({
+        attempted: false,
+        delivered: false,
+        method: null,
+        reason: "identity-unavailable",
+      }),
+    });
+
+    assert.deepEqual(result, {
+      cancelled: false,
+      note: "Refused to terminate process tree without a matching PID identity",
+    });
+  });
+
+  it("distinguishes a missing POSIX process from other signal errors", async () => {
+    const missingError = Object.assign(new Error("missing"), { code: "ESRCH" });
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => "identity",
+      killImpl: () => {
+        throw missingError;
+      },
+    });
+
+    assert.deepEqual(result, {
+      cancelled: true,
+      note: "Process not found",
+    });
+  });
+
+  it("stops after SIGTERM when the POSIX process group exits", async () => {
+    const signals = [];
+    const waits = [];
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => "identity",
+      killImpl: (pid, signal) => signals.push([pid, signal]),
+      waitForProcessGroupImpl: async (pid, timeout) => {
+        waits.push([pid, timeout]);
+        return true;
+      },
+    });
+
+    assert.deepEqual(signals, [[-12345, "SIGTERM"]]);
+    assert.deepEqual(waits, [[12345, 5000]]);
+    assert.deepEqual(result, { cancelled: true });
+  });
+
+  it("fails closed when POSIX identity lookup is unavailable for a live group", async () => {
+    const signals = [];
+    let leaderChecks = 0;
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => {
+        throw Object.assign(new Error("lookup unavailable"), { code: "EAGAIN" });
+      },
+      isProcessAliveImpl: () => {
+        leaderChecks += 1;
+        return false;
+      },
+      isProcessGroupAliveImpl: () => true,
+      killImpl: (pid, signal) => signals.push([pid, signal]),
+    });
+
+    assert.equal(leaderChecks, 1);
+    assert.deepEqual(signals, []);
+    assert.deepEqual(result, {
+      cancelled: false,
+      note: "Unable to verify process identity: lookup unavailable",
+    });
+  });
+
+  it("distinguishes a missing POSIX process, recycled PID, and missing identity", async () => {
+    const missing = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => {
+        throw new Error("lookup failed");
+      },
+      isProcessAliveImpl: () => false,
+      isProcessGroupAliveImpl: () => false,
+      killImpl: () => assert.fail("missing process must not be signalled"),
+    });
+    const recycled = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => "different-identity",
+      killImpl: () => assert.fail("recycled PID must not be signalled"),
+    });
+    const noIdentity = await cancelClaudeProcess(12345, null, {
+      platform: "linux",
+      killImpl: () => assert.fail("unverified process must not be signalled"),
+    });
+
+    assert.deepEqual(missing, {
+      cancelled: true,
+      note: "Process already exited",
+    });
+    assert.deepEqual(recycled, {
+      cancelled: true,
+      note: "Process already exited (PID recycled)",
+    });
+    assert.deepEqual(noIdentity, {
+      cancelled: false,
+      note: "Refused to terminate process group without a matching PID identity",
+    });
+  });
+
+  it("skips SIGKILL when the process group exits after the wait timeout", async () => {
+    const signals = [];
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => "identity",
+      isProcessGroupAliveImpl: () => false,
+      killImpl: (pid, signal) => signals.push([pid, signal]),
+      waitForProcessGroupImpl: async () => false,
+    });
+
+    assert.deepEqual(signals, [[-12345, "SIGTERM"]]);
+    assert.deepEqual(result, {
+      cancelled: true,
+      note: "Process exited during SIGTERM wait",
+    });
+  });
+
+  it("escalates when the group survives SIGTERM after its leader exits", async () => {
+    let identityLookups = 0;
+    let waits = 0;
+    const signals = [];
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => {
+        identityLookups += 1;
+        return "identity";
+      },
+      isProcessGroupAliveImpl: () => true,
+      killImpl: (pid, signal) => signals.push([pid, signal]),
+      waitForProcessGroupImpl: async () => {
+        waits += 1;
+        return waits === 2;
+      },
+    });
+
+    assert.equal(identityLookups, 1);
+    assert.deepEqual(signals, [
+      [-12345, "SIGTERM"],
+      [-12345, "SIGKILL"],
+    ]);
+    assert.deepEqual(result, { cancelled: true });
+  });
+
+  it("escalates to SIGKILL and reports whether the process group died", async () => {
+    const successfulSignals = [];
+    let successfulWaits = 0;
+    const killed = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => "identity",
+      isProcessAliveImpl: () => true,
+      isProcessGroupAliveImpl: () => true,
+      killImpl: (pid, signal) => successfulSignals.push([pid, signal]),
+      waitForProcessGroupImpl: async () => {
+        successfulWaits += 1;
+        return successfulWaits === 2;
+      },
+    });
+    const aliveSignals = [];
+    const stillAlive = await cancelClaudeProcess(54321, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => "identity",
+      isProcessAliveImpl: () => true,
+      isProcessGroupAliveImpl: () => true,
+      killImpl: (pid, signal) => aliveSignals.push([pid, signal]),
+      waitForProcessGroupImpl: async () => false,
+    });
+
+    assert.deepEqual(successfulSignals, [
+      [-12345, "SIGTERM"],
+      [-12345, "SIGKILL"],
+    ]);
+    assert.deepEqual(killed, { cancelled: true });
+    assert.deepEqual(aliveSignals, [
+      [-54321, "SIGTERM"],
+      [-54321, "SIGKILL"],
+    ]);
+    assert.deepEqual(stillAlive, {
+      cancelled: false,
+      note: "Process group 54321 still alive after SIGKILL",
+    });
+  });
+
+  it("refuses SIGKILL when the group leader PID is recycled during the wait", async () => {
+    const signals = [];
+    let identityLookups = 0;
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => {
+        identityLookups += 1;
+        return identityLookups === 1 ? "identity" : "recycled-identity";
+      },
+      isProcessAliveImpl: () => true,
+      isProcessGroupAliveImpl: () => true,
+      killImpl: (pid, signal) => signals.push([pid, signal]),
+      waitForProcessGroupImpl: async () => false,
+    });
+
+    assert.equal(identityLookups, 2);
+    assert.deepEqual(signals, [[-12345, "SIGTERM"]]);
+    assert.deepEqual(result, {
+      cancelled: true,
+      note: "Process exited during SIGTERM wait (PID recycled)",
+    });
+  });
+
+  it("fails closed when identity cannot be re-verified before SIGKILL", async () => {
+    const signals = [];
+    let identityLookups = 0;
+    const result = await cancelClaudeProcess(12345, "identity", {
+      platform: "linux",
+      getProcessIdentityImpl: () => {
+        identityLookups += 1;
+        if (identityLookups === 1) return "identity";
+        throw new Error("second lookup failed");
+      },
+      isProcessAliveImpl: () => true,
+      isProcessGroupAliveImpl: () => true,
+      killImpl: (pid, signal) => signals.push([pid, signal]),
+      waitForProcessGroupImpl: async () => false,
+    });
+
+    assert.deepEqual(signals, [[-12345, "SIGTERM"]]);
+    assert.deepEqual(result, {
+      cancelled: false,
+      note: "Unable to re-verify process identity before SIGKILL: second lookup failed",
+    });
   });
 });
 

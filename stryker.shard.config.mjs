@@ -8,15 +8,27 @@ const shards = {
   },
   "claude-cli": {
     command: "npm run test:mutation:claude-cli:unit",
-    mutate: ["scripts/lib/claude-cli.mjs"],
+    mutate: [
+      "scripts/lib/claude-cli.mjs",
+      "scripts/lib/process.mjs:9-54",
+      "scripts/lib/process.mjs:75-106",
+      "scripts/lib/process.mjs:108-179",
+      "scripts/lib/process.mjs:185-367",
+      "scripts/lib/process.mjs:390-500",
+    ],
   },
   state: {
     command: "npm run test:mutation:state:unit",
     mutate: [
       // Persistence lifecycle, session lookup, and terminal job transitions.
-      "scripts/lib/state.mjs:156-196",
-      "scripts/lib/state.mjs:319-367",
-      "scripts/lib/state.mjs:695-745",
+      "scripts/lib/state.mjs:178-218",
+      "scripts/lib/state.mjs:341-389",
+      "scripts/lib/state.mjs:466-707",
+      "scripts/lib/state.mjs:756-893",
+      "scripts/lib/state.mjs:959-1009",
+      "scripts/lib/state.mjs:1015-1061",
+      "scripts/lib/tracked-jobs.mjs:26-39",
+      "scripts/lib/tracked-jobs.mjs:356-482",
     ],
   },
   "job-control": {

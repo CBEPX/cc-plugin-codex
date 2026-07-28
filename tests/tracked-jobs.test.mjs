@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { syncBuiltinESMExports } from "node:module";
 
 import {
   SESSION_ID_ENV,
@@ -34,6 +35,10 @@ function createTempGitRepo() {
   });
   assert.equal(init.status, 0, init.stderr);
   return repoDir;
+}
+
+function isLockBusyError(error) {
+  return /** @type {NodeJS.ErrnoException} */ (error).code === "ELOCKBUSY";
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +380,35 @@ describe("createJobProgressUpdater", () => {
 // ---------------------------------------------------------------------------
 
 describe("runTrackedJob", () => {
+  it("does not revive a queued job after cancellation wins before startup", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-startup-cancel-race",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "startup race",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, {
+      ...job,
+      status: "cancelling",
+    });
+    let runnerCalled = false;
+
+    await assert.rejects(
+      runTrackedJob(job, async () => {
+        runnerCalled = true;
+        return { exitStatus: 0 };
+      }),
+      /left the queue before execution started \(cancelling\)/
+    );
+
+    assert.equal(runnerCalled, false);
+    assert.equal(readJobFile(repoDir, job.id).status, "cancelling");
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
   it("does not overwrite a concurrent cancelling transition when onSpawn races with cancel", async () => {
     const repoDir = createTempGitRepo();
     const job = {
@@ -411,7 +445,234 @@ describe("runTrackedJob", () => {
 
     const finalJob = readJobFile(repoDir, job.id);
     assert.equal(finalJob.status, "cancelling");
-    assert.equal(finalJob.pid, null);
+    assert.equal(finalJob.pid ?? null, null);
     fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("persists a late result after the identity reaper marked the job failed", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-reaper-result-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "late result",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      pidIdentity: "queued-worker-identity",
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await runTrackedJob(job, async () => {
+        const running = readJobFile(repoDir, job.id);
+        assert.equal(running.phase, "starting");
+        assert.equal(running.pidIdentity, "queued-worker-identity");
+        writeJobFile(repoDir, job.id, {
+          ...running,
+          status: "failed",
+          errorMessage: "identity remained unverifiable",
+          reapedUnverifiable: true,
+          pid: 12345,
+          pidIdentity: "stored-identity",
+          updatedAt: nowIso(),
+        });
+        return {
+          exitStatus: 0,
+          threadId: "thread-late",
+          turnId: "turn-late",
+          payload: { answer: 42 },
+          rendered: "finished",
+          summary: "finished",
+        };
+      });
+
+      const finalJob = readJobFile(repoDir, job.id);
+      assert.equal(finalJob.status, "completed");
+      assert.equal(finalJob.phase, "done");
+      assert.equal(finalJob.threadId, "thread-late");
+      assert.equal(finalJob.turnId, "turn-late");
+      assert.equal(finalJob.summary, "finished");
+      assert.equal(finalJob.rendered, "finished");
+      assert.deepEqual(finalJob.result, { answer: 42 });
+      assert.equal(finalJob.errorMessage, null);
+      assert.equal(finalJob.reapedUnverifiable, false);
+      assert.equal(finalJob.pid, null);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists an ordinary runner failure without treating it as lock contention", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-runner-failure-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "runner failure",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await assert.rejects(
+        runTrackedJob(job, async () => {
+          throw new Error("runner exploded");
+        }),
+        /runner exploded/
+      );
+
+      const finalJob = readJobFile(repoDir, job.id);
+      assert.equal(finalJob.status, "failed");
+      assert.equal(finalJob.phase, "failed");
+      assert.equal(finalJob.errorMessage, "runner exploded");
+      assert.equal(finalJob.pid, null);
+      assert.equal(finalJob.pidIdentity, null);
+      assert.ok(finalJob.completedAt);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not overwrite an unrelated failed state with a late result", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-unrelated-failure-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "unrelated failure",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await runTrackedJob(job, async () => {
+        const running = readJobFile(repoDir, job.id);
+        writeJobFile(repoDir, job.id, {
+          ...running,
+          status: "failed",
+          errorMessage: "independent failure",
+          updatedAt: nowIso(),
+        });
+        return {
+          exitStatus: 0,
+          payload: { answer: 42 },
+          rendered: "finished",
+          summary: "finished",
+        };
+      });
+
+      const finalJob = readJobFile(repoDir, job.id);
+      assert.equal(finalJob.status, "failed");
+      assert.equal(finalJob.errorMessage, "independent failure");
+      assert.equal(finalJob.result, undefined);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries tagged lock contention when persisting a spawned job", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-lock-retry-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "lock retry",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    const originalLinkSync = fs.linkSync;
+    let collisions = 0;
+    let injectCollisions = false;
+    writeJobFile(repoDir, job.id, job);
+
+    Reflect.set(fs, "linkSync", (existingPath, newPath) => {
+      if (
+        injectCollisions &&
+        String(newPath).endsWith(`${job.id}.json.lock`) &&
+        collisions < 3
+      ) {
+        collisions += 1;
+        throw Object.assign(new Error("synthetic collision"), {
+          code: "EEXIST",
+        });
+      }
+      return originalLinkSync(existingPath, newPath);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      await runTrackedJob(job, async (onSpawn) => {
+        injectCollisions = true;
+        onSpawn({ pid: 12345, pidIdentity: "spawned-identity" });
+        const spawnedJob = readJobFile(repoDir, job.id);
+        assert.equal(spawnedJob.pid, 12345);
+        assert.equal(spawnedJob.pidIdentity, "spawned-identity");
+        return {
+          exitStatus: 0,
+          payload: {},
+          rendered: "finished",
+          summary: "finished",
+        };
+      });
+
+      assert.equal(collisions, 3);
+      assert.equal(readJobFile(repoDir, job.id).status, "completed");
+    } finally {
+      Reflect.set(fs, "linkSync", originalLinkSync);
+      syncBuiltinESMExports();
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed after bounded tagged lock retries without corrupting job state", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-lock-exhaustion-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "lock exhaustion",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    const originalLinkSync = fs.linkSync;
+    let collisions = 0;
+    let injectCollisions = false;
+    writeJobFile(repoDir, job.id, job);
+
+    Reflect.set(fs, "linkSync", (existingPath, newPath) => {
+      if (
+        injectCollisions &&
+        String(newPath).endsWith(`${job.id}.json.lock`)
+      ) {
+        collisions += 1;
+        throw Object.assign(new Error("persistent synthetic collision"), {
+          code: "EEXIST",
+        });
+      }
+      return originalLinkSync(existingPath, newPath);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      await assert.rejects(
+        runTrackedJob(job, async (onSpawn) => {
+          injectCollisions = true;
+          onSpawn({ pid: 99999999, pidIdentity: "spawned-identity" });
+          throw new Error("onSpawn should reject first");
+        }),
+        isLockBusyError
+      );
+
+      const finalJob = readJobFile(repoDir, job.id);
+      assert.equal(collisions, 9);
+      assert.equal(finalJob.status, "running");
+      assert.equal(finalJob.errorMessage, undefined);
+    } finally {
+      Reflect.set(fs, "linkSync", originalLinkSync);
+      syncBuiltinESMExports();
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 });
