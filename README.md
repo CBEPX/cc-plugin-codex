@@ -462,6 +462,11 @@ npm run test:mutation:force
 
 Mutation testing requires Node.js 20+ because Stryker 9 has a newer development-time engine requirement. The plugin runtime still supports the Node.js version listed in the prerequisites.
 
+### Planned follow-ups
+
+- Reduce surviving mutants and timeout-only kills in the `claude-cli` and state shards by classifying equivalent mutants and replacing timeout-only detection with deterministic assertions where practical.
+- Treat mandatory `contextWindow` persistence across JSON payloads as a separate versioned telemetry-contract change, with explicit nullability, backward compatibility, payload coverage, tests, and an appropriate semver release.
+
 ## License
 
 [Apache-2.0](LICENSE) — see [NOTICE](NOTICE) for attribution.
