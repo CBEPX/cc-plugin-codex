@@ -621,7 +621,7 @@ fs.readdirSync = (directory, ...args) => {
         clockPreload,
         `import { performance } from "node:perf_hooks";
 const realNow = performance.now.bind(performance);
-performance.now = () => {
+Object.defineProperty(performance, "now", { configurable: true, value: () => {
   const stack = new Error().stack ?? "";
   if (stack.includes("createCleanupDeadlineAt")) {
     return 1_600;
@@ -633,7 +633,7 @@ performance.now = () => {
     return 2_750;
   }
   return realNow();
-};
+} });
 `,
         "utf8"
       );
@@ -725,7 +725,7 @@ fs.linkSync = (source, destination) => {
   return originalLinkSync(source, destination);
 };
 const realNow = performance.now.bind(performance);
-performance.now = () => {
+Object.defineProperty(performance, "now", { configurable: true, value: () => {
   const stack = new Error().stack ?? "";
   if (stack.includes("createCleanupDeadlineAt") || stack.includes("transitionWithinCleanupBudget")) {
     return 0;
@@ -734,7 +734,7 @@ performance.now = () => {
     return 2_750;
   }
   return realNow();
-};
+} });
 `,
         "utf8"
       );
