@@ -613,10 +613,10 @@ describe("renderJobStatusReport", () => {
     );
 
     assert.ok(output.includes("Verify process"));
+    assert.ok(output.includes("ProcessId = 12345"));
     assert.ok(output.includes("133820000000000000"));
     assert.ok(output.includes("Manual cleanup (after verification)"));
     assert.ok(output.includes("taskkill /PID 54321 /T /F"));
-    assert.ok(!output.includes("12345"));
     assert.ok(!output.includes("kill -9"));
   });
 
@@ -658,12 +658,56 @@ describe("renderJobStatusReport", () => {
 
   it("shows POSIX group cleanup for cancel_failed status", () => {
     const output = renderJobStatusReport(
-      { id: "j9", status: "cancel_failed", pgid: 12345 },
+      {
+        id: "j9",
+        status: "cancel_failed",
+        pgid: 12345,
+        pidIdentity: "987654",
+      },
       "linux"
     );
-    assert.ok(output.includes("Manual cleanup"));
+    assert.ok(output.includes("Verify process"));
+    assert.ok(output.includes("cat /proc/12345/stat"));
+    assert.ok(output.includes("987654"));
+    assert.ok(output.includes("Manual cleanup (after verification)"));
     assert.ok(output.includes("kill -9 -12345"));
-    assert.ok(!output.includes("Verify process"));
+  });
+
+  it("surfaces pending SessionEnd cleanup without marking it terminal", () => {
+    const output = renderJobStatusReport(
+      {
+        id: "j-pending-cleanup",
+        status: "cancelling",
+        phase: "session_cleanup_pending",
+        pid: 12345,
+        pidIdentity: "recorded-identity",
+      },
+      "linux"
+    );
+
+    assert.ok(output.includes("Automatic cleanup pending"));
+    assert.ok(output.includes("Verify process"));
+    assert.ok(output.includes("cat /proc/12345/stat"));
+    assert.ok(output.includes("recorded-identity"));
+    assert.ok(output.includes("Manual cleanup (after verification)"));
+    assert.ok(output.includes("kill -9 -12345"));
+    assert.ok(!output.includes("| Ended |"));
+  });
+
+  it("does not suggest POSIX cleanup without a recorded identity", () => {
+    const output = renderJobStatusReport(
+      {
+        id: "j-pending-unverified",
+        status: "cancelling",
+        phase: "session_cleanup_pending",
+        pid: 12345,
+      },
+      "linux"
+    );
+
+    assert.ok(output.includes("Automatic cleanup pending"));
+    assert.ok(!output.includes("kill -9"));
+    assert.ok(!output.includes("Manual cleanup"));
   });
 
   it("omits status cleanup when cancel_failed has no recorded process", () => {
@@ -839,12 +883,28 @@ describe("renderCancelReport", () => {
 
   it("shows manual cleanup warning for cancel_failed", () => {
     const output = renderCancelReport(
+      {
+        id: "j1",
+        status: "cancel_failed",
+        pgid: 12345,
+        pidIdentity: "987654",
+      },
+      "linux"
+    );
+    assert.ok(output.includes("Verify process before cleanup"));
+    assert.ok(output.includes("cat /proc/12345/stat"));
+    assert.ok(output.includes("987654"));
+    assert.ok(output.includes("Manual cleanup (after verification)"));
+    assert.ok(output.includes("kill -9 -12345"));
+  });
+
+  it("does not render a POSIX destructive command without identity", () => {
+    const output = renderCancelReport(
       { id: "j1", status: "cancel_failed", pgid: 12345 },
       "linux"
     );
-    assert.ok(output.includes("Manual cleanup"));
-    assert.ok(output.includes("kill -9 -12345"));
-    assert.ok(!output.includes("Verify process"));
+    assert.ok(output.includes("no recorded process identity"));
+    assert.ok(!output.includes("kill -9"));
   });
 
   it("shows Windows process-tree cleanup for cancel_failed", () => {
@@ -860,10 +920,10 @@ describe("renderCancelReport", () => {
     );
     assert.ok(output.includes("Verify process before cleanup"));
     assert.ok(output.includes("Get-CimInstance Win32_Process"));
+    assert.ok(output.includes("ProcessId = 12345"));
     assert.ok(output.includes("133820000000000000"));
     assert.ok(output.includes("Manual cleanup (after verification)"));
     assert.ok(output.includes("taskkill /PID 54321 /T /F"));
-    assert.ok(!output.includes("12345"));
     assert.ok(!output.includes("kill -9"));
   });
 

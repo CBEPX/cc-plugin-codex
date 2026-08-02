@@ -16,6 +16,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import process from "node:process";
 
 import {
@@ -53,6 +54,7 @@ const INVALID_LOCK_STALE_MS = 15_000;
 const LIVE_LOCK_LEASE_MS = 30_000;
 const LOCK_HARD_STALE_MS = LIVE_LOCK_LEASE_MS * 4;
 const RESERVED_JOB_FILE_MAX_AGE_MS = 60 * 60 * 1000;
+const SESSION_CLEANUP_MARKER_PREFIX = "session-cleanup-pending-";
 const HARD_LINK_UNSUPPORTED_CODES = new Set([
   "EPERM",
   "ENOSYS",
@@ -229,6 +231,14 @@ function resolveCurrentSessionFile(cwd) {
   return path.join(resolveStateDir(cwd), CURRENT_SESSION_FILE_NAME);
 }
 
+function resolveSessionCleanupMarkerFile(cwd, sessionId) {
+  sanitizeId(sessionId, "session ID");
+  return path.join(
+    resolveStateDir(cwd),
+    `${SESSION_CLEANUP_MARKER_PREFIX}${sessionId}.json`
+  );
+}
+
 function resolveStopReviewLastFile(cwd) {
   return path.join(resolveStateDir(cwd), STOP_REVIEW_LAST_FILE_NAME);
 }
@@ -305,6 +315,50 @@ export function clearCurrentSession(cwd, sessionId = null) {
   }
   try {
     fs.unlinkSync(filePath);
+  } catch {}
+}
+
+export function markSessionCleanupPending(cwd, sessionId) {
+  ensureStateDir(cwd);
+  writeAtomic(resolveSessionCleanupMarkerFile(cwd, sessionId), {
+    sessionId,
+    updatedAt: nowIso(),
+  });
+}
+
+export function listPendingSessionCleanups(cwd) {
+  const stateDir = resolveStateDir(cwd);
+  try {
+    return [
+      ...new Set(
+        fs
+          .readdirSync(stateDir)
+          .filter(
+            (name) =>
+              name.startsWith(SESSION_CLEANUP_MARKER_PREFIX) &&
+              name.endsWith(".json")
+          )
+          .map((name) => {
+            try {
+              const payload = JSON.parse(
+                fs.readFileSync(path.join(stateDir, name), "utf8")
+              );
+              return sanitizeId(payload.sessionId, "session ID");
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean)
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+export function clearSessionCleanupPending(cwd, sessionId) {
+  try {
+    fs.unlinkSync(resolveSessionCleanupMarkerFile(cwd, sessionId));
   } catch {}
 }
 
@@ -761,7 +815,24 @@ function unlinkLockIfUnchanged(lockFile, expectedSource) {
   } catch {}
 }
 
-function recoverStaleLock(lockFile) {
+function remainingLockDeadlineMs(options) {
+  if (!Number.isFinite(options.deadlineAt)) {
+    return null;
+  }
+  const remaining = Math.floor(options.deadlineAt - performance.now());
+  if (remaining > 0) {
+    return remaining;
+  }
+  throw Object.assign(new Error("Job state lock deadline expired"), {
+    code: "ELOCKTIMEOUT",
+  });
+}
+
+function lockProcessTimeout(options) {
+  return remainingLockDeadlineMs(options) ?? undefined;
+}
+
+function recoverStaleLock(lockFile, options = {}) {
   let lockSource;
   let lockFileAgeMs;
   try {
@@ -811,17 +882,29 @@ function recoverStaleLock(lockFile) {
   }
 
   try {
-    if (getProcessIdentity(pid) !== lockData.identity) {
+    if (getProcessIdentity(pid, { timeout: lockProcessTimeout(options) }) !== lockData.identity) {
       unlinkLockIfUnchanged(lockFile, lockSource);
     }
-  } catch {}
+  } catch (error) {
+    if (error?.code === "ELOCKTIMEOUT") {
+      throw error;
+    }
+  }
 }
 
-function acquireJobLock(lockFile) {
+function acquireJobLock(lockFile, options = {}) {
   let lockOwnerIdentity = null;
-  try {
-    lockOwnerIdentity = getProcessIdentity(process.pid);
-  } catch {}
+  if (!options.skipLockOwnerIdentity) {
+    try {
+      lockOwnerIdentity = getProcessIdentity(process.pid, {
+        timeout: lockProcessTimeout(options),
+      });
+    } catch (error) {
+      if (error?.code === "ELOCKTIMEOUT") {
+        throw error;
+      }
+    }
+  }
   const token = randomBytes(16).toString("hex");
   const stagedLockFile =
     `${lockFile}.publish.${process.pid}.${token}`;
@@ -840,7 +923,9 @@ function acquireJobLock(lockFile) {
     );
 
     for (let attempt = 0; ; attempt += 1) {
-      recoverStaleLock(lockFile);
+      remainingLockDeadlineMs(options);
+      recoverStaleLock(lockFile, options);
+      remainingLockDeadlineMs(options);
       try {
         if (hardLinksUnsupported) {
           fs.writeFileSync(lockFile, lockSource, {
@@ -862,8 +947,12 @@ function acquireJobLock(lockFile) {
           continue;
         }
         if (err.code === "EEXIST" && attempt < CAS_MAX_RETRIES - 1) {
-          const delay =
+          let delay =
             CAS_RETRY_DELAY_MS + Math.random() * CAS_RETRY_DELAY_MS;
+          const remaining = remainingLockDeadlineMs(options);
+          if (remaining !== null) {
+            delay = Math.min(delay, remaining);
+          }
           sleepSync(delay);
           continue;
         }
@@ -960,13 +1049,20 @@ export function casJobStatus(cwd, jobId, expected, next, extra = {}) {
   return transitionJob(cwd, jobId, [expected], next, extra).transitioned;
 }
 
-export function transitionJob(cwd, jobId, expectedStatuses, next, extra = {}) {
+export function transitionJob(
+  cwd,
+  jobId,
+  expectedStatuses,
+  next,
+  extra = {},
+  options = {}
+) {
   const jobFile = resolveJobFile(cwd, jobId);
   const lockFile = jobFile + ".lock";
   const expectedList = Array.isArray(expectedStatuses)
     ? expectedStatuses
     : [expectedStatuses];
-  const lockToken = acquireJobLock(lockFile);
+  const lockToken = acquireJobLock(lockFile, options);
 
   try {
     const job = JSON.parse(fs.readFileSync(jobFile, "utf8"));

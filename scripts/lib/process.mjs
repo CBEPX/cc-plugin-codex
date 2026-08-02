@@ -207,7 +207,7 @@ export function terminateProcessTreeIfIdentityMatches(
     const isAlive = options.isProcessAliveImpl ?? isProcessAlive;
     let actualIdentity;
     try {
-      actualIdentity = getIdentity(pid);
+      actualIdentity = getIdentity(pid, { timeout: options.timeout });
     } catch {
       return {
         attempted: false,
@@ -449,7 +449,11 @@ export function getProcessIdentity(pid, options = {}) {
       throw new Error("Windows process creation time was unavailable");
     }
   } else if (platform === "darwin") {
-    const row = runCommandCheckedImpl("ps", ["-o", "lstart=,comm=", "-p", String(pid)]);
+    const row = runCommandCheckedImpl(
+      "ps",
+      ["-o", "lstart=,comm=", "-p", String(pid)],
+      { timeout: options.timeout }
+    );
     identity = row.stdout.trim();
   } else {
     const stat = readFileSyncImpl(`/proc/${pid}/stat`, "utf8");

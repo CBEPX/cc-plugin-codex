@@ -10,6 +10,11 @@
 
 import path from "node:path";
 import process from "node:process";
+
+import {
+  SESSION_CLEANUP_PENDING_MESSAGE,
+  SESSION_CLEANUP_PENDING_PHASE,
+} from "./session-cleanup.mjs";
 import { parseStructuredOutput } from "./structured-output.mjs";
 
 function severityRank(severity) {
@@ -237,7 +242,18 @@ function appendModelFallbackSuffix(suffix, events, output = "") {
 }
 
 function isPendingJob(job) {
-  return job?.status === "queued" || job?.status === "running";
+  return (
+    job?.status === "queued" ||
+    job?.status === "running" ||
+    job?.status === "cancelling"
+  );
+}
+
+function isSessionCleanupPending(job) {
+  return (
+    job?.status === "cancelling" &&
+    job?.phase === SESSION_CLEANUP_PENDING_PHASE
+  );
 }
 
 function collectStatusRows(report) {
@@ -422,6 +438,16 @@ function formatManualCleanupCommand(pid, platform = process.platform) {
     : `kill -9 -${pid}`;
 }
 
+function formatProcessVerificationCommand(pid, platform = process.platform) {
+  if (platform === "win32") {
+    return `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'"`;
+  }
+  if (platform === "darwin") {
+    return `ps -o lstart=,comm= -p ${pid}`;
+  }
+  return `ps -o pid=,lstart=,comm= -p ${pid} && cat /proc/${pid}/stat`;
+}
+
 export function renderJobStatusReport(job, platform = process.platform) {
   const lines = ["# Claude Code Job Status", "", "| Field | Value |", "| --- | --- |"];
   pushKeyValueTableRow(lines, "Job", `\`${job.id}\``, { raw: true });
@@ -453,31 +479,34 @@ export function renderJobStatusReport(job, platform = process.platform) {
   } else {
     pushKeyValueTableRow(lines, "Result", `\`${formatClaudeSkillCommand("result", job.id)}\``, { raw: true });
   }
+  const sessionCleanupPending = isSessionCleanupPending(job);
+  if (sessionCleanupPending) {
+    pushKeyValueTableRow(
+      lines,
+      "Cleanup",
+      job.errorMessage ?? SESSION_CLEANUP_PENDING_MESSAGE
+    );
+  }
   const cleanupPid = resolveManualCleanupPid(job);
-  const needsWindowsPidVerification =
-    platform === "win32" &&
+  const verificationPid = job.pid ?? cleanupPid;
+  const needsVerifiedManualCleanup =
     cleanupPid &&
-    (job.status === "failed" || job.status === "cancel_failed");
-  if (needsWindowsPidVerification) {
+    verificationPid &&
+    job.pidIdentity &&
+    (job.status === "failed" ||
+      job.status === "cancel_failed" ||
+      sessionCleanupPending);
+  if (needsVerifiedManualCleanup) {
     pushKeyValueTableRow(
       lines,
       "Verify process",
-      `\`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter 'ProcessId = ${cleanupPid}'"\``,
+      `\`${formatProcessVerificationCommand(verificationPid, platform)}\``,
       { raw: true }
     );
-    if (job.pidIdentity) {
-      pushKeyValueTableRow(lines, "Recorded process identity", job.pidIdentity);
-    }
+    pushKeyValueTableRow(lines, "Recorded process identity", job.pidIdentity);
     pushKeyValueTableRow(
       lines,
       "Manual cleanup (after verification)",
-      `\`${formatManualCleanupCommand(cleanupPid, platform)}\``,
-      { raw: true }
-    );
-  } else if (job.status === "cancel_failed" && cleanupPid) {
-    pushKeyValueTableRow(
-      lines,
-      "Manual cleanup",
       `\`${formatManualCleanupCommand(cleanupPid, platform)}\``,
       { raw: true }
     );
@@ -533,19 +562,18 @@ export function renderCancelReport(job, platform = process.platform) {
   if (job.summary) lines.push(`- Summary: ${job.summary}`);
   if (job.status === "cancel_failed") {
     const cleanupPid = resolveManualCleanupPid(job);
+    const verificationPid = job.pid ?? cleanupPid;
     const cleanup = formatManualCleanupCommand(cleanupPid, platform);
     if (!cleanupPid) {
       lines.push("- Warning: Process may still be alive, but no cleanup PID was recorded.");
-    } else if (platform === "win32") {
+    } else if (verificationPid && job.pidIdentity) {
       lines.push(
-        `- Verify process before cleanup: \`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter 'ProcessId = ${cleanupPid}'"\``
+        `- Verify process before cleanup: \`${formatProcessVerificationCommand(verificationPid, platform)}\``
       );
-      if (job.pidIdentity) {
-        lines.push(`- Recorded process identity: ${job.pidIdentity}`);
-      }
+      lines.push(`- Recorded process identity: ${job.pidIdentity}`);
       lines.push(`- Manual cleanup (after verification): ${cleanup}`);
     } else {
-      lines.push(`- Warning: Process group may still be alive. Manual cleanup: ${cleanup}`);
+      lines.push("- Warning: Process may still be alive, but no recorded process identity is available for safe manual cleanup.");
     }
   }
   lines.push("- Check `$cc:status` for the updated queue.");

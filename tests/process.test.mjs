@@ -594,6 +594,7 @@ describe("terminateProcessTreeIfIdentityMatches", () => {
 
   it("distinguishes POSIX identity mismatch, lookup failure, and exit", () => {
     let terminated = false;
+    let capturedIdentityOptions = null;
     const mismatched = terminateProcessTreeIfIdentityMatches(
       12345,
       "identity",
@@ -610,7 +611,11 @@ describe("terminateProcessTreeIfIdentityMatches", () => {
       "identity",
       {
         platform: "linux",
-        getProcessIdentityImpl: () => "identity",
+        timeout: 321,
+        getProcessIdentityImpl: (_pid, options) => {
+          capturedIdentityOptions = options;
+          return "identity";
+        },
         terminateProcessTreeImpl: () => ({
           attempted: true,
           delivered: true,
@@ -644,6 +649,7 @@ describe("terminateProcessTreeIfIdentityMatches", () => {
     assert.equal(terminated, false);
     assert.equal(mismatched.reason, "identity-mismatch");
     assert.equal(matched.delivered, true);
+    assert.deepEqual(capturedIdentityOptions, { timeout: 321 });
     assert.equal(unavailable.reason, "identity-unavailable");
     assert.equal(unavailable.delivered, false);
     assert.equal(missing.reason, "process-missing");
@@ -938,12 +944,18 @@ describe("getProcessIdentity", () => {
   });
 
   it("trims Darwin ps identity output", () => {
+    let capturedOptions = null;
     const identity = getProcessIdentity(12345, {
       platform: "darwin",
-      runCommandCheckedImpl: () => ({ stdout: "  stable-darwin-identity  \n" }),
+      timeout: 321,
+      runCommandCheckedImpl: (_command, _args, options) => {
+        capturedOptions = options;
+        return { stdout: "  stable-darwin-identity  \n" };
+      },
     });
 
     assert.equal(identity, "stable-darwin-identity");
+    assert.deepEqual(capturedOptions, { timeout: 321 });
   });
 
   it("executes CIM identity and identity-checked tree termination on Windows", async () => {
