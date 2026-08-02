@@ -196,6 +196,7 @@ function createHookEnvironment(options = {}) {
       USERPROFILE: homeDir,
       CODEX_HOME: path.join(homeDir, ".codex"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+      [SESSION_ID_ENV]: "",
     },
   };
 }
@@ -225,13 +226,19 @@ function stateDirFor(homeDir, workspaceDir) {
   );
 }
 
-function runHook(scriptPath, args, input, env) {
+function runHook(scriptPath, args, input, env, options = {}) {
   const result = spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: PROJECT_ROOT,
     env,
     input: JSON.stringify(input),
     encoding: "utf8",
+    timeout: options.timeout,
   });
+  assert.equal(
+    result.signal,
+    null,
+    result.error?.message || result.stderr || result.stdout
+  );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result;
 }
@@ -261,6 +268,16 @@ function writeStateJob(testEnv, jobId, payload) {
   fs.writeFileSync(
     path.join(jobsDir, `${jobId}.json`),
     JSON.stringify({ ...payload, updatedAt: payload.updatedAt ?? payload.createdAt }, null, 2) + "\n",
+    "utf8"
+  );
+}
+
+function writePendingSessionCleanup(testEnv, sessionId) {
+  const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, `session-cleanup-pending-${sessionId}.json`),
+    JSON.stringify({ sessionId, updatedAt: new Date().toISOString() }),
     "utf8"
   );
 }
@@ -467,11 +484,76 @@ describe("hooks", () => {
     }
   });
 
-  it("bounds SessionEnd outside the internal cleanup deadline", () => {
+  it("SessionEnd does not rescan every job after deadline-bound cleanup", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      writeStateJob(testEnv, "single-scan-job", {
+        id: "single-scan-job",
+        status: "queued",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: new Date().toISOString(),
+      });
+      const preload = path.join(testEnv.rootDir, "single-job-scan.mjs");
+      fs.writeFileSync(
+        preload,
+        `import fs from "node:fs";
+const originalReaddirSync = fs.readdirSync.bind(fs);
+let jobDirectoryReads = 0;
+fs.readdirSync = (directory, ...args) => {
+  if (String(directory).endsWith("/jobs")) {
+    jobDirectoryReads += 1;
+    if (jobDirectoryReads > 1) {
+      const error = new Error("simulated second jobs-directory scan");
+      error.code = "ESECONDREAD";
+      throw error;
+    }
+  }
+  return originalReaddirSync(directory, ...args);
+};
+`,
+        "utf8"
+      );
+
+      const result = runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [
+            process.env.NODE_OPTIONS,
+            `--import=${pathToFileURL(preload).href}`,
+          ]
+            .filter(Boolean)
+            .join(" "),
+        }
+      );
+
+      assert.equal(result.stderr, "");
+      assert.equal(readStateJob(testEnv, "single-scan-job").status, "cancelled");
+      assert.equal(
+        fs.existsSync(
+          path.join(
+            stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+            "session-cleanup-pending-hook-session.json"
+          )
+        ),
+        false
+      );
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("keeps SessionEnd within the Codex three-second ceiling", () => {
     const manifest = JSON.parse(fs.readFileSync(HOOKS_MANIFEST, "utf8"));
+    const sessionStartHandler = manifest.hooks.SessionStart[0].hooks[0];
     const handler = manifest.hooks.SessionEnd[0].hooks[0];
 
-    assert.equal(handler.timeout, 45);
+    assert.equal("timeout" in sessionStartHandler, false);
+    assert.equal(handler.timeout, 3);
     assert.match(handler.command, /session-lifecycle-hook\.mjs.*SessionEnd/u);
   });
 
@@ -509,7 +591,7 @@ describe("hooks", () => {
     }
   });
 
-  it("session lifecycle hook preserves recovery handles after its cleanup budget", () => {
+  it("session lifecycle hook reserves preparation time after a slow process start", () => {
     const testEnv = createHookEnvironment();
     const createdAt = new Date().toISOString();
 
@@ -537,16 +619,21 @@ describe("hooks", () => {
       const clockPreload = path.join(testEnv.rootDir, "cleanup-clock.mjs");
       fs.writeFileSync(
         clockPreload,
-        `const realNow = Date.now.bind(Date);
-let cleanupReads = 0;
-Date.now = () => {
-  const caller = new Error().stack?.split("\\n")[2] ?? "";
-  if (caller.includes("cleanupSessionJobs")) {
-    cleanupReads += 1;
-    return cleanupReads === 1 ? 1_000_000 : 1_020_000;
+        `import { performance } from "node:perf_hooks";
+const realNow = performance.now.bind(performance);
+Object.defineProperty(performance, "now", { configurable: true, value: () => {
+  const stack = new Error().stack ?? "";
+  if (stack.includes("createCleanupDeadlineAt")) {
+    return 1_600;
+  }
+  if (stack.includes("transitionWithinCleanupBudget")) {
+    return 1_600;
+  }
+  if (stack.includes("cleanupSessionJobs")) {
+    return 2_750;
   }
   return realNow();
-};
+} });
 `,
         "utf8"
       );
@@ -571,16 +658,168 @@ Date.now = () => {
 
       for (const jobId of ["budget-job-one", "budget-job-two"]) {
         const job = readStateJob(testEnv, jobId);
-        assert.equal(job.status, "cancel_failed");
-        assert.equal(job.phase, "cancel_failed");
+        assert.equal(job.status, "cancelling");
+        assert.equal(job.phase, "session_cleanup_pending");
         assert.equal(job.pid, process.pid);
         assert.equal(job.pidIdentity, `${jobId}-identity`);
-        assert.match(job.errorMessage ?? "", /cleanup budget was exhausted/i);
+        assert.equal(job.completedAt, null);
+        assert.equal(
+          job.errorMessage,
+          "Automatic cleanup pending; it will retry on the next top-level Codex session."
+        );
       }
+      const noPidJob = readStateJob(testEnv, "budget-job-without-pid");
+      assert.equal(noPidJob.status, "cancelling");
+      assert.equal(noPidJob.phase, "session_cleanup_pending");
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "next-session" },
+        testEnv.env
+      );
       assert.equal(
         readStateJob(testEnv, "budget-job-without-pid").status,
         "cancelled"
       );
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session cleanup preserves process handles written after its snapshot", () => {
+    const testEnv = createHookEnvironment();
+    const createdAt = new Date().toISOString();
+
+    try {
+      writeStateJob(testEnv, "racing-process-handles", {
+        id: "racing-process-handles",
+        status: "queued",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt,
+        pid: null,
+        pidIdentity: null,
+        pgid: null,
+      });
+      const jobFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "jobs",
+        "racing-process-handles.json"
+      );
+      const preload = path.join(testEnv.rootDir, "race-process-handles.mjs");
+      fs.writeFileSync(
+        preload,
+        `import fs from "node:fs";
+import { performance } from "node:perf_hooks";
+const originalLinkSync = fs.linkSync.bind(fs);
+let raced = false;
+fs.linkSync = (source, destination) => {
+  if (!raced && String(destination).endsWith("racing-process-handles.json.lock")) {
+    raced = true;
+    const job = JSON.parse(fs.readFileSync(process.env.CC_TEST_RACE_JOB_FILE, "utf8"));
+    job.pidIdentity = "fresh-identity";
+    job.pgid = 4242;
+    fs.writeFileSync(process.env.CC_TEST_RACE_JOB_FILE, JSON.stringify(job) + "\\n", "utf8");
+  }
+  return originalLinkSync(source, destination);
+};
+const realNow = performance.now.bind(performance);
+Object.defineProperty(performance, "now", { configurable: true, value: () => {
+  const stack = new Error().stack ?? "";
+  if (stack.includes("createCleanupDeadlineAt") || stack.includes("transitionWithinCleanupBudget")) {
+    return 0;
+  }
+  if (stack.includes("cleanupSessionJobs")) {
+    return 2_750;
+  }
+  return realNow();
+} });
+`,
+        "utf8"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          CC_TEST_RACE_JOB_FILE: jobFile,
+          NODE_OPTIONS: [
+            process.env.NODE_OPTIONS,
+            `--import=${pathToFileURL(preload).href}`,
+          ]
+            .filter(Boolean)
+            .join(" "),
+        }
+      );
+
+      const job = readStateJob(testEnv, "racing-process-handles");
+      assert.equal(job.status, "cancelling");
+      assert.equal(job.phase, "session_cleanup_pending");
+      assert.equal(job.pidIdentity, "fresh-identity");
+      assert.equal(job.pgid, 4242);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("retains the current-session fallback when its cleanup marker cannot be written", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(stateDir, "current-session.json"),
+        JSON.stringify({ sessionId: "hook-session" }) + "\n",
+        "utf8"
+      );
+      writeStateJob(testEnv, "marker-write-failure-job", {
+        id: "marker-write-failure-job",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: new Date().toISOString(),
+        pid: 999_999,
+        pidIdentity: "stored-identity",
+      });
+      const preload = path.join(testEnv.rootDir, "fail-cleanup-marker.mjs");
+      fs.writeFileSync(
+        preload,
+        `import fs from "node:fs";
+const originalWriteFileSync = fs.writeFileSync.bind(fs);
+fs.writeFileSync = (file, ...args) => {
+  if (String(file).includes("session-cleanup-pending-hook-session.json")) {
+    const error = new Error("simulated cleanup marker ENOSPC");
+    error.code = "ENOSPC";
+    throw error;
+  }
+  return originalWriteFileSync(file, ...args);
+};
+`,
+        "utf8"
+      );
+
+      const result = runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [
+            process.env.NODE_OPTIONS,
+            `--import=${pathToFileURL(preload).href}`,
+          ]
+            .filter(Boolean)
+            .join(" "),
+        }
+      );
+
+      assert.equal(readCurrentSessionMarker(testEnv).sessionId, "hook-session");
+      assert.equal(readStateJob(testEnv, "marker-write-failure-job").status, "running");
+      assert.match(result.stderr, /SessionEnd cleanup failed.*ENOSPC/iu);
     } finally {
       cleanupHookEnvironment(testEnv);
     }
@@ -621,8 +860,9 @@ Date.now = () => {
     }
   });
 
-  it("session lifecycle hook preserves a live PID when POSIX identity lookup fails", async () => {
+  it("session lifecycle hook preserves a live PID when POSIX identity lookup fails", async (t) => {
     if (process.platform !== "darwin") {
+      t.skip("Darwin ps timeout behavior");
       return;
     }
 
@@ -642,7 +882,32 @@ Date.now = () => {
       const failingBin = path.join(testEnv.rootDir, "failing-ps");
       fs.mkdirSync(failingBin);
       const fakePs = path.join(failingBin, "ps");
-      fs.writeFileSync(fakePs, "#!/bin/sh\nexit 2\n", "utf8");
+      const observedStatus = path.join(testEnv.rootDir, "status-before-ps.txt");
+      const jobFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "jobs",
+        "identity-unavailable-job.json"
+      );
+      fs.writeFileSync(
+        fakePs,
+        `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args.at(-1) === process.env.CC_TEST_TARGET_PID) {
+  const job = JSON.parse(fs.readFileSync(process.env.CC_TEST_JOB_FILE, "utf8"));
+  fs.writeFileSync(
+    process.env.CC_TEST_OBSERVED_STATUS,
+    JSON.stringify({ status: job.status, completedAt: job.completedAt ?? null }),
+    "utf8"
+  );
+  process.exit(2);
+}
+const result = spawnSync("/bin/ps", args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+        "utf8"
+      );
       fs.chmodSync(fakePs, 0o755);
       writeStateJob(testEnv, "identity-unavailable-job", {
         id: "identity-unavailable-job",
@@ -665,15 +930,379 @@ Date.now = () => {
         {
           ...testEnv.env,
           PATH: `${failingBin}${path.delimiter}${testEnv.env.PATH}`,
+          CC_TEST_TARGET_PID: String(child.pid),
+          CC_TEST_JOB_FILE: jobFile,
+          CC_TEST_OBSERVED_STATUS: observedStatus,
         }
       );
 
       const job = readStateJob(testEnv, "identity-unavailable-job");
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(observedStatus, "utf8")),
+        { status: "cancelling", completedAt: null }
+      );
       assert.equal(job.status, "cancel_failed");
       assert.equal(job.phase, "cancel_failed");
       assert.equal(job.pid, child.pid);
       assert.equal(job.pidIdentity, identity);
       assert.doesNotThrow(() => process.kill(child.pid, 0));
+    } finally {
+      child.kill();
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd stays below its hook ceiling when process identity lookup stalls", async (t) => {
+    if (process.platform !== "darwin") {
+      t.skip("Darwin ps timeout behavior");
+      return;
+    }
+
+    const testEnv = createHookEnvironment();
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" }
+    );
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+
+    try {
+      const identity = getProcessIdentity(child.pid);
+      const slowBin = path.join(testEnv.rootDir, "slow-ps");
+      fs.mkdirSync(slowBin);
+      const fakePs = path.join(slowBin, "ps");
+      fs.writeFileSync(
+        fakePs,
+        `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args.at(-1) === process.env.CC_TEST_TARGET_PID) {
+  setInterval(() => {}, 1000);
+} else {
+  const result = spawnSync("/bin/ps", args, { stdio: "inherit" });
+  process.exit(result.status ?? 1);
+}
+`,
+        "utf8"
+      );
+      fs.chmodSync(fakePs, 0o755);
+      writeStateJob(testEnv, "slow-identity-job", {
+        id: "slow-identity-job",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        pid: child.pid,
+        pidIdentity: identity,
+      });
+
+      const startedAt = performance.now();
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          PATH: `${slowBin}${path.delimiter}${testEnv.env.PATH}`,
+          CC_TEST_TARGET_PID: String(child.pid),
+        },
+        { timeout: 2_900 }
+      );
+      const elapsedMs = performance.now() - startedAt;
+
+      const job = readStateJob(testEnv, "slow-identity-job");
+      assert.ok(elapsedMs < 2_900, `SessionEnd took ${elapsedMs}ms`);
+      assert.equal(job.status, "cancelling");
+      assert.equal(job.phase, "session_cleanup_pending");
+      assert.equal(job.completedAt, null);
+      assert.equal(job.pid, child.pid);
+      assert.equal(job.pidIdentity, identity);
+      assert.doesNotThrow(() => process.kill(child.pid, 0));
+    } finally {
+      child.kill();
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd shares one deadline across stalled lock recovery attempts", async (t) => {
+    if (process.platform !== "darwin") {
+      t.skip("Darwin ps timeout behavior");
+      return;
+    }
+
+    const testEnv = createHookEnvironment();
+    const lockOwner = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" }
+    );
+    await new Promise((resolve, reject) => {
+      lockOwner.once("spawn", resolve);
+      lockOwner.once("error", reject);
+    });
+
+    try {
+      const jobId = "stalled-lock-job";
+      const jobFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "jobs",
+        `${jobId}.json`
+      );
+      writeStateJob(testEnv, jobId, {
+        id: jobId,
+        status: "queued",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+      });
+      fs.writeFileSync(
+        `${jobFile}.lock`,
+        JSON.stringify({
+          pid: lockOwner.pid,
+          identity: getProcessIdentity(lockOwner.pid),
+          timestamp: Date.now() - 31_000,
+          token: "stalled-lock-owner",
+        }),
+        { encoding: "utf8", mode: 0o600 }
+      );
+
+      const slowBin = path.join(testEnv.rootDir, "slow-lock-ps");
+      fs.mkdirSync(slowBin);
+      const fakePs = path.join(slowBin, "ps");
+      fs.writeFileSync(
+        fakePs,
+        `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
+  setInterval(() => {}, 1000);
+} else {
+  const result = spawnSync("/bin/ps", args, { stdio: "inherit" });
+  process.exit(result.status ?? 1);
+}
+`,
+        "utf8"
+      );
+      fs.chmodSync(fakePs, 0o755);
+
+      const startedAt = performance.now();
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          PATH: `${slowBin}${path.delimiter}${testEnv.env.PATH}`,
+          CC_TEST_LOCK_OWNER_PID: String(lockOwner.pid),
+        },
+        { timeout: 2_900 }
+      );
+      const elapsedMs = performance.now() - startedAt;
+
+      assert.ok(elapsedMs < 2_900, `SessionEnd took ${elapsedMs}ms`);
+      assert.equal(readStateJob(testEnv, jobId).status, "queued");
+
+      const lockOwnerExit = new Promise((resolve) => {
+        lockOwner.once("exit", resolve);
+      });
+      lockOwner.kill();
+      await lockOwnerExit;
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "new-session" },
+        testEnv.env
+      );
+      assert.equal(readStateJob(testEnv, jobId).status, "cancelled");
+    } finally {
+      lockOwner.kill();
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd resolves a subdirectory workspace without waiting on Git", (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX executable fixture");
+      return;
+    }
+
+    const testEnv = createHookEnvironment();
+    try {
+      const slowBin = path.join(testEnv.rootDir, "slow-git");
+      fs.mkdirSync(slowBin);
+      const fakeGit = path.join(slowBin, "git");
+      fs.writeFileSync(
+        fakeGit,
+        "#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n",
+        "utf8"
+      );
+      fs.chmodSync(fakeGit, 0o755);
+      writeStateJob(testEnv, "slow-workspace-job", {
+        id: "slow-workspace-job",
+        status: "queued",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+      });
+      const nestedCwd = path.join(testEnv.workspaceDir, "nested", "cwd");
+      fs.mkdirSync(nestedCwd, { recursive: true });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: nestedCwd, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          PATH: `${slowBin}${path.delimiter}${testEnv.env.PATH}`,
+        },
+        { timeout: 2_000 }
+      );
+      assert.equal(readStateJob(testEnv, "slow-workspace-job").status, "cancelled");
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("top-level SessionStart retries cancel_failed jobs", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      writePendingSessionCleanup(testEnv, "old-session");
+      writeStateJob(testEnv, "retry-cancel-failed", {
+        id: "retry-cancel-failed",
+        status: "cancel_failed",
+        phase: "cancel_failed",
+        sessionId: "old-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        pid: 99_999_999,
+        pidIdentity: "missing-process-identity",
+      });
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "new-session" },
+        testEnv.env
+      );
+
+      const job = readStateJob(testEnv, "retry-cancel-failed");
+      assert.equal(job.status, "cancelled");
+      assert.equal(job.pid, null);
+      assert.equal(job.pidIdentity, null);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("top-level SessionStart does not retry unverifiable cancel_failed jobs", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      writePendingSessionCleanup(testEnv, "old-session");
+      writeStateJob(testEnv, "unverifiable-cancel-failed", {
+        id: "unverifiable-cancel-failed",
+        status: "cancel_failed",
+        phase: "cancel_failed",
+        sessionId: "old-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        updatedAt: "2026-04-04T01:00:01Z",
+        completedAt: "2026-04-04T01:00:01Z",
+        errorMessage: "Original unverifiable cleanup failure.",
+        pid: process.pid,
+        pidIdentity: null,
+      });
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "new-session" },
+        testEnv.env
+      );
+
+      const job = readStateJob(testEnv, "unverifiable-cancel-failed");
+      assert.equal(job.errorMessage, "Original unverifiable cleanup failure.");
+      assert.equal(job.updatedAt, "2026-04-04T01:00:01Z");
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("top-level SessionStart retries pending SessionEnd cleanup", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      writeStateJob(testEnv, "pending-session-cleanup", {
+        id: "pending-session-cleanup",
+        status: "cancelling",
+        phase: "session_cleanup_pending",
+        sessionId: "old-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        pid: 99_999_999,
+        pidIdentity: "missing-process-identity",
+      });
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "new-session" },
+        testEnv.env
+      );
+
+      const job = readStateJob(testEnv, "pending-session-cleanup");
+      assert.equal(job.status, "cancelled");
+      assert.equal(job.pid, null);
+      assert.equal(job.pidIdentity, null);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("top-level SessionStart leaves another live top-level session alone", async () => {
+    const testEnv = createHookEnvironment();
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" }
+    );
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+
+    try {
+      const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(stateDir, "current-session.json"),
+        JSON.stringify({ sessionId: "new-session", updatedAt: "2026-04-04T01:00:00Z" }),
+        "utf8"
+      );
+      writeStateJob(testEnv, "other-live-session-job", {
+        id: "other-live-session-job",
+        status: "running",
+        sessionId: "old-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        pid: child.pid,
+        pidIdentity: getProcessIdentity(child.pid),
+      });
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "new-session" },
+        testEnv.env
+      );
+
+      assert.equal(readStateJob(testEnv, "other-live-session-job").status, "running");
+      assert.doesNotThrow(() => process.kill(child.pid, 0));
+      assert.equal(readCurrentSessionMarker(testEnv).sessionId, "new-session");
     } finally {
       child.kill();
       cleanupHookEnvironment(testEnv);
@@ -695,6 +1324,16 @@ Date.now = () => {
         ) + "\n",
         "utf8"
       );
+      writeStateJob(testEnv, "parent-recovery-job", {
+        id: "parent-recovery-job",
+        status: "cancel_failed",
+        phase: "cancel_failed",
+        sessionId: "parent-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+        pid: 99_999_999,
+        pidIdentity: "missing-process-identity",
+      });
 
       const envFile = path.join(testEnv.rootDir, "child-session.env");
       runHook(
@@ -712,6 +1351,10 @@ Date.now = () => {
       );
 
       assert.equal(readCurrentSessionMarker(testEnv).sessionId, "parent-session");
+      assert.equal(
+        readStateJob(testEnv, "parent-recovery-job").status,
+        "cancel_failed"
+      );
 
       const exportedEnv = fs.readFileSync(envFile, "utf8");
       assert.match(exportedEnv, /CLAUDE_COMPANION_SESSION_ID='child-session'/);
@@ -751,6 +1394,26 @@ Date.now = () => {
       const exportedEnv = fs.readFileSync(envFile, "utf8");
       assert.match(exportedEnv, /CODEX_COMPANION_TRANSCRIPT_PATH=/);
       assert.match(exportedEnv, new RegExp(escapeRegExp(transcriptPath)));
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session start preserves current-session fallback outside Git", () => {
+    const testEnv = createHookEnvironment({ initGit: false });
+
+    try {
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "non-git-session" },
+        testEnv.env
+      );
+
+      assert.equal(
+        readCurrentSessionMarker(testEnv).sessionId,
+        "non-git-session"
+      );
     } finally {
       cleanupHookEnvironment(testEnv);
     }

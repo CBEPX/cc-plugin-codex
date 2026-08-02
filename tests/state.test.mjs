@@ -37,6 +37,9 @@ import {
   setCurrentSession,
   getCurrentSession,
   clearCurrentSession,
+  markSessionCleanupPending,
+  listPendingSessionCleanups,
+  clearSessionCleanupPending,
   cleanupOldJobs,
   reapStaleJobs,
   appendStopReviewHistory,
@@ -806,6 +809,35 @@ try {
     });
   });
 
+  it("can publish a deadline lock without resolving the lock-owner identity", () => {
+    writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
+    const originalLinkSync = fs.linkSync;
+    let publishedIdentity = "not-observed";
+    Reflect.set(fs, "linkSync", (source, destination) => {
+      if (String(destination).endsWith(".json.lock")) {
+        publishedIdentity = JSON.parse(fs.readFileSync(source, "utf8")).identity;
+      }
+      return originalLinkSync(source, destination);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      const result = transitionJob(
+        PROJECT_CWD,
+        jobId,
+        ["running"],
+        "completed",
+        {},
+        { skipLockOwnerIdentity: true }
+      );
+      assert.equal(result.transitioned, true);
+      assert.equal(publishedIdentity, null);
+    } finally {
+      Reflect.set(fs, "linkSync", originalLinkSync);
+      syncBuiltinESMExports();
+    }
+  });
+
   it("keeps a live owner's lock when its identity is unavailable", () => {
     writeJobFile(PROJECT_CWD, jobId, { id: jobId, status: "running" });
     const lockFile = path.join(resolveJobsDir(PROJECT_CWD), `${jobId}.json.lock`);
@@ -1182,6 +1214,69 @@ describe("current session marker", () => {
     setCurrentSession(repoDir, "newer-session");
     clearCurrentSession(repoDir, sessionId);
     assert.equal(getCurrentSession(repoDir), "newer-session");
+  });
+});
+
+describe("pending session cleanup markers", () => {
+  const sessionIds = ["ended-session-a", "ended-session-b"];
+  let repoDir;
+
+  beforeEach(() => {
+    repoDir = createTempGitRepo();
+  });
+
+  afterEach(() => {
+    for (const sessionId of sessionIds) {
+      clearSessionCleanupPending(repoDir, sessionId);
+    }
+    fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("round-trips and clears ended-session ownership", () => {
+    for (const sessionId of sessionIds) {
+      markSessionCleanupPending(repoDir, sessionId);
+    }
+    markSessionCleanupPending(repoDir, sessionIds[0]);
+
+    const stateDir = resolveStateDir(repoDir);
+    fs.writeFileSync(path.join(stateDir, "unrelated.json"), JSON.stringify({
+      sessionId: "unrelated-session",
+    }));
+    fs.writeFileSync(
+      path.join(stateDir, "session-cleanup-pending-wrong-extension.txt"),
+      JSON.stringify({ sessionId: "wrong-extension-session" })
+    );
+    fs.writeFileSync(
+      path.join(stateDir, "session-cleanup-pending-malformed.json"),
+      "{"
+    );
+    fs.writeFileSync(
+      path.join(stateDir, "session-cleanup-pending-invalid-id.json"),
+      JSON.stringify({ sessionId: "../invalid" })
+    );
+    const duplicateMarkerFile = path.join(
+      stateDir,
+      "session-cleanup-pending-duplicate.json"
+    );
+    fs.writeFileSync(
+      duplicateMarkerFile,
+      JSON.stringify({ sessionId: sessionIds[0] })
+    );
+
+    assert.deepEqual(
+      new Set(listPendingSessionCleanups(repoDir)),
+      new Set(sessionIds)
+    );
+    assert.equal(listPendingSessionCleanups(repoDir).length, sessionIds.length);
+
+    fs.unlinkSync(duplicateMarkerFile);
+    clearSessionCleanupPending(repoDir, sessionIds[0]);
+    assert.deepEqual(listPendingSessionCleanups(repoDir), [sessionIds[1]]);
+  });
+
+  it("returns no pending cleanups when the state directory is absent", () => {
+    assert.deepEqual(listPendingSessionCleanups(repoDir), []);
   });
 });
 

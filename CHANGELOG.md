@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v1.5.3
+
+### Fixed
+
+- Keep Codex SessionEnd cleanup within its three-second ceiling by bounding workspace detection and sharing one monotonic deadline across state-lock retries and bounded PID identity/termination commands, capped 500 ms before the hook ceiling.
+- Record ended sessions before taking per-job locks, persist unresolved PID/identity handles in a non-terminal `session_cleanup_pending` phase before termination, surface automatic and identity-aware manual cleanup, and let the next top-level `SessionStart` recover unmarked or pending jobs without touching unrelated and nested sessions.
+- Keep deadline-bound Windows lock publication independent of a cold CIM startup; target-process verification remains fail-closed and leaves an explicit pending/manual-cleanup state when PowerShell cannot finish inside the hook budget.
+
 ## v1.5.2
 
 ### Added

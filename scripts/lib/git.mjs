@@ -23,16 +23,20 @@ function gitChecked(cwd, args, options = {}) {
   return runCommandChecked("git", args, { cwd, ...options });
 }
 
-export function ensureGitRepository(cwd) {
-  const result = git(cwd, ["rev-parse", "--show-toplevel"]);
-  const errorCode = result.error && "code" in result.error ? result.error.code : null;
-  if (errorCode === "ENOENT") {
-    throw new Error("git is not installed. Install Git and retry.");
-  }
-  if (result.status !== 0) {
+export function ensureGitRepository(cwd, options = {}) {
+  try {
+    return gitChecked(
+      cwd,
+      ["rev-parse", "--show-toplevel"],
+      options
+    ).stdout.trim();
+  } catch (error) {
+    if (error?.code === "ETIMEDOUT") throw error;
+    if (error?.code === "ENOENT") {
+      throw new Error("git is not installed. Install Git and retry.");
+    }
     throw new Error("This command must run inside a Git repository.");
   }
-  return result.stdout.trim();
 }
 
 export function getRepoRoot(cwd) {
