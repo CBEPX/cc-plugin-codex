@@ -1801,24 +1801,27 @@ async function runForegroundCommand(job, runner, options = {}) {
     logFile: options.logFile,
     stderr: !options.json && !options.quietProgress
   });
-  const execution = await runTrackedJob(
-    job,
-    (onSpawn) => runner(progress, onSpawn),
-    { logFile }
-  );
-  if (options.markViewedOnSuccess) {
-    patchJob(job.workspaceRoot, job.id, {
-      resultViewedAt: nowIso(),
-    });
+  try {
+    const execution = await runTrackedJob(
+      job,
+      (onSpawn) => runner(progress, onSpawn),
+      { logFile }
+    );
+    outputResult(
+      options.json ? execution.payload : execution.rendered,
+      options.json
+    );
+    if (execution.exitStatus !== 0) {
+      process.exitCode = execution.exitStatus;
+    }
+    return execution;
+  } finally {
+    if (options.markViewedOnSuccess) {
+      patchJob(job.workspaceRoot, job.id, {
+        resultViewedAt: nowIso(),
+      });
+    }
   }
-  outputResult(
-    options.json ? execution.payload : execution.rendered,
-    options.json
-  );
-  if (execution.exitStatus !== 0) {
-    process.exitCode = execution.exitStatus;
-  }
-  return execution;
 }
 
 // ---------------------------------------------------------------------------

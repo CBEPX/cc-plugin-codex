@@ -50,6 +50,11 @@ async function main() {
   }
 
   if (args[0] === "auth" && args[1] === "status") {
+    if (process.env.CLAUDE_FAKE_AUTHENTICATED === "0") {
+      process.stderr.write("not authenticated\\n");
+      process.exitCode = 1;
+      return;
+    }
     process.stdout.write("authenticated\\n");
     return;
   }
@@ -3176,6 +3181,34 @@ describe("claude-companion integration", () => {
       const failedJob = listStoredJobs(testEnv).find(
         (job) =>
           job.sessionId === "session-foreground-failure" &&
+          job.status === "failed"
+      );
+      assert.ok(failedJob, "expected one failed foreground job");
+      assert.match(failedJob.resultViewedAt ?? "", /\d{4}-\d{2}-\d{2}T/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("marks a throwing foreground failure as viewed", () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-foreground-throw",
+      CLAUDE_FAKE_AUTHENTICATED: "0",
+    };
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      const result = runCompanionExpectFailure(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree"],
+        { env: sessionEnv }
+      );
+      assert.match(result.stderr, /claude auth login/);
+
+      const failedJob = listStoredJobs(testEnv).find(
+        (job) =>
+          job.sessionId === "session-foreground-throw" &&
           job.status === "failed"
       );
       assert.ok(failedJob, "expected one failed foreground job");
