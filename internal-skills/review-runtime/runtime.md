@@ -36,9 +36,11 @@ Background contract:
   - return stdout only
   - ignore stderr progress chatter such as `[cc] ...`
   - do not inspect the repo or perform the review itself
-  - run the companion command as one blocking foreground shell-tool call, not as a background terminal/session
-  - do not request a shell session id, poll a shell session later, or return before the companion command exits
-  - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
+  - run the companion command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`
+  - If the shell tool returns a session id, keep polling that same session until the companion command exits.
+  - Exit code 0 is the only successful completion.
+  - Exit code 124 means the job is still running; return the companion output without claiming it finished.
+  - For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
   - use at most one `send_input` completion notification on success
   - mention the tool name `send_input` literally in the child instructions
   - use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`

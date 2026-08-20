@@ -134,8 +134,10 @@ test("review skills preserve foreground/background routing contracts", () => {
         "`fork_context: false`",
         '`reasoning_effort: "medium"`',
         "Omit `model` so the forwarding child inherits the current Codex runtime model.",
-        "run that command as one blocking foreground shell-tool call, not as a background terminal/session",
-        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
+        "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
+        "Exit code 0 is the only successful completion.",
+        "Exit code 124 means the job is still running; return the companion output without claiming it finished.",
+        "For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.",
         "never leave an empty routing placeholder such as `--owner-session-id  --job-id`",
         "send_input({ target: <parent-thread-id>, message: <steering-message> })",
         notification,
@@ -208,7 +210,8 @@ test("rescue keeps host execution controls out of the companion task", () => {
   assertIncludesAll(
     rescue,
     [
-      "task-resume-candidate --json",
+      "session-routing-context --json",
+      "task-resume-candidate --owner-session-id <owner-session-id> --json",
       "background-routing-context --kind task --json",
       '--cwd "<workspaceRoot>"',
       "--view-state on-success",
@@ -218,10 +221,19 @@ test("rescue keeps host execution controls out of the companion task", () => {
       "--prompt-file",
       "send_input({ target: <parent-thread-id>, message: <steering-message> })",
       "Background Claude Code rescue finished. Open it with $cc:result <reserved-job-id>.",
+      "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
+      "Exit code 0 is the only successful completion.",
+      "Exit code 124 means the job is still running; return the companion output without claiming it finished.",
+      "For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.",
       "../../internal-skills/cli-runtime/runtime.md",
       "../../internal-skills/task-prompt-shaping/prompt-shaping.md",
     ],
     "rescue"
+  );
+  assert.ok(
+    rescue.indexOf("session-routing-context --json") <
+      rescue.indexOf("task-resume-candidate --owner-session-id <owner-session-id> --json"),
+    "rescue must resolve owner routing before probing for a resume candidate"
   );
   assert.match(rescue, /Never forward either flag to `claude-companion\.mjs task`/i);
   assert.doesNotMatch(rescue, /claude-companion\.mjs" task --(?:background|wait)/i);
@@ -249,8 +261,10 @@ test("internal runtime references preserve executable routing invariants", () =>
       "Never emit an empty routing placeholder such as `--owner-session-id  --job-id`",
       'review --cwd "<workspaceRoot>" --view-state defer',
       'adversarial-review --cwd "<workspaceRoot>" --view-state defer',
-      "run the companion command as one blocking foreground shell-tool call, not as a background terminal/session",
-      "do not request a shell session id, poll a shell session later, or return before the companion command exits",
+      "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
+      "Exit code 0 is the only successful completion.",
+      "Exit code 124 means the job is still running; return the companion output without claiming it finished.",
+      "For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.",
       "Omit `model` so the child inherits the current Codex runtime model.",
       "Do not add a fixed-version model fallback.",
       "send_input({ target: <parent-thread-id>, message: <steering-message> })",
@@ -267,8 +281,10 @@ test("internal runtime references preserve executable routing invariants", () =>
       'node "<plugin-root>/scripts/claude-companion.mjs" task --cwd "<workspaceRoot>"',
       "Never derive the workspace from the plugin root",
       "Never emit an empty routing placeholder such as `--owner-session-id  --job-id`",
-      "Run the companion command as one blocking foreground shell-tool call, not as a background terminal/session.",
-      "Do not request a shell session id, poll a shell session later, or return before the companion command exits.",
+      "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
+      "Exit code 0 is the only successful completion.",
+      "Exit code 124 means the job is still running; return the companion output without claiming it finished.",
+      "For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.",
       "Never call `task --background` or invent `task --wait`.",
       "--owner-session-id <session-id>",
       "--job-id",
@@ -286,7 +302,8 @@ test("setup keeps native hook repair in the companion flow", () => {
   assertIncludesAll(
     setup,
     [
-      'claude-companion.mjs" setup --json',
+      'claude-companion.mjs" setup --check --json',
+      "`--check` is read-only",
       "[features].hooks",
       "[features].plugin_hooks",
       "native hook trust hashes",

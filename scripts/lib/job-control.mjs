@@ -18,6 +18,7 @@ import {
   readJobFile,
   resolveJobFile,
   resolveJobLogFile,
+  TERMINAL_JOB_STATUSES,
 } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -87,7 +88,6 @@ function formatElapsedDuration(startValue, endValue = null) {
 }
 
 const ACTIVE_STATUSES = new Set(["running", "cancelling"]);
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "cancel_failed", "unknown"]);
 
 function inferJobPhase(job, progressPreview = []) {
   switch (job.status) {
@@ -125,9 +125,9 @@ export function enrichJob(job, options = {}) {
     logFile: managedLogFile,
     elapsed: formatElapsedDuration(
       job.startedAt ?? job.createdAt,
-      TERMINAL_STATUSES.has(job.status) ? (job.completedAt ?? null) : null
+      TERMINAL_JOB_STATUSES.has(job.status) ? (job.completedAt ?? null) : null
     ),
-    duration: TERMINAL_STATUSES.has(job.status)
+    duration: TERMINAL_JOB_STATUSES.has(job.status)
       ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
       : null,
   };
@@ -170,7 +170,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
     .filter((job) => ACTIVE_STATUSES.has(job.status))
     .map((job) => enrichJob(job, { maxProgressLines }));
 
-  const finishedJobs = jobs.filter((job) => TERMINAL_STATUSES.has(job.status));
+  const finishedJobs = jobs.filter((job) => TERMINAL_JOB_STATUSES.has(job.status));
   const latestFinishedRaw = finishedJobs[0] ?? null;
   const latestFinished = latestFinishedRaw
     ? enrichJob(latestFinishedRaw, { maxProgressLines })
@@ -212,7 +212,7 @@ export function resolveResultJob(cwd, reference) {
   if (reference) {
     const selected = matchJobReference(jobs, reference);
     const enriched = enrichJob(selected);
-    if (TERMINAL_STATUSES.has(enriched.status)) {
+    if (TERMINAL_JOB_STATUSES.has(enriched.status)) {
       return { workspaceRoot, job: enriched, state: "terminal" };
     }
     if (enriched.status === "queued" || ACTIVE_STATUSES.has(enriched.status)) {
@@ -224,7 +224,7 @@ export function resolveResultJob(cwd, reference) {
   }
 
   const selected = matchJobReference(jobs, reference, (job) =>
-    TERMINAL_STATUSES.has(job.status)
+    TERMINAL_JOB_STATUSES.has(job.status)
   );
   if (selected) {
     return { workspaceRoot, job: enrichJob(selected), state: "terminal" };

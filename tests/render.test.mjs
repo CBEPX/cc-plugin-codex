@@ -170,6 +170,24 @@ describe("renderSetupReport", () => {
     assert.ok(output.includes("- hooks: Codex hooks installed"));
   });
 
+  it("labels read-only checks and includes runtime diagnostics", () => {
+    const output = renderSetupReport({
+      ...baseReport,
+      checkOnly: true,
+      diagnostics: {
+        runtimeSource: "source-checkout",
+        pluginVersion: "1.5.4",
+        configPath: "/tmp/codex/config.toml",
+        workspaceRoot: "/tmp/workspace",
+      },
+    });
+
+    assert.match(output, /Mode: read-only check/);
+    assert.match(output, /plugin: 1\.5\.4 \(source-checkout\)/);
+    assert.match(output, /config: \/tmp\/codex\/config\.toml/);
+    assert.match(output, /workspace: \/tmp\/workspace/);
+  });
+
   it("includes hook trust details when present", () => {
     const output = renderSetupReport({
       ...baseReport,
@@ -402,6 +420,18 @@ describe("renderTaskResult", () => {
     assert.match(output, /Claude usage limit reached/i);
     assert.match(output, /Retry after 4:50pm \(Europe\/Moscow\)/);
     assert.match(output, /You've hit your session limit/);
+  });
+
+  it("renders Claude authentication failures with login guidance", () => {
+    const output = renderTaskResult({
+      failure: {
+        kind: "claude_auth",
+        message: "Not logged in.",
+      },
+    });
+
+    assert.match(output, /claude auth login/);
+    assert.match(output, /Not logged in/);
   });
 
   it("returns default message when nothing provided", () => {

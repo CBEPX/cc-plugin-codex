@@ -305,15 +305,17 @@ function extractClaudeLimitResetText(text) {
 }
 
 const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
-  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b.{0,120}\bresets(?:\s+at)?\b|\b(?:session|usage)\s+limit\s+reached\b/i;
+  /(?:you(?:'|’)?ve|you have)\s+(?:hit|reached)\s+your\s+.*limit|\b(?:session|usage)\s+limit\b.{0,120}\bresets(?:\s+at)?\b|\b(?:session|usage)\s+limit\s+reached\b/i;
 const CLAUDE_ERROR_LIMIT_RE =
-  /(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|\b429\b/i;
+  /(?:you(?:'|’)?ve|you have)\s+(?:hit|reached)\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|\b429\b/i;
+const CLAUDE_AUTH_ERROR_RE =
+  /\bnot (?:logged|signed) in\b|\bnot authenticated\b|\bauthentication required\b|\binvalid api key\b|\b(?:oauth|access) token\b.{0,80}\bexpired\b|\bclaude auth login\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/gi;
 const CLAUDE_LIMIT_RESET_TEXT_RE =
-  /(?:(?:you(?:'|’)?ve|you have)\s+hit\s+your\s+[^\r\n.]*?limit|\b(?:session|usage)\s+limit(?:\s+reached)?\b)[^\r\n.]*?\bresets(?:\s+at)?\s+([^\r\n.]+)/gi;
+  /(?:(?:you(?:'|’)?ve|you have)\s+(?:hit|reached)\s+your\s+[^\r\n.]*?limit|\b(?:session|usage)\s+limit(?:\s+reached)?\b)[^\r\n.]*?\bresets(?:\s+at)?\s+([^\r\n.]+)/gi;
 const CLAUDE_ERROR_RESET_TEXT_RE =
   /(?:rate[_ -]?limit|\b429\b)[^\r\n.]{0,120}?\bresets\s+at\s+([^\r\n.]+)/gi;
 
@@ -365,18 +367,31 @@ export function classifyClaudeFailure(value = {}) {
       CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(finalMessage)
   );
   const stderrLimit = Boolean(stderr && CLAUDE_ERROR_LIMIT_RE.test(stderr));
-  if (!finalMessageLimit && !stderrLimit) {
-    return null;
+  if (finalMessageLimit || stderrLimit) {
+    const limitSource = finalMessageLimit ? finalMessage : stderr;
+    const resetText = finalMessageLimit
+      ? extractClaudeLimitResetText(limitSource) ?? extractClaudeLimitResetTextFromError(stderr)
+      : extractClaudeLimitResetTextFromError(stderr);
+    return {
+      kind: "claude_rate_limit",
+      message,
+      resetText,
+    };
   }
-  const limitSource = finalMessageLimit ? finalMessage : stderr;
-  const resetText = finalMessageLimit
-    ? extractClaudeLimitResetText(limitSource) ?? extractClaudeLimitResetTextFromError(stderr)
-    : extractClaudeLimitResetTextFromError(stderr);
-  return {
-    kind: "claude_rate_limit",
-    message,
-    resetText,
-  };
+  const finalMessageAuth = Boolean(
+    value.finalMessageHasAuthSignal &&
+      finalMessage &&
+      CLAUDE_AUTH_ERROR_RE.test(finalMessage)
+  );
+  const stderrAuth = Boolean(stderr && CLAUDE_AUTH_ERROR_RE.test(stderr));
+  if (finalMessageAuth || stderrAuth) {
+    return {
+      kind: "claude_auth",
+      message,
+      resetText: null,
+    };
+  }
+  return null;
 }
 
 function collectStringValues(value, strings = []) {
@@ -397,6 +412,12 @@ function collectStringValues(value, strings = []) {
 function hasClaudeLimitText(value) {
   return collectStringValues(value).some(
     (text) => CLAUDE_USAGE_LIMIT_EPOCH_RE.test(text) || CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(text)
+  );
+}
+
+function hasClaudeAuthText(value) {
+  return collectStringValues(value).some((text) =>
+    CLAUDE_AUTH_ERROR_RE.test(text)
   );
 }
 
@@ -570,6 +591,7 @@ export class StreamParser {
       finalModel: null,
       contextWindow: null,
       hasTerminalLimitSignal: false,
+      hasTerminalAuthSignal: false,
     };
   }
 
@@ -628,6 +650,9 @@ export class StreamParser {
       this.state.finalModel = extractObservedModel(event) ?? this.state.finalModel;
       if (hasSyntheticModelSignal(event) && hasClaudeLimitText(event)) {
         this.state.hasTerminalLimitSignal = true;
+      }
+      if (hasSyntheticModelSignal(event) && hasClaudeAuthText(event)) {
+        this.state.hasTerminalAuthSignal = true;
       }
       switch (event.type) {
         case "stream_event":
@@ -1364,6 +1389,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
           ? classifyClaudeFailure({
               finalMessage: parser.state.finalMessage,
               finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
+              finalMessageHasAuthSignal: parser.state.hasTerminalAuthSignal,
               stderr,
             })
           : null;

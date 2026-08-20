@@ -18,15 +18,16 @@ const expectations = [
   ["scripts/lib/process.mjs:108-179", ["terminateProcessTree"]],
   ["scripts/lib/process.mjs:185-367", ["terminateProcessTreeIfIdentityMatches"]],
   ["scripts/lib/process.mjs:390-504", ["getProcessIdentity", "getSpawnedProcessIdentity", "validateProcessIdentity", "isProcessAlive", "isProcessGroupAlive"]],
-  ["scripts/lib/state.mjs:180-220", ["ensurePluginDataLayout", "resolveWorkspaceHash", "ensureStateDir"]],
-  ["scripts/lib/state.mjs:289-363", ["setCurrentSession", "getCurrentSession", "clearCurrentSession", "markSessionCleanupPending", "listPendingSessionCleanups", "clearSessionCleanupPending"]],
-  ["scripts/lib/state.mjs:395-443", ["writeJobFile", "normalizeStoredJob"]],
-  ["scripts/lib/state.mjs:520-761", ["mostRecentJobTimestamp", "isWithinReapGracePeriod", "reapStaleJobs"]],
-  ["scripts/lib/state.mjs:810-982", ["unlinkLockIfUnchanged", "remainingLockDeadlineMs", "lockProcessTimeout", "recoverStaleLock", "acquireJobLock", "releaseJobLock"]],
-  ["scripts/lib/state.mjs:1048-1105", ["casJobStatus", "transitionJob", "writeAtomic"]],
-  ["scripts/lib/state.mjs:1111-1157", ["cleanupOldJobs"]],
+  ["scripts/lib/state.mjs:188-228", ["ensurePluginDataLayout", "resolveWorkspaceHash", "ensureStateDir"]],
+  ["scripts/lib/state.mjs:297-371", ["setCurrentSession", "getCurrentSession", "clearCurrentSession", "markSessionCleanupPending", "listPendingSessionCleanups", "clearSessionCleanupPending"]],
+  ["scripts/lib/state.mjs:403-451", ["writeJobFile", "normalizeStoredJob"]],
+  ["scripts/lib/state.mjs:528-838", ["mostRecentJobTimestamp", "isWithinReapGracePeriod", "reapStaleJobs"]],
+  ["scripts/lib/state.mjs:887-1059", ["unlinkLockIfUnchanged", "remainingLockDeadlineMs", "lockProcessTimeout", "recoverStaleLock", "acquireJobLock", "releaseJobLock"]],
+  ["scripts/lib/state.mjs:1125-1182", ["casJobStatus", "transitionJob", "writeAtomic"]],
+  ["scripts/lib/state.mjs:1188-1234", ["cleanupOldJobs"]],
   ["scripts/lib/tracked-jobs.mjs:26-39", ["transitionTrackedJob"]],
-  ["scripts/lib/tracked-jobs.mjs:356-482", ["runTrackedJob"]],
+  ["scripts/lib/tracked-jobs.mjs:282-340", ["createJobProgressUpdater"]],
+  ["scripts/lib/tracked-jobs.mjs:359-516", ["runTrackedJob"]],
   ["scripts/lib/job-control.mjs:144-247", ["matchJobReference", "buildStatusSnapshot", "resolveCancelableJob"]],
   ["scripts/installer-cli.mjs:96-234", ["readPersonalMarketplace", "prepareLegacyLocalCleanup", "isPluginAlreadyAbsent", "isPluginUninstallRefused"]],
   ["scripts/installer-cli.mjs:275-371", ["installOrUpdate", "uninstall"]],
@@ -60,5 +61,29 @@ test("mutation line ranges still contain their intended complete functions", () 
       Number(end),
       `${spec} has a stale end boundary`
     );
+  }
+});
+
+test("Windows lifecycle gate patterns stay aligned with their tests", () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(PROJECT_ROOT, "package.json"), "utf8")
+  );
+  const lifecycleScript = packageJson.scripts["test:lifecycle-contract"];
+  const expected = [
+    ["tests/state.test.mjs", "keeps a running job while its owning worker is alive"],
+    ["tests/state.test.mjs", "falls back to the identity-checked Claude PID"],
+    ["tests/state.test.mjs", "terminates a live Claude child"],
+    ["tests/state.test.mjs", "bounds Windows Claude child cleanup"],
+    ["tests/state.test.mjs", "clears a recycled Claude child PID"],
+    ["tests/state.test.mjs", "clears an identity-unavailable Claude child"],
+    ["tests/state.test.mjs", "reports cancel_failed when a live Claude child"],
+    ["tests/tracked-jobs.test.mjs", "tracks the worker separately"],
+    ["tests/tracked-jobs.test.mjs", "logs when worker identity is unavailable"],
+    ["tests/tracked-jobs.test.mjs", "does not bypass a terminal writer"],
+    ["tests/tracked-jobs.test.mjs", "ignores progress after its job file disappears"],
+  ];
+  for (const [file, name] of expected) {
+    assert.match(lifecycleScript, new RegExp(name));
+    assert.match(fs.readFileSync(path.join(PROJECT_ROOT, file), "utf8"), new RegExp(name));
   }
 });

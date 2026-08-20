@@ -29,6 +29,7 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 import {
   getProcessIdentity,
   isProcessAlive,
+  terminateProcessTreeIfIdentityMatches,
 } from "./process.mjs";
 
 const STATE_VERSION = 1;
@@ -65,6 +66,13 @@ const HARD_LINK_UNSUPPORTED_CODES = new Set([
 let hardLinksUnsupported = false;
 export const JOB_RESERVATION_SUFFIX = ".reserve";
 export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
+export const TERMINAL_JOB_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "cancel_failed",
+  "unknown",
+]);
 const NO_SESSION_RETENTION_BUCKET = "__no-session__";
 
 export function nowIso() {
@@ -541,16 +549,35 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
   const isProcessAliveImpl = options.isProcessAliveImpl ?? isProcessAlive;
   const getProcessIdentityImpl =
     options.getProcessIdentityImpl ?? getProcessIdentity;
+  const terminateProcessTreeIfIdentityMatchesImpl =
+    options.terminateProcessTreeIfIdentityMatchesImpl ??
+    terminateProcessTreeIfIdentityMatches;
 
   return jobs.map((job) => {
     if (isWithinReapGracePeriod(job)) return job;
     if (!REAPABLE_STATUSES.has(job.status)) return job;
-    if (!job.pid) {
+    const workerPid = Number.isInteger(job.workerPid) && job.workerPid > 0
+      ? job.workerPid
+      : null;
+    const workerPidIdentity =
+      typeof job.workerPidIdentity === "string" && job.workerPidIdentity
+        ? job.workerPidIdentity
+        : null;
+    const trackWorker = Boolean(
+      workerPid &&
+      (workerPidIdentity || !job.pid || job.pid === workerPid)
+    );
+    const trackedPid = trackWorker ? workerPid : job.pid;
+    const trackedPidIdentity = trackWorker
+      ? workerPidIdentity ?? job.pidIdentity
+      : job.pidIdentity;
+    if (!trackedPid) {
       if (job.status !== "queued") return job;
       const current = readJobFile(cwd, job.id) ?? job;
       if (
         current.status !== "queued" ||
         current.pid ||
+        current.workerPid ||
         isWithinReapGracePeriod(current, Date.now(), QUEUED_WITHOUT_PID_REAP_GRACE_MS)
       ) {
         return current;
@@ -561,6 +588,8 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
           completedAt: nowIso(),
           pid: null,
           pidIdentity: null,
+          workerPid: null,
+          workerPidIdentity: null,
           phase: "failed",
         });
         return readJobFile(cwd, job.id) ?? job;
@@ -570,7 +599,7 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
     }
 
     const now = Date.now();
-    const processExists = isProcessAliveImpl(job.pid);
+    const processExists = isProcessAliveImpl(trackedPid);
     let withinWindowsIdentityLease = false;
     let windowsIdentityCheckFile = null;
     let windowsIdentityProbeFile = null;
@@ -612,7 +641,7 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
     }
     const needsIdentityCheck =
       processExists &&
-      job.pidIdentity &&
+      trackedPidIdentity &&
       (platform !== "win32" || !withinWindowsIdentityLease);
     let identityMatches = true;
     let identityUnavailable = false;
@@ -620,11 +649,11 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
       try {
         identityMatches =
           getProcessIdentityImpl(
-            job.pid,
+            trackedPid,
             platform === "win32"
               ? { timeout: WINDOWS_REAPER_IDENTITY_TIMEOUT_MS }
               : undefined
-          ) === job.pidIdentity;
+          ) === trackedPidIdentity;
       } catch {
         identityMatches = false;
         identityUnavailable = true;
@@ -719,28 +748,76 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
 
     // Process is dead — transition via CAS
     try {
-      const nextStatus = identityUnavailableTooLong
-        ? (job.status === "cancelling" ? "cancel_failed" : "failed")
-        : (job.status === "cancelling" ? "cancelled" : "failed");
+      const hasDistinctClaudeChild = Boolean(
+        workerPid && job.pid && job.pid !== workerPid
+      );
+      let childCleanup = null;
+      if (hasDistinctClaudeChild) {
+        try {
+          childCleanup = terminateProcessTreeIfIdentityMatchesImpl(
+            job.pid,
+            job.pidIdentity,
+            {
+              platform,
+              getProcessIdentityImpl,
+              isProcessAliveImpl,
+              ...(platform === "win32"
+                ? { timeout: WINDOWS_REAPER_IDENTITY_TIMEOUT_MS }
+                : {}),
+            }
+          );
+        } catch (error) {
+          childCleanup = {
+            attempted: true,
+            delivered: false,
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+      const childResolved = Boolean(
+        childCleanup?.delivered ||
+        childCleanup?.reason === "process-missing" ||
+        childCleanup?.reason === "identity-mismatch" ||
+        (childCleanup?.reason === "identity-unavailable" &&
+          !isProcessAliveImpl(job.pid))
+      );
+      const unresolvedClaudeChild = hasDistinctClaudeChild && !childResolved;
+      const nextStatus = job.status === "cancelling"
+        ? (identityUnavailableTooLong || unresolvedClaudeChild
+            ? "cancel_failed"
+            : "cancelled")
+        : "failed";
       const terminalData = identityUnavailableTooLong
         ? {
             errorMessage:
-              `Process ${job.pid} identity remained unverifiable beyond the bounded Windows recheck window. Manual cleanup may be required.`,
+              `Process ${trackedPid} identity remained unverifiable beyond the bounded Windows recheck window. Manual cleanup may be required.`,
             completedAt: nowIso(),
             phase: nextStatus,
             reapedUnverifiable: true,
             ...(nextStatus === "cancel_failed"
-              ? { pgid: job.pgid ?? job.pid }
+              ? { pgid: job.pgid ?? job.pid ?? trackedPid }
               : {}),
           }
         : {
-            errorMessage: job.status === "cancelling"
+            errorMessage: nextStatus === "cancel_failed"
+              ? `Cancellation could not verify cleanup of Claude child ${job.pid}; manual cleanup is required.`
+              : job.status === "cancelling"
               ? "Cancelled by user. Auto-reaped after process exit."
-              : `Process ${job.pid} died without completing. Auto-reaped.`,
+              : `${trackWorker ? "Worker" : "Process"} ${trackedPid} died without completing. Auto-reaped.${
+                  unresolvedClaudeChild
+                    ? ` Claude child ${job.pid} may still be running; manual cleanup is required.`
+                    : ""
+                }`,
             completedAt: nowIso(),
-            pid: null,
-            pidIdentity: null,
-            phase: nextStatus === "cancelled" ? "cancelled" : "failed",
+            ...(unresolvedClaudeChild
+              ? {}
+              : { pid: null, pidIdentity: null }),
+            workerPid: null,
+            workerPidIdentity: null,
+            ...(nextStatus === "cancel_failed"
+              ? { pgid: job.pgid ?? job.pid ?? trackedPid }
+              : {}),
+            phase: nextStatus,
           };
       const transitioned = transitionJob(
         cwd,

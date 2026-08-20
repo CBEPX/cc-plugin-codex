@@ -142,6 +142,19 @@ describe("StreamParser", () => {
     assert.equal(regularParser.state.hasTerminalLimitSignal, false);
   });
 
+  it("marks synthetic authentication failures as trusted terminal signals", () => {
+    const parser = new StreamParser();
+    parser.feed(
+      JSON.stringify({
+        type: "result",
+        result: "Invalid API key. Please run /login.",
+        model: "<synthetic>",
+      }) + "\n"
+    );
+
+    assert.equal(parser.state.hasTerminalAuthSignal, true);
+  });
+
   it("does not guess context telemetry from synthetic limit payloads", () => {
     const parser = new StreamParser();
     const resultEvent = JSON.stringify({
@@ -1079,6 +1092,54 @@ describe("StreamParser", () => {
 });
 
 describe("classifyClaudeFailure", () => {
+  it("classifies Fable model-credit limits from terminal output", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "You've reached your Fable 5 limit",
+      finalMessageHasLimitSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+    assert.match(failure.message, /Fable 5 limit/);
+    assert.equal(failure.resetText, null);
+  });
+
+  it("classifies actionable Claude authentication failures", () => {
+    const failure = classifyClaudeFailure({
+      stderr: "Not logged in. Run claude auth login to continue.",
+    });
+
+    assert.equal(failure.kind, "claude_auth");
+    assert.match(failure.message, /auth login/);
+  });
+
+  it("classifies authentication failures from terminal output", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "Invalid API key. Please run /login.",
+      finalMessageHasAuthSignal: true,
+    });
+
+    assert.equal(failure.kind, "claude_auth");
+  });
+
+  it("ignores authentication prose from ordinary final output", () => {
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: "Documented the invalid API key and claude auth login errors.",
+      }),
+      null
+    );
+  });
+
+  it("prefers a terminal quota signal over secondary auth stderr", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: "You've reached your Fable 5 limit",
+      finalMessageHasLimitSignal: true,
+      stderr: "Not logged in. Run claude auth login.",
+    });
+
+    assert.equal(failure.kind, "claude_rate_limit");
+  });
+
   it("classifies Claude 429 stderr and extracts reset text", () => {
     const failure = classifyClaudeFailure({
       stderr: "APIErrorStatus: 429. You've hit your session limit; resets at 4:50pm (Europe/Moscow).",

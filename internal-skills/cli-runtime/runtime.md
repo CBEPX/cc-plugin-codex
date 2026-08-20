@@ -46,9 +46,11 @@ Task defaults:
 - Use a structured file-write path to create that prompt file when possible. Do not solve shell quoting by wrapping the same long task inside another brittle inline shell command.
 - If the tool output includes stderr progress chatter and a final stdout-style result, ignore the progress chatter and preserve only the final stdout-equivalent result text.
 - Return the stdout of the `task` command exactly as-is.
-- Run the companion command as one blocking foreground shell-tool call, not as a background terminal/session.
-- Do not request a shell session id, poll a shell session later, or return before the companion command exits.
-- If the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call.
+- Run the companion command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`.
+- If the shell tool returns a session id, keep polling that same session until the companion command exits.
+- Exit code 0 is the only successful completion.
+- Exit code 124 means the job is still running; return the companion output without claiming it finished.
+- For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
 - If the parent supplied a non-empty parent thread id for background completion, allow at most one success-only `send_input` notification before finishing.
 - Mention the tool name `send_input` literally when describing that notification path.
 - Use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`.

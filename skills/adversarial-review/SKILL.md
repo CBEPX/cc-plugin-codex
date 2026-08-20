@@ -92,9 +92,11 @@ Background flow:
   - run exactly one shell command
   - execute:
     `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review --cwd "<workspaceRoot>" --view-state defer <arguments with --wait/--background removed>`
-  - run that command as one blocking foreground shell-tool call, not as a background terminal/session
-  - do not request a shell session id, poll a shell session later, or return before the companion command exits
-  - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
+  - run that command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`
+  - If the shell tool returns a session id, keep polling that same session until the companion command exits.
+  - Exit code 0 is the only successful completion.
+  - Exit code 124 means the job is still running; return the companion output without claiming it finished.
+  - For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
   - include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id
   - include `--job-id <reserved-job-id>` when the parent reserved one
   - preserve the helper's exact non-empty `workspaceRoot` in `--cwd` so the reservation and job use the same workspace state

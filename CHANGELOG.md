@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## v1.5.4
+
+### Added
+
+- Add a read-only `setup --check` preflight with runtime source, plugin version, config path, workspace diagnostics, and explicit pending hook-trust reporting.
+- Add the task-specific `--wait-timeout-ms` flag while retaining `--timeout-ms` as a deprecated compatibility alias.
+
+### Changed
+
+- Make review and rescue forwarding poll a yielded shell session to command exit and treat only exit code 0 as success; exit 124 remains retrievable work and other failures keep their original diagnostics.
+
+### Fixed
+
+- Track the detached worker separately from its Claude child so a leader PID exit cannot auto-reap a live worker, publish parent worker metadata through a queued-only CAS, preserve unresolved child handles as `cancel_failed`, and prevent late progress writers from overwriting terminal state.
+- Announce failed, cancel-failed, and unknown background outcomes instead of silently surfacing completed jobs only, while marking rendered foreground outcomes viewed through a terminal-only CAS.
+- Resolve resume candidates and execution through the same owner-scoped policy, accept completed or failed tasks, ignore foreign active tasks, and pass only a real Claude session ID to `claude --resume`; direct CLI callers must provide the owner session ID, while the rescue skill supplies its routed marker-derived owner.
+- Classify Fable model-credit limits and authentication expiry with actionable output instead of generic failures.
+- Write setup changes to `config.toml` through the existing atomic, symlink-aware writer.
+
 ## v1.5.3
 
 ### Fixed

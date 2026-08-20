@@ -172,6 +172,61 @@ test("injects one-shot context for same-session completed unread jobs and marks 
   }
 });
 
+test("announces failed terminal jobs with their outcome", () => {
+  const testEnv = createEnv();
+  try {
+    writeJob(testEnv, {
+      id: "task-failed",
+      sessionId: "session-a",
+      status: "failed",
+      kindLabel: "rescue",
+      summary: "fix failed",
+      createdAt: "2026-04-03T10:00:00Z",
+      updatedAt: "2026-04-03T10:01:00Z",
+      completedAt: "2026-04-03T10:01:00Z",
+    });
+
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue working",
+    });
+
+    assert.match(output, /task-failed/);
+    assert.match(output, /failed/);
+    assert.match(readJob(testEnv, "task-failed").notifiedAt, /\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("does not announce an expected user cancellation", () => {
+  const testEnv = createEnv();
+  try {
+    writeJob(testEnv, {
+      id: "task-cancelled",
+      sessionId: "session-a",
+      status: "cancelled",
+      createdAt: "2026-04-03T10:00:00Z",
+      updatedAt: "2026-04-03T10:01:00Z",
+      completedAt: "2026-04-03T10:01:00Z",
+    });
+
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue working",
+    });
+
+    assert.equal(output, "");
+    assert.equal(readJob(testEnv, "task-cancelled").notifiedAt, undefined);
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
 test("records a turn baseline for the current session on UserPromptSubmit", () => {
   const testEnv = createEnv();
   try {
