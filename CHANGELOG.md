@@ -15,9 +15,9 @@
 
 ### Fixed
 
-- Track the detached worker separately from its Claude child so a leader PID exit cannot auto-reap a live worker, and prevent late progress writers from overwriting terminal state.
-- Announce failed, cancel-failed, and unknown background outcomes instead of silently surfacing completed jobs only.
-- Resolve resume candidates and execution through the same owner-scoped policy, accept completed or failed tasks, ignore foreign active tasks, and pass only a real Claude session ID to `claude --resume`.
+- Track the detached worker separately from its Claude child so a leader PID exit cannot auto-reap a live worker, preserve unresolved child handles as `cancel_failed`, and prevent late progress writers from overwriting terminal state.
+- Announce failed, cancel-failed, and unknown background outcomes instead of silently surfacing completed jobs only, while marking foreground failures viewed after rendering them.
+- Resolve resume candidates and execution through the same owner-scoped policy, accept completed or failed tasks, ignore foreign active tasks, and pass only a real Claude session ID to `claude --resume`; direct CLI callers must provide the owner session ID, while the rescue skill supplies its routed marker-derived owner.
 - Classify Fable model-credit limits and authentication expiry with actionable output instead of generic failures.
 - Write setup changes to `config.toml` through the existing atomic, symlink-aware writer.
 

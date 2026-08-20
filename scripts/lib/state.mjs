@@ -757,7 +757,14 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
           childCleanup = terminateProcessTreeIfIdentityMatchesImpl(
             job.pid,
             job.pidIdentity,
-            { platform, getProcessIdentityImpl, isProcessAliveImpl }
+            {
+              platform,
+              getProcessIdentityImpl,
+              isProcessAliveImpl,
+              ...(platform === "win32"
+                ? { timeout: WINDOWS_REAPER_IDENTITY_TIMEOUT_MS }
+                : {}),
+            }
           );
         } catch (error) {
           childCleanup = {
@@ -770,11 +777,16 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
       const childResolved = Boolean(
         childCleanup?.delivered ||
         childCleanup?.reason === "process-missing" ||
-        childCleanup?.reason === "identity-mismatch"
+        childCleanup?.reason === "identity-mismatch" ||
+        (childCleanup?.reason === "identity-unavailable" &&
+          !isProcessAliveImpl(job.pid))
       );
-      const nextStatus = identityUnavailableTooLong
-        ? (job.status === "cancelling" ? "cancel_failed" : "failed")
-        : (job.status === "cancelling" ? "cancelled" : "failed");
+      const unresolvedClaudeChild = hasDistinctClaudeChild && !childResolved;
+      const nextStatus = job.status === "cancelling"
+        ? (identityUnavailableTooLong || unresolvedClaudeChild
+            ? "cancel_failed"
+            : "cancelled")
+        : "failed";
       const terminalData = identityUnavailableTooLong
         ? {
             errorMessage:
@@ -787,20 +799,25 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
               : {}),
           }
         : {
-            errorMessage: job.status === "cancelling"
+            errorMessage: nextStatus === "cancel_failed"
+              ? `Cancellation could not verify cleanup of Claude child ${job.pid}; manual cleanup is required.`
+              : job.status === "cancelling"
               ? "Cancelled by user. Auto-reaped after process exit."
               : `${trackWorker ? "Worker" : "Process"} ${trackedPid} died without completing. Auto-reaped.${
-                  hasDistinctClaudeChild && !childResolved
+                  unresolvedClaudeChild
                     ? ` Claude child ${job.pid} may still be running; manual cleanup is required.`
                     : ""
                 }`,
             completedAt: nowIso(),
-            ...(hasDistinctClaudeChild && !childResolved
+            ...(unresolvedClaudeChild
               ? {}
               : { pid: null, pidIdentity: null }),
             workerPid: null,
             workerPidIdentity: null,
-            phase: nextStatus === "cancelled" ? "cancelled" : "failed",
+            ...(nextStatus === "cancel_failed"
+              ? { pgid: job.pgid ?? job.pid ?? trackedPid }
+              : {}),
+            phase: nextStatus,
           };
       const transitioned = transitionJob(
         cwd,

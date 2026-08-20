@@ -21,7 +21,7 @@ Workflow:
 - If it reports that Claude Code is unavailable and `npm` is available, ask whether to install Claude Code now.
 - If the user agrees, run `npm install -g @anthropic-ai/claude-code` and rerun setup.
 - If Claude Code is already installed or `npm` is unavailable, do not ask about installation.
-- If the check reports missing native plugin hook features or hook trust, run setup once without `--check`. The companion repairs `[features].hooks`, `[features].plugin_hooks`, and this plugin's native hook trust hashes itself.
+- Unless the user explicitly requested `--check`, if the check reports missing native plugin hook features or hook trust, run setup once without `--check`. The companion repairs `[features].hooks`, `[features].plugin_hooks`, and this plugin's native hook trust hashes itself.
 - After the decision flow is complete, run the final user-facing command without `--json`:
   `node "<plugin-root>/scripts/claude-companion.mjs" setup $ARGUMENTS`
 

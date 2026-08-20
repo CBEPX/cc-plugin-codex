@@ -271,9 +271,7 @@ export function createJobRecord(base, options = {}) {
   const sessionId =
     options.sessionId ??
     env[options.sessionIdEnv ?? SESSION_ID_ENV] ??
-    (options.useCurrentSession !== false && options.cwd
-      ? getCurrentSession(options.cwd)
-      : null);
+    (options.cwd ? getCurrentSession(options.cwd) : null);
   return {
     ...base,
     createdAt: nowIso(),

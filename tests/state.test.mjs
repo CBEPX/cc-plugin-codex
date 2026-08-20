@@ -1734,6 +1734,36 @@ describe("reapStaleJobs", () => {
     assert.equal(result[0].pidIdentity, null);
   });
 
+  it("bounds Windows Claude child cleanup to the reaper identity timeout", () => {
+    const id = "test-reap-dead-worker-windows-child-timeout";
+    const claudePid = 11116;
+    const workerPid = 22227;
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: claudePid,
+      pidIdentity: "123456789",
+      workerPid,
+      workerPidIdentity: "987654321",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+    /** @type {{ timeout?: number } | null} */
+    let cleanupOptions = null;
+
+    reapStaleJobs(PROJECT_CWD, [readJobFile(PROJECT_CWD, id)], {
+      platform: "win32",
+      isProcessAliveImpl: (pid) => pid === claudePid,
+      getProcessIdentityImpl: () => "987654321",
+      terminateProcessTreeIfIdentityMatchesImpl: (_pid, _identity, options) => {
+        cleanupOptions = options;
+        return { attempted: true, delivered: true };
+      },
+    });
+
+    assert.equal(cleanupOptions?.timeout, 2_000);
+  });
+
   it("clears a recycled Claude child PID when its owning worker dies", () => {
     const id = "test-reap-dead-worker-recycled-child";
     writeJobFile(PROJECT_CWD, id, {
@@ -1766,6 +1796,76 @@ describe("reapStaleJobs", () => {
     assert.equal(result[0].pid, null);
     assert.equal(result[0].pidIdentity, null);
     assert.doesNotMatch(result[0].errorMessage, /manual cleanup/i);
+  });
+
+  it("clears an identity-unavailable Claude child after confirming it is dead", () => {
+    const id = "test-reap-dead-worker-dead-unidentified-child";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: 11117,
+      pidIdentity: null,
+      workerPid: 22228,
+      workerPidIdentity: "worker-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "linux",
+        isProcessAliveImpl: () => false,
+        getProcessIdentityImpl: () => "worker-identity",
+        terminateProcessTreeIfIdentityMatchesImpl: () => ({
+          attempted: false,
+          delivered: false,
+          reason: "identity-unavailable",
+        }),
+      }
+    );
+
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].pid, null);
+    assert.equal(result[0].pidIdentity, null);
+    assert.doesNotMatch(result[0].errorMessage, /manual cleanup/i);
+  });
+
+  it("reports cancel_failed when a live Claude child cannot be cleaned up", () => {
+    const id = "test-reap-cancelling-dead-worker-live-child";
+    const claudePid = 11118;
+    const workerPid = 22229;
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "cancelling",
+      pid: claudePid,
+      pidIdentity: null,
+      workerPid,
+      workerPidIdentity: "worker-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "linux",
+        isProcessAliveImpl: (pid) => pid === claudePid,
+        getProcessIdentityImpl: () => "worker-identity",
+        terminateProcessTreeIfIdentityMatchesImpl: () => ({
+          attempted: false,
+          delivered: false,
+          reason: "identity-unavailable",
+        }),
+      }
+    );
+
+    assert.equal(result[0].status, "cancel_failed");
+    assert.equal(result[0].pid, claudePid);
+    assert.equal(result[0].phase, "cancel_failed");
+    assert.match(result[0].errorMessage, /manual cleanup/i);
   });
 
   it("transitions queued job with dead worker PID to failed", () => {

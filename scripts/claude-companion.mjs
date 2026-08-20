@@ -1482,7 +1482,6 @@ function createCompanionJob({
   write = false,
   sessionId = null,
   explicitJobId = null,
-  useCurrentSession = true,
 }) {
   const resolvedJobId = explicitJobId ?? generateJobId(prefix);
   return createJobRecord(
@@ -1498,7 +1497,6 @@ function createCompanionJob({
     },
     {
       cwd: workspaceRoot,
-      useCurrentSession,
       ...(sessionId ? { sessionId } : {})
     }
   );
@@ -1808,7 +1806,7 @@ async function runForegroundCommand(job, runner, options = {}) {
     (onSpawn) => runner(progress, onSpawn),
     { logFile }
   );
-  if (execution.exitStatus === 0 && options.markViewedOnSuccess) {
+  if (options.markViewedOnSuccess) {
     patchJob(job.workspaceRoot, job.id, {
       resultViewedAt: nowIso(),
     });
@@ -2045,7 +2043,7 @@ async function runForegroundDetachedTask(cwd, job, request, options = {}) {
     };
   }
 
-  if (storedJob.status === "completed" && options.markViewedOnSuccess) {
+  if (options.markViewedOnSuccess) {
     storedJob = patchJob(job.workspaceRoot, job.id, {
       resultViewedAt: nowIso(),
     }) ?? storedJob;

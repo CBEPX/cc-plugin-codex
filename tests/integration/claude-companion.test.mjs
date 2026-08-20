@@ -3153,6 +3153,38 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("marks a rendered foreground failure as viewed", () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-foreground-failure",
+    };
+
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "auth-failure delay=20",
+        ],
+        { env: sessionEnv }
+      );
+      assert.match(result.stdout, /claude auth login/);
+
+      const failedJob = listStoredJobs(testEnv).find(
+        (job) =>
+          job.sessionId === "session-foreground-failure" &&
+          job.status === "failed"
+      );
+      assert.ok(failedJob, "expected one failed foreground job");
+      assert.match(failedJob.resultViewedAt ?? "", /\d{4}-\d{2}-\d{2}T/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("marks foreground task results as viewed and marks status/result retrievals as viewed", async () => {
     const testEnv = createTestEnvironment();
     const sessionEnv = {
