@@ -11,6 +11,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { SESSION_ID_ENV } from "../../scripts/lib/tracked-jobs.mjs";
+
 const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../../", import.meta.url))
 );
@@ -896,9 +898,11 @@ function startMockProvider({
               spawnMessage ??
               "You are a transient forwarding worker for Claude Code rescue.\n" +
               "Run exactly one shell command.\n" +
-              "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
-              "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
-              "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
+              "Run that command in the foreground without shell backgrounding.\n" +
+              "If the shell tool returns a session id, keep polling that same session until the command exits.\n" +
+              "Exit code 0 is the only successful completion.\n" +
+              "Exit code 124 means the job is still running; return the command output without claiming it finished.\n" +
+              "For any other non-zero exit code or shell-tool error, return the raw command output or diagnostic without a success notification.\n" +
               "Return only that command's stdout text exactly.\n" +
               "Ignore stderr progress chatter such as [cc] lines.\n" +
               "If the tool output includes both stderr progress and a final stdout-style result, preserve only the final stdout-equivalent result text.\n" +
@@ -932,16 +936,18 @@ function startMockProvider({
               "spawned child turn should receive the forwarding contract"
             );
             assert.ok(
-              bodyText.includes("blocking foreground shell-tool call, not as a background terminal or session"),
-              "built-in child should be told not to launch a background terminal/session"
+              bodyText.includes("Run that command in the foreground without shell backgrounding."),
+              "built-in child should be told not to launch shell backgrounding"
             );
             assert.ok(
-              bodyText.includes("Do not request a shell session id, poll a shell session later, or return before the command exits."),
-              "built-in child should be told not to return a shell session before the command exits"
+              bodyText.includes("If the shell tool returns a session id, keep polling that same session until the command exits."),
+              "built-in child should be told to poll a yielded shell session"
             );
             assert.ok(
-              bodyText.includes("If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call."),
-              "built-in child should be told how to use exec_command without backgrounding"
+              bodyText.includes("Exit code 0 is the only successful completion.") &&
+                bodyText.includes("Exit code 124 means the job is still running") &&
+                bodyText.includes("For any other non-zero exit code or shell-tool error"),
+              "built-in child should receive outcome-aware exit handling"
             );
             assert.ok(
               bodyText.includes("transient forwarding worker for Claude Code rescue"),
@@ -1342,9 +1348,10 @@ describe("Codex rescue-skill E2E", () => {
       expectedParentNeedles: [
         "background-routing-context --kind task --json",
         "helper's non-empty `workspaceRoot` as the canonical workspace",
-        "blocking foreground shell-tool call, not as a background terminal/session",
-        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
-        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
+        "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
+        "Exit code 0 is the only successful completion.",
+        "Exit code 124 means the job is still running",
+        "For any other non-zero exit code or shell-tool error",
       ],
       notificationMessage,
     });
@@ -1481,6 +1488,7 @@ describe("Codex rescue-skill E2E", () => {
     }
 
     const testEnv = createEnvironment();
+    testEnv.env[SESSION_ID_ENV] = "parent-resume-session";
     const initialTaskPrompt = "codex-rescue-e2e builtin-agent initial delay=10";
     const initialRequest = "$cc:rescue --builtin-agent --wait say hello from codex e2e";
     let provider = startMockProvider({
@@ -1749,6 +1757,15 @@ describe("Codex direct-skill E2E", () => {
       const setupReport = JSON.parse(setupResult.stdout);
       assert.equal(setupReport.hookTrust.ready, true);
       assert.ok(setupReport.hookTrust.found > 0);
+      assert.equal(setupReport.diagnostics.runtimeSource, "installed-cache");
+      assert.equal(
+        setupReport.diagnostics.pluginVersion,
+        JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, "package.json"), "utf8")).version
+      );
+      assert.equal(
+        fs.realpathSync.native(setupReport.diagnostics.pluginRoot),
+        fs.realpathSync.native(pluginRoot)
+      );
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);
@@ -1835,9 +1852,10 @@ describe("Codex direct-skill E2E", () => {
         "helper's non-empty `workspaceRoot` as the canonical workspace",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background review by running the companion command itself with shell backgrounding",
-        "blocking foreground shell-tool call, not as a background terminal/session",
-        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
-        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
+        "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
+        "Exit code 0 is the only successful completion.",
+        "Exit code 124 means the job is still running",
+        "For any other non-zero exit code or shell-tool error",
         "allow one extra `send_input` call after a successful shell result",
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
@@ -1862,9 +1880,11 @@ describe("Codex direct-skill E2E", () => {
         "You are a pure forwarder for a background Claude Code review job.\n" +
         "Do not inspect the repo, do not review anything yourself, and do not add commentary.\n" +
         "Run exactly one shell command and capture only the stdout-equivalent final result text from that command, ignoring stderr progress chatter like [cc] lines.\n" +
-        "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
-        "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
-        "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
+        "Run that command in the foreground without shell backgrounding.\n" +
+        "If the shell tool returns a session id, keep polling that same session until the command exits.\n" +
+        "Exit code 0 is the only successful completion.\n" +
+        "Exit code 124 means the job is still running; return the command output without claiming it finished.\n" +
+        "For any other non-zero exit code or shell-tool error, return the raw command output or diagnostic without a success notification.\n" +
         "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
@@ -2050,9 +2070,10 @@ describe("Codex direct-skill E2E", () => {
         "helper's non-empty `workspaceRoot` as the canonical workspace",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background adversarial review by running the companion command itself with shell backgrounding",
-        "blocking foreground shell-tool call, not as a background terminal/session",
-        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
-        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
+        "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
+        "Exit code 0 is the only successful completion.",
+        "Exit code 124 means the job is still running",
+        "For any other non-zero exit code or shell-tool error",
         "allow one extra `send_input` call after a successful shell result",
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
@@ -2078,9 +2099,11 @@ describe("Codex direct-skill E2E", () => {
         "You are a pure forwarder for a background Claude Code adversarial review job.\n" +
         "Do not inspect the repo, do not review anything yourself, and do not add commentary.\n" +
         "Run exactly one shell command and capture only the stdout-equivalent final result text from that command, ignoring stderr progress chatter like [cc] lines.\n" +
-        "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
-        "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
-        "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
+        "Run that command in the foreground without shell backgrounding.\n" +
+        "If the shell tool returns a session id, keep polling that same session until the command exits.\n" +
+        "Exit code 0 is the only successful completion.\n" +
+        "Exit code 124 means the job is still running; return the command output without claiming it finished.\n" +
+        "For any other non-zero exit code or shell-tool error, return the raw command output or diagnostic without a success notification.\n" +
         "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
@@ -2134,7 +2157,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Setup"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --json --enable-review-gate`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --check --json`,
         `node ${JSON.stringify(COMPANION_SCRIPT)} setup --enable-review-gate`,
       ],
     });
@@ -2173,7 +2196,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Setup"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --json`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --check --json`,
         `node ${JSON.stringify(COMPANION_SCRIPT)} setup`,
       ],
     });
@@ -2214,7 +2237,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Setup"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --json --enable-review-gate`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --check --json`,
         `node ${JSON.stringify(COMPANION_SCRIPT)} setup --enable-review-gate`,
       ],
     });

@@ -1,6 +1,6 @@
 ---
 name: rescue
-description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --timeout-ms <ms>, --prompt-file <path>, [task text]. Defaults to opus + xhigh effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
+description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --wait-timeout-ms <ms>, --prompt-file <path>, [task text]. Defaults to opus + xhigh effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
 ---
 
 # Claude Code Rescue
@@ -21,7 +21,7 @@ Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the 
 Raw slash-command arguments:
 `$ARGUMENTS`
 
-Supported arguments: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--timeout-ms <ms>`, `--prompt-file <path>`, plus free-text task text
+Supported arguments: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--wait-timeout-ms <ms>`, deprecated alias `--timeout-ms <ms>`, `--prompt-file <path>`, plus free-text task text
 
 Main-thread routing rules:
 - If the user explicitly invoked `$cc:rescue` or `Claude Code Rescue`, do not keep the work in the main Codex thread. Delegate it.
@@ -29,7 +29,7 @@ Main-thread routing rules:
 - Treat `--background` and `--wait` as execution controls, not task text.
 - `--background` and `--wait` are Codex-side execution controls only. Never forward either flag to `claude-companion.mjs task`.
 - The main Codex thread owns that execution-mode choice. It decides whether to wait for the subagent. The child subagent must never reinterpret those flags as companion flags.
-- Treat `--model`, `--effort`, `--timeout-ms`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime or routing controls, not task text.
+- Treat `--model`, `--effort`, `--wait-timeout-ms`, deprecated alias `--timeout-ms`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime or routing controls, not task text.
 - If the user task text itself begins with a slash command such as `/simplify`, `/fix`, or `/review`, treat that slash command as literal Claude Code task text to be forwarded unchanged. Do not execute or reinterpret it in the parent Codex thread.
 - `--model` selects the Claude model for the companion `task` command only. It does not select the Codex subagent model.
 - If the user explicitly passed `--background`, run the rescue subagent in the background.
@@ -41,7 +41,10 @@ Main-thread routing rules:
 - Default to `--write` unless the user explicitly wants read-only behavior or only review, diagnosis, or research without edits.
 - If `--resume` or `--resume-last` is present, continue the latest tracked Claude Code task. If `--fresh` is present, start a new task.
 - If none of `--resume`, `--resume-last`, or `--fresh` is present, first run:
-  `node "<plugin-root>/scripts/claude-companion.mjs" task-resume-candidate --json`
+  `node "<plugin-root>/scripts/claude-companion.mjs" session-routing-context --json`
+- If that helper returns a non-empty `ownerSessionId`, pass it into the resume probe:
+  `node "<plugin-root>/scripts/claude-companion.mjs" task-resume-candidate --owner-session-id <owner-session-id> --json`
+- If it returns an empty `ownerSessionId`, skip the resume probe and delegate normally.
 - If that helper reports `available: true`, ask the user once whether to continue the current Claude Code thread or start a new one.
 - Use exactly these two choices:
   - `Continue current Claude Code thread`
@@ -118,9 +121,11 @@ Subagent launch:
 - The built-in rescue path must use a compact strict forwarding message. It must:
   - identify the child as a transient forwarding worker for Claude Code rescue
   - include exactly one shell command to run
-  - run that command as one blocking foreground shell-tool call, not as a background terminal/session
-  - do not request a shell session id, poll a shell session later, or return before the companion command exits
-  - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
+  - run that command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`
+  - If the shell tool returns a session id, keep polling that same session until the companion command exits.
+  - Exit code 0 is the only successful completion.
+  - Exit code 124 means the job is still running; return the companion output without claiming it finished.
+  - For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
   - for foreground rescue only, tell the child to return that command's stdout text exactly, with no preamble, summary, code fence, trimming, normalization, or punctuation changes
   - tell the child to ignore stderr progress chatter such as `[cc] ...` lines and preserve only the stdout-equivalent final result text
   - if a parent thread id is provided for experimental background notification, allow one extra `send_input` call after a successful shell result and before finishing

@@ -340,6 +340,7 @@ export function renderSetupReport(report) {
     "# Claude Code Setup",
     "",
     `Status: ${report.ready ? "ready" : "needs attention"}`,
+    ...(report.checkOnly ? ["Mode: read-only check"] : []),
     "",
     "Checks:",
     `- node: ${report.node.detail}`,
@@ -348,6 +349,13 @@ export function renderSetupReport(report) {
     `- hooks: ${report.hooks.detail}`,
     ...(report.hookTrust ? [`- hook trust: ${report.hookTrust.detail}`] : []),
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    ...(report.diagnostics
+      ? [
+          `- plugin: ${report.diagnostics.pluginVersion ?? "unknown"} (${report.diagnostics.runtimeSource})`,
+          `- config: ${report.diagnostics.configPath}`,
+          `- workspace: ${report.diagnostics.workspaceRoot}`,
+        ]
+      : []),
     "",
   ];
   if (report.actionsTaken.length > 0) {
@@ -405,6 +413,14 @@ export function renderReviewResult(parsedResult, meta) {
 }
 
 export function renderTaskResult(parsedResult) {
+  if (parsedResult?.failure?.kind === "claude_auth") {
+    const original = String(parsedResult.failure.message ?? "").trim();
+    return [
+      "Claude Code authentication failed. Run `claude auth login` and retry.",
+      original ? `\nOriginal Claude message:\n${original}` : "",
+      "",
+    ].join("\n");
+  }
   if (parsedResult?.failure?.kind === "claude_rate_limit") {
     const reset = parsedResult.failure.resetText
       ? ` Retry after ${parsedResult.failure.resetText}.`

@@ -28,6 +28,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run typecheck:tests
       - run: npm run test:cross-platform
+      - run: npm run test:lifecycle-contract
 
   macos-full:
     name: Full CI (macos-latest)

@@ -12,8 +12,8 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { terminateProcessTree } from "./process.mjs";
-import { nowIso, ensureStateDir, getCurrentSession, patchJob, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
+import { getProcessIdentity, terminateProcessTree } from "./process.mjs";
+import { nowIso, ensureStateDir, getCurrentSession, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
 
 export { nowIso };
 
@@ -271,7 +271,9 @@ export function createJobRecord(base, options = {}) {
   const sessionId =
     options.sessionId ??
     env[options.sessionIdEnv ?? SESSION_ID_ENV] ??
-    (options.cwd ? getCurrentSession(options.cwd) : null);
+    (options.useCurrentSession !== false && options.cwd
+      ? getCurrentSession(options.cwd)
+      : null);
   return {
     ...base,
     createdAt: nowIso(),
@@ -325,14 +327,17 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       return;
     }
 
-    // Late display events (e.g. trailing subagent output) must not resurrect
-    // phase/thread fields on a job that already reached a terminal status.
-    const current = readJobFile(workspaceRoot, jobId);
-    if (current && current.status !== "running") {
-      return;
+    try {
+      transitionTrackedJob(
+        workspaceRoot,
+        jobId,
+        ["running"],
+        "running",
+        patch
+      );
+    } catch {
+      // Progress is best-effort; terminal writers and disappearing jobs win.
     }
-
-    patchJob(workspaceRoot, jobId, patch);
   };
 }
 
@@ -354,6 +359,24 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
 }
 
 export async function runTrackedJob(job, runner, options = {}) {
+  const workerPid = process.pid;
+  const getProcessIdentityImpl =
+    options.getProcessIdentityImpl ?? getProcessIdentity;
+  const storedJob = readJobFile(job.workspaceRoot, job.id);
+  let workerPidIdentity =
+    [job, storedJob].find(
+      (candidate) =>
+        candidate?.workerPid === workerPid &&
+        typeof candidate.workerPidIdentity === "string" &&
+        candidate.workerPidIdentity
+    )?.workerPidIdentity ?? null;
+  if (!workerPidIdentity) {
+    try {
+      workerPidIdentity = getProcessIdentityImpl(workerPid);
+    } catch {}
+  }
+  // ponytail: without a stable worker identity, fall back to the child's
+  // identity; add an alternate worker identity source only if this becomes common.
   const runningRecord = {
     ...job,
     status: "running",
@@ -361,9 +384,16 @@ export async function runTrackedJob(job, runner, options = {}) {
     phase: "starting",
     pid: job.pid ?? null, // Preserve queued worker PID until onSpawn replaces it
     pidIdentity: job.pidIdentity ?? null,
+    workerPid,
+    workerPidIdentity,
     logFile: options.logFile ?? job.logFile ?? null
   };
-  const storedJob = readJobFile(job.workspaceRoot, job.id);
+  if (!workerPidIdentity) {
+    appendLogLine(
+      runningRecord.logFile,
+      "Worker identity unavailable; stale-job detection will fall back to the Claude child identity."
+    );
+  }
   if (storedJob) {
     const started = transitionTrackedJob(
       job.workspaceRoot,
@@ -374,6 +404,8 @@ export async function runTrackedJob(job, runner, options = {}) {
         startedAt: runningRecord.startedAt,
         phase: runningRecord.phase,
         logFile: runningRecord.logFile,
+        workerPid,
+        workerPidIdentity,
       }
     );
     if (!started.transitioned) {
@@ -423,6 +455,8 @@ export async function runTrackedJob(job, runner, options = {}) {
       turnId: execution.turnId ?? null,
       pid: null,
       pidIdentity: null,
+      workerPid: null,
+      workerPidIdentity: null,
       phase: completionStatus === "completed" ? "done" : "failed",
       completedAt,
       summary: execution.summary,
@@ -470,6 +504,8 @@ export async function runTrackedJob(job, runner, options = {}) {
         errorMessage,
         pid: null,
         pidIdentity: null,
+        workerPid: null,
+        workerPidIdentity: null,
         phase: "failed",
         completedAt,
         logFile: options.logFile ?? job.logFile ?? null

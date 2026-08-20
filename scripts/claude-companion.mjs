@@ -56,6 +56,7 @@ import {
   pruneStaleReviewWorktrees,
 } from "./lib/review-worktree.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
+import { writeTextAtomic } from "./lib/managed-global-integration.mjs";
 import {
   collectReviewContext,
   ensureGitRepository,
@@ -141,10 +142,10 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
+      "  node scripts/claude-companion.mjs setup [--check] [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
       "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--timeout-ms <ms>] [prompt]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--wait-timeout-ms <ms>] [prompt]",
       "  node scripts/claude-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
@@ -358,6 +359,9 @@ function firstMeaningfulLine(text, fallback) {
 }
 
 function formatClaudeFailureSummary(failure, fallback) {
+  if (failure?.kind === "claude_auth") {
+    return "Claude Code authentication failed; run `claude auth login`.";
+  }
   if (failure?.kind !== "claude_rate_limit") {
     return fallback;
   }
@@ -458,8 +462,7 @@ function readCodexConfig() {
 }
 
 function writeCodexConfig(content) {
-  fs.mkdirSync(path.dirname(CODEX_CONFIG_TOML), { recursive: true });
-  fs.writeFileSync(CODEX_CONFIG_TOML, content, "utf8");
+  writeTextAtomic(CODEX_CONFIG_TOML, content);
 }
 
 function configureNativePluginHooks() {
@@ -539,7 +542,8 @@ function hookNeedsTrust(hook) {
   return trustStatus === "untrusted" || trustStatus === "modified";
 }
 
-async function repairNativePluginHookTrust(cwd) {
+async function repairNativePluginHookTrust(cwd, options = {}) {
+  const repair = options.repair !== false;
   const pluginInfo = currentPluginCacheInstallInfo();
   if (!shouldRepairPluginHookTrust()) {
     return {
@@ -589,6 +593,17 @@ async function repairNativePluginHookTrust(cwd) {
       found: pluginHooks.length,
       trusted: 0,
       detail: `native plugin hooks already trusted (${pluginHooks.length})`,
+    };
+  }
+
+  if (!repair) {
+    return {
+      attempted: true,
+      ready: false,
+      found: pluginHooks.length,
+      trusted: 0,
+      pendingTrust: untrustedHooks.length,
+      detail: `${untrustedHooks.length} native plugin hook(s) require trust`,
     };
   }
 
@@ -672,7 +687,24 @@ function ensureClaudeReady(cwd) {
   }
 }
 
-function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
+function buildSetupDiagnostics(cwd) {
+  const pluginInfo = currentPluginCacheInstallInfo();
+  let packageVersion = null;
+  try {
+    packageVersion = JSON.parse(
+      fs.readFileSync(path.join(ROOT_DIR, "package.json"), "utf8")
+    ).version ?? null;
+  } catch {}
+  return {
+    runtimeSource: pluginInfo ? "installed-cache" : "source-checkout",
+    pluginVersion: pluginInfo?.version ?? packageVersion,
+    pluginRoot: CANONICAL_ROOT_DIR,
+    configPath: CODEX_CONFIG_TOML,
+    workspaceRoot: resolveWorkspaceRoot(cwd),
+  };
+}
+
+function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
   const claudeStatus = getClaudeAvailability(cwd);
@@ -688,10 +720,18 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
     nextSteps.push("Run `claude auth login`.");
   }
   if (!hooksStatus.installed) {
-    nextSteps.push("Run `$cc:setup` again after enabling native Codex plugin hooks.");
+    nextSteps.push(
+      options.checkOnly
+        ? "Run `$cc:setup` to enable native Codex plugin hooks."
+        : "Run `$cc:setup` again after enabling native Codex plugin hooks."
+    );
   }
   if (hookTrust?.ready === false) {
-    nextSteps.push("Open `/hooks` and trust this plugin's hooks manually, then rerun `$cc:setup`.");
+    nextSteps.push(
+      options.checkOnly
+        ? "Run `$cc:setup` to trust this plugin's native hooks."
+        : "Open `/hooks` and trust this plugin's hooks manually, then rerun `$cc:setup`."
+    );
   }
   if (!config.stopReviewGate) {
     nextSteps.push(
@@ -711,6 +751,8 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
     auth: authStatus,
     hooks: hooksStatus,
     hookTrust,
+    checkOnly: Boolean(options.checkOnly),
+    diagnostics: buildSetupDiagnostics(cwd),
     reviewGateEnabled: Boolean(config.stopReviewGate),
     actionsTaken,
     nextSteps
@@ -724,38 +766,48 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
+    booleanOptions: ["json", "check", "enable-review-gate", "disable-review-gate"]
   });
 
   if (options["enable-review-gate"] && options["disable-review-gate"]) {
     throw new Error("Choose either --enable-review-gate or --disable-review-gate.");
+  }
+  if (
+    options.check &&
+    (options["enable-review-gate"] || options["disable-review-gate"])
+  ) {
+    throw new Error("--check cannot be combined with review-gate changes.");
   }
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const actionsTaken = [];
 
-  if (configureNativePluginHooks()) {
+  if (!options.check && configureNativePluginHooks()) {
     actionsTaken.push(
       "Enabled native Codex plugin hooks via [features].hooks and [features].plugin_hooks."
     );
     actionsTaken.push("Restart Codex if this session started before the feature change.");
   }
 
-  const hookTrust = await repairNativePluginHookTrust(cwd);
+  const hookTrust = await repairNativePluginHookTrust(cwd, {
+    repair: !options.check,
+  });
   if (hookTrust.trusted > 0) {
     actionsTaken.push(`Trusted ${hookTrust.trusted} native Codex plugin hooks.`);
   }
 
-  if (options["enable-review-gate"]) {
+  if (!options.check && options["enable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", true);
     actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
-  } else if (options["disable-review-gate"]) {
+  } else if (!options.check && options["disable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", false);
     actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
   }
 
-  const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust);
+  const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust, {
+    checkOnly: Boolean(options.check),
+  });
   outputResult(
     options.json ? finalReport : renderSetupReport(finalReport),
     options.json
@@ -820,6 +872,15 @@ function parsePositiveMilliseconds(value, optionName) {
     throw new Error(`${optionName} must be a positive number of milliseconds.`);
   }
   return parsed;
+}
+
+function parseWaitTimeoutMilliseconds(options) {
+  if (options["wait-timeout-ms"] != null && options["timeout-ms"] != null) {
+    throw new Error("Choose only one of --wait-timeout-ms or --timeout-ms.");
+  }
+  const optionName =
+    options["wait-timeout-ms"] != null ? "wait-timeout-ms" : "timeout-ms";
+  return parsePositiveMilliseconds(options[optionName], `--${optionName}`);
 }
 
 function readJsonConfig(filePath) {
@@ -1421,6 +1482,7 @@ function createCompanionJob({
   write = false,
   sessionId = null,
   explicitJobId = null,
+  useCurrentSession = true,
 }) {
   const resolvedJobId = explicitJobId ?? generateJobId(prefix);
   return createJobRecord(
@@ -1436,6 +1498,7 @@ function createCompanionJob({
     },
     {
       cwd: workspaceRoot,
+      useCurrentSession,
       ...(sessionId ? { sessionId } : {})
     }
   );
@@ -1566,6 +1629,8 @@ function enqueueBackgroundReview(cwd, job, request) {
     patchJob(job.workspaceRoot, job.id, {
       pid: child.pid,
       pidIdentity,
+      workerPid: child.pid,
+      workerPidIdentity: pidIdentity,
     });
   }
 
@@ -1597,7 +1662,7 @@ function buildTaskJob(
     summary: taskMetadata.summary,
     write,
     sessionId: ownerSessionId,
-    explicitJobId
+    explicitJobId,
   });
 }
 
@@ -1825,6 +1890,8 @@ function enqueueDetachedTask(cwd, job, request, options = {}) {
     patchJob(job.workspaceRoot, job.id, {
       pid: child.pid,
       pidIdentity,
+      workerPid: child.pid,
+      workerPidIdentity: pidIdentity,
     });
   }
 
@@ -2051,34 +2118,54 @@ async function waitForStoredJob(workspaceRoot, jobId, options = {}) {
 // Resume support
 // ---------------------------------------------------------------------------
 
-async function resolveLatestResumableSession(cwd, options = {}) {
+const RESUMABLE_TASK_STATUSES = new Set(["completed", "failed"]);
+
+function getClaudeSessionId(job) {
+  const sessionId = job?.result?.sessionId ?? job?.threadId ?? null;
+  return typeof sessionId === "string" && sessionId.trim()
+    ? sessionId.trim()
+    : null;
+}
+
+function resolveTaskResumeState(cwd, ownerSessionId, options = {}) {
+  if (!ownerSessionId) {
+    return { candidate: null, activeTask: null, reason: "missing_owner_session" };
+  }
+
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter(
-    (job) => job.id !== options.excludeJobId
+    (job) =>
+      job.id !== options.excludeJobId &&
+      job.jobClass === "task" &&
+      job.sessionId === ownerSessionId
   );
-
-  // Check for active tasks first
-  const activeTask = jobs.find(
-    (job) => job.jobClass === "task" && isActiveJobStatus(job.status)
-  );
+  const activeTask = jobs.find((job) => isActiveJobStatus(job.status)) ?? null;
   if (activeTask) {
+    return { candidate: null, activeTask, reason: "active_task" };
+  }
+
+  const job = jobs.find(
+    (candidate) =>
+      RESUMABLE_TASK_STATUSES.has(candidate.status) &&
+      getClaudeSessionId(candidate)
+  );
+  return job
+    ? {
+        candidate: { job, claudeSessionId: getClaudeSessionId(job) },
+        activeTask: null,
+        reason: "available",
+      }
+    : { candidate: null, activeTask: null, reason: "not_found" };
+}
+
+async function resolveLatestResumableSession(cwd, options = {}) {
+  const state = resolveTaskResumeState(cwd, options.ownerSessionId, options);
+  if (state.activeTask) {
     throw new Error(
-      `Task ${activeTask.id} is still running. Use $cc:status before continuing it.`
+      `Task ${state.activeTask.id} is still running. Use $cc:status before continuing it.`
     );
   }
-
-  // Find most recent completed task with a session ID
-  const trackedTask = jobs.find(
-    (job) =>
-      job.jobClass === "task" &&
-      job.status === "completed" &&
-      (job.threadId || job.sessionId)
-  );
-  if (trackedTask) {
-    return trackedTask.threadId || trackedTask.sessionId;
-  }
-
-  return null;
+  return state.candidate?.claudeSessionId ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2240,6 +2327,7 @@ async function handleTask(argv) {
       "view-state",
       "owner-session-id",
       "job-id",
+      "wait-timeout-ms",
       "timeout-ms",
       "poll-interval-ms",
     ],
@@ -2265,10 +2353,7 @@ async function handleTask(argv) {
   const resolvedEffort = resolveDefaultEffort(model, options.effort);
   const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
-  const foregroundTimeoutMs = parsePositiveMilliseconds(
-    options["timeout-ms"],
-    "--timeout-ms"
-  );
+  const foregroundTimeoutMs = parseWaitTimeoutMilliseconds(options);
   const markViewedOnSuccess = resolveMarkViewedOnSuccess(
     options["view-state"],
     Boolean(options.background)
@@ -2279,6 +2364,14 @@ async function handleTask(argv) {
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
+  const ownerSessionId = resolveOwnerSessionId(
+    options["owner-session-id"] ?? process.env[SESSION_ID_ENV]
+  );
+  if (resumeLast && !ownerSessionId) {
+    throw new Error(
+      "Cannot resume without an owning Codex session. Run from the original session or use --fresh."
+    );
+  }
 
   // Validate before arming: ensure we have a prompt or resume target
   if (!prompt && !resumeLast) {
@@ -2287,7 +2380,6 @@ async function handleTask(argv) {
   ensureClaudeReady(cwd);
 
   const write = Boolean(options.write);
-  const ownerSessionId = resolveOwnerSessionId(options["owner-session-id"]);
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     const taskMetadata = buildTaskRunMetadata({
@@ -2299,7 +2391,9 @@ async function handleTask(argv) {
     // Resolve resume session inside the reservation guard so failures do not leak markers.
     let resumeSessionId = null;
     if (resumeLast) {
-      resumeSessionId = await resolveLatestResumableSession(workspaceRoot);
+      resumeSessionId = await resolveLatestResumableSession(workspaceRoot, {
+        ownerSessionId,
+      });
       if (!resumeSessionId) {
         throw new Error(
           "No previous Claude Code task session was found for this repository."
@@ -2477,16 +2571,17 @@ async function handleReviewWorker(argv) {
 
 async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
+    valueOptions: ["cwd", "wait-timeout-ms", "timeout-ms", "poll-interval-ms"],
     booleanOptions: ["json", "all", "wait"]
   });
 
   const cwd = resolveCommandCwd(options);
+  const waitTimeoutMs = parseWaitTimeoutMilliseconds(options);
   const reference = positionals[0] ?? "";
   if (reference) {
     let snapshot = options.wait
       ? await waitForSingleJobSnapshot(cwd, reference, {
-          timeoutMs: options["timeout-ms"],
+          timeoutMs: waitTimeoutMs,
           pollIntervalMs: options["poll-interval-ms"]
         })
       : buildSingleJobSnapshot(cwd, reference);
@@ -2559,30 +2654,24 @@ function handleResult(argv) {
 
 function handleTaskResumeCandidate(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "owner-session-id"],
     booleanOptions: ["json"]
   });
 
   const cwd = resolveCommandCwd(options);
-  const routing = buildSessionRoutingContext(cwd);
-  const workspaceRoot = routing.workspaceRoot;
-  const sessionId = routing.ownerSessionId;
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const candidate =
-    sessionId == null
-      ? null
-      : jobs.find(
-          (job) =>
-            job.jobClass === "task" &&
-            (job.threadId || job.sessionId) &&
-            job.status !== "queued" &&
-            job.status !== "running" &&
-            job.sessionId === sessionId
-        ) ?? null;
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const sessionId = resolveOwnerSessionId(
+    options["owner-session-id"] ?? process.env[SESSION_ID_ENV] ?? null
+  );
+  const state = resolveTaskResumeState(workspaceRoot, sessionId);
+  const candidate = state.candidate?.job ?? null;
 
   const payload = {
     available: Boolean(candidate),
     sessionId,
+    ownerSessionId: sessionId,
+    reason: state.reason,
+    activeJobId: state.activeTask?.id ?? null,
     candidate:
       candidate == null
         ? null
@@ -2593,14 +2682,17 @@ function handleTaskResumeCandidate(argv) {
             summary: candidate.summary ?? null,
             threadId: candidate.threadId ?? null,
             sessionId: candidate.sessionId ?? null,
+            claudeSessionId: state.candidate.claudeSessionId,
             completedAt: candidate.completedAt ?? null,
             updatedAt: candidate.updatedAt ?? null
           }
   };
 
-  const rendered = candidate
-    ? `Resumable task found: ${candidate.id} (${candidate.status}).\n`
-    : "No resumable task found for this session.\n";
+  const rendered = state.activeTask
+    ? `Task ${state.activeTask.id} is still running in this session.\n`
+    : candidate
+      ? `Resumable task found: ${candidate.id} (${candidate.status}).\n`
+      : "No resumable task found for this session.\n";
   outputCommandResult(payload, rendered, options.json);
 }
 

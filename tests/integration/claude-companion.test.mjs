@@ -82,6 +82,8 @@ async function main() {
   const emitUnknownNoTerminal = /\\bunknown-no-terminal\\b/.test(prompt);
   const emitMalformedLine = /\\bmalformed-line\\b/.test(prompt);
   const emitSessionLimit = /\\bsession-limit\\b/.test(prompt);
+  const emitFableLimit = /\\bfable-limit\\b/.test(prompt);
+  const emitAuthFailure = /\\bauth-failure\\b/.test(prompt);
   const failAfterResult = /\\bfail-after-result\\b/.test(prompt);
   const terminalModelFallback = /\\bterminal-model-fallback\\b/.test(prompt);
   const terminalModel = process.env.CLAUDE_FAKE_TERMINAL_MODEL;
@@ -152,6 +154,25 @@ async function main() {
         model: "<synthetic>",
       }) + "\\n"
     );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (emitFableLimit) {
+    process.stdout.write(
+      JSON.stringify({
+        type: "result",
+        session_id: sessionId,
+        result: "You've reached your Fable 5 limit",
+        model: "<synthetic>",
+      }) + "\\n"
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (emitAuthFailure) {
+    process.stderr.write("Not logged in. Run claude auth login to continue.\\n");
     process.exitCode = 1;
     return;
   }
@@ -802,6 +823,75 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(afterDisable.reviewGateEnabled, false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("setup --check reports required repairs without changing config or hook trust", () => {
+    const testEnv = createTestEnvironment();
+    const codexDir = path.join(testEnv.homeDir, ".codex");
+    const configFile = path.join(codexDir, "config.toml");
+    const originalConfig = "[features]\nhooks = false\nplugin_hooks = false\n";
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(configFile, originalConfig, "utf8");
+    const fakeCodex = createFakeCodexAppServer(testEnv, [
+      {
+        key: "cc@sendbird:hooks/hooks.json:session_start:0:0",
+        sourcePath: path.join(PROJECT_ROOT, "hooks", "hooks.json"),
+        source: "plugin",
+        pluginId: "cc@sendbird",
+        currentHash: "sha256:session",
+        trustStatus: "untrusted",
+      },
+    ]);
+
+    try {
+      const report = runCompanionJson(
+        ["setup", "--cwd", testEnv.workspaceDir, "--check", "--json"],
+        {
+          env: {
+            ...testEnv.env,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([fakeCodex.serverPath]),
+            CC_PLUGIN_CODEX_FORCE_HOOK_TRUST: "1",
+          },
+        }
+      );
+
+      assert.equal(report.checkOnly, true);
+      assert.equal(report.ready, false);
+      assert.equal(report.hooks.installed, false);
+      assert.equal(report.hookTrust.ready, false);
+      assert.equal(report.hookTrust.pendingTrust, 1);
+      assert.deepEqual(report.actionsTaken, []);
+      assert.equal(fs.readFileSync(configFile, "utf8"), originalConfig);
+      assert.equal(report.diagnostics.configPath, configFile);
+      assert.equal(report.diagnostics.workspaceRoot, testEnv.workspaceDir);
+      assert.match(report.diagnostics.pluginVersion, /^\d+\.\d+\.\d+/);
+
+      const requests = readJsonLines(fakeCodex.logPath);
+      assert.ok(requests.some((request) => request.method === "hooks/list"));
+      assert.ok(!requests.some((request) => request.method === "config/batchWrite"));
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects mutating review-gate flags in setup --check mode", () => {
+    const testEnv = createTestEnvironment();
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "setup",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--check",
+          "--enable-review-gate",
+        ],
+        { env: testEnv.env }
+      );
+      assert.match(result.stderr, /--check cannot be combined with review-gate changes/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -1599,6 +1689,42 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("classifies Fable quota and authentication failures with actionable output", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const fableResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "fable-limit delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const fablePayload = JSON.parse(fableResult.stdout);
+      assert.equal(fablePayload.failure?.kind, "claude_rate_limit");
+      assert.match(fablePayload.failure?.message ?? "", /Fable 5 limit/);
+
+      const authResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--quiet-progress",
+          "auth-failure delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      assert.match(authResult.stdout, /claude auth login/);
+      assert.match(authResult.stdout, /Not logged in/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("uses --resume to continue the latest session and keeps --fresh from injecting a resume id", async () => {
     const testEnv = createTestEnvironment();
     const sessionEnv = {
@@ -2317,7 +2443,7 @@ describe("claude-companion integration", () => {
           testEnv.workspaceDir,
           "--json",
           "--wait",
-          "--timeout-ms",
+          "--wait-timeout-ms",
           "5000",
           "--poll-interval-ms",
           "10",
@@ -2329,6 +2455,29 @@ describe("claude-companion integration", () => {
       assert.equal(waited.job.id, launch.jobId);
       assert.equal(waited.waitTimedOut, false);
       assert.equal(waited.job.status, "completed");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects both status wait-timeout spellings together", () => {
+    const testEnv = createTestEnvironment();
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "status",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--wait",
+          "--wait-timeout-ms",
+          "100",
+          "--timeout-ms",
+          "200",
+          "missing-job",
+        ],
+        { env: testEnv.env }
+      );
+      assert.match(result.stderr, /Choose only one of --wait-timeout-ms or --timeout-ms/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -2445,6 +2594,10 @@ describe("claude-companion integration", () => {
       ...testEnv.env,
       [SESSION_ID_ENV]: "child-session",
     };
+    const parentSessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "parent-session",
+    };
 
     try {
       writeCurrentSessionMarker(testEnv, "parent-session");
@@ -2481,7 +2634,7 @@ describe("claude-companion integration", () => {
 
       const resumeCandidate = runCompanionJson(
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: parentSessionEnv }
       );
       assert.equal(resumeCandidate.available, true);
       assert.equal(resumeCandidate.sessionId, "parent-session");
@@ -2779,7 +2932,7 @@ describe("claude-companion integration", () => {
     }
   });
 
-  it("keeps completed resume candidates session-scoped and ignores active tasks", async () => {
+  it("keeps resume candidates session-scoped and blocks only on active tasks from that session", async () => {
     const testEnv = createTestEnvironment();
     const sessionAEnv = {
       ...testEnv.env,
@@ -2837,10 +2990,11 @@ describe("claude-companion integration", () => {
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
         { env: sessionAEnv }
       );
-      assert.equal(candidateA.available, true);
+      assert.equal(candidateA.available, false);
       assert.equal(candidateA.sessionId, "session-a");
-      assert.equal(candidateA.candidate.id, completedA.jobId);
-      assert.notEqual(candidateA.candidate.id, activeA.jobId);
+      assert.equal(candidateA.reason, "active_task");
+      assert.equal(candidateA.activeJobId, activeA.jobId);
+      assert.equal(candidateA.candidate, null);
 
       const candidateB = runCompanionJson(
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
@@ -2849,6 +3003,21 @@ describe("claude-companion integration", () => {
       assert.equal(candidateB.available, true);
       assert.equal(candidateB.sessionId, "session-b");
       assert.equal(candidateB.candidate.id, completedB.jobId);
+
+      const explicitCandidateB = runCompanionJson(
+        [
+          "task-resume-candidate",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--owner-session-id",
+          "session-b",
+          "--json",
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(explicitCandidateB.available, true);
+      assert.equal(explicitCandidateB.ownerSessionId, "session-b");
+      assert.equal(explicitCandidateB.candidate.id, completedB.jobId);
 
       const candidateC = runCompanionJson(
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
@@ -2870,9 +3039,9 @@ describe("claude-companion integration", () => {
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
         { env: testEnv.env }
       );
-      assert.equal(markerCandidateA.available, true);
-      assert.equal(markerCandidateA.sessionId, "session-a");
-      assert.equal(markerCandidateA.candidate.id, completedA.jobId);
+      assert.equal(markerCandidateA.available, false);
+      assert.equal(markerCandidateA.sessionId, null);
+      assert.equal(markerCandidateA.candidate, null);
 
       writeCurrentSessionMarker(testEnv, "session-c");
       const markerCandidateC = runCompanionJson(
@@ -2880,10 +3049,105 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(markerCandidateC.available, false);
-      assert.equal(markerCandidateC.sessionId, "session-c");
+      assert.equal(markerCandidateC.sessionId, null);
       assert.equal(markerCandidateC.candidate, null);
 
       await waitForTerminalResult(testEnv, activeA.jobId, sessionAEnv);
+
+      const completedCandidateA = runCompanionJson(
+        ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionAEnv }
+      );
+      assert.equal(completedCandidateA.available, true);
+      assert.equal(completedCandidateA.candidate.id, activeA.jobId);
+      assert.match(completedCandidateA.candidate.claudeSessionId, /^stub-/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("resumes a failed task from the same owner despite a foreign active task", () => {
+    const testEnv = createTestEnvironment();
+    const sessionAEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-a",
+    };
+
+    try {
+      writeSessionScopedJob(testEnv, "task-a-failed", {
+        id: "task-a-failed",
+        jobClass: "task",
+        sessionId: "session-a",
+        status: "failed",
+        threadId: "claude-session-a",
+        result: { sessionId: "claude-session-a" },
+        createdAt: "2026-04-03T10:00:00Z",
+        completedAt: "2026-04-03T10:01:00Z",
+      });
+      writeSessionScopedJob(testEnv, "task-b-running", {
+        id: "task-b-running",
+        jobClass: "task",
+        sessionId: "session-b",
+        status: "running",
+        createdAt: "2026-04-03T11:00:00Z",
+      });
+
+      const resumeArgsFile = path.join(testEnv.rootDir, "owner-resume-args.json");
+      runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--owner-session-id",
+          "session-a",
+          "--resume",
+          "--quiet-progress",
+          "owner-resume delay=20",
+        ],
+        {
+          env: {
+            ...sessionAEnv,
+            CLAUDE_ARGS_FILE: resumeArgsFile,
+          },
+        }
+      );
+
+      const resumeArgs = JSON.parse(fs.readFileSync(resumeArgsFile, "utf8"));
+      assert.equal(
+        resumeArgs[resumeArgs.indexOf("--resume") + 1],
+        "claude-session-a"
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("keeps an ownerless task visible without using the marker for resume", async () => {
+    const testEnv = createTestEnvironment();
+    try {
+      writeCurrentSessionMarker(testEnv, "stale-marker-session");
+      const launch = await runCompanionAsyncJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "ownerless-task delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      await waitForTerminalResult(testEnv, launch.jobId, testEnv.env);
+      assert.equal(
+        readStoredJobById(testEnv, launch.jobId).sessionId,
+        "stale-marker-session"
+      );
+
+      const resume = runCompanionExpectFailure(
+        ["task", "--cwd", testEnv.workspaceDir, "--resume", "follow-up"],
+        { env: testEnv.env }
+      );
+      assert.match(resume.stderr, /Cannot resume without an owning Codex session/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -3106,7 +3370,7 @@ describe("claude-companion integration", () => {
           testEnv.workspaceDir,
           "--json",
           "--quiet-progress",
-          "--timeout-ms",
+          "--wait-timeout-ms",
           "1",
           "--poll-interval-ms",
           "1",
@@ -3143,14 +3407,37 @@ describe("claude-companion integration", () => {
             "task",
             "--cwd",
             testEnv.workspaceDir,
-            "--timeout-ms",
+            "--wait-timeout-ms",
             value,
             "invalid-timeout",
           ],
           { env: testEnv.env }
         );
-        assert.match(result.stderr, /--timeout-ms must be a positive number of milliseconds/);
+        assert.match(result.stderr, /--wait-timeout-ms must be a positive number of milliseconds/);
       }
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects both foreground task timeout spellings together", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--wait-timeout-ms",
+          "100",
+          "--timeout-ms",
+          "200",
+          "ambiguous-timeout",
+        ],
+        { env: testEnv.env }
+      );
+      assert.match(result.stderr, /Choose only one of --wait-timeout-ms or --timeout-ms/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

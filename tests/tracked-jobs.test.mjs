@@ -373,6 +373,52 @@ describe("createJobProgressUpdater", () => {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
   });
+
+  it("does not bypass a terminal writer that already owns the job lock", () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-progress-terminal-lock",
+      workspaceRoot: repoDir,
+      status: "running",
+      phase: "running",
+      title: "terminal writer lock",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+    const lockFile = `${resolveJobFile(repoDir, job.id)}.lock`;
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        identity: null,
+        timestamp: Date.now(),
+        token: "terminal-writer",
+      })
+    );
+
+    try {
+      const updateProgress = createJobProgressUpdater(repoDir, job.id);
+      assert.doesNotThrow(() =>
+        updateProgress({ phase: "subagent", message: "late delta" })
+      );
+      assert.equal(readJobFile(repoDir, job.id).phase, "running");
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores progress after its job file disappears", () => {
+    const repoDir = createTempGitRepo();
+    try {
+      const updateProgress = createJobProgressUpdater(repoDir, "missing-progress-job");
+      assert.doesNotThrow(() =>
+        updateProgress({ phase: "subagent", message: "late delta" })
+      );
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -380,6 +426,90 @@ describe("createJobProgressUpdater", () => {
 // ---------------------------------------------------------------------------
 
 describe("runTrackedJob", () => {
+  it("tracks the worker separately from the cancellable Claude process", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-worker-owner-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "worker ownership",
+      workerPid: process.pid,
+      workerPidIdentity: "parent-captured-worker-identity",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await runTrackedJob(job, async (onSpawn) => {
+        const starting = readJobFile(repoDir, job.id);
+        assert.equal(starting.workerPid, process.pid);
+        assert.equal(
+          starting.workerPidIdentity,
+          "parent-captured-worker-identity"
+        );
+
+        onSpawn({ pid: 43210, pidIdentity: "claude-identity" });
+        const running = readJobFile(repoDir, job.id);
+        assert.equal(running.workerPid, process.pid);
+        assert.equal(running.pid, 43210);
+        assert.equal(running.pidIdentity, "claude-identity");
+
+        return {
+          exitStatus: 0,
+          threadId: "thread-worker-owner",
+          turnId: null,
+          payload: { answer: 42 },
+          rendered: "finished",
+          summary: "finished",
+        };
+      });
+
+      const terminal = readJobFile(repoDir, job.id);
+      assert.equal(terminal.status, "completed");
+      assert.equal(terminal.pid, null);
+      assert.equal(terminal.pidIdentity, null);
+      assert.equal(terminal.workerPid, null);
+      assert.equal(terminal.workerPidIdentity, null);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs when worker identity is unavailable and reaping must degrade", async () => {
+    const repoDir = createTempGitRepo();
+    const logFile = path.join(repoDir, "worker-identity.log");
+    const job = {
+      id: "tracked-worker-identity-unavailable",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "worker identity warning",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await runTrackedJob(
+        job,
+        async () => ({ exitStatus: 0, rendered: "finished" }),
+        {
+          logFile,
+          getProcessIdentityImpl: () => {
+            throw new Error("ps unavailable");
+          },
+        }
+      );
+
+      assert.match(
+        fs.readFileSync(logFile, "utf8"),
+        /worker identity unavailable.*Claude child identity/i
+      );
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not revive a queued job after cancellation wins before startup", async () => {
     const repoDir = createTempGitRepo();
     const job = {
