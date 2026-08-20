@@ -79,11 +79,13 @@ import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { parseStructuredOutput } from "./lib/structured-output.mjs";
 import {
   ACTIVE_JOB_STATUSES,
+  TERMINAL_JOB_STATUSES,
   generateJobId,
   getConfig,
   getCurrentSession,
   listJobs,
   patchJob,
+  readJobFile,
   JOB_RESERVATION_SUFFIX,
   resolveJobsDir,
   resolveJobLogFile,
@@ -1604,6 +1606,25 @@ function spawnDetachedReviewWorker(cwd, jobId, workspaceRoot, logFile = null) {
   return child;
 }
 
+function recordQueuedWorker(workspaceRoot, jobId, pid) {
+  let pidIdentity = null;
+  try {
+    pidIdentity = getSpawnedProcessIdentity(pid);
+  } catch {}
+  try {
+    transitionJob(workspaceRoot, jobId, ["queued"], "queued", {
+      pid,
+      pidIdentity,
+      workerPid: pid,
+      workerPidIdentity: pidIdentity,
+    });
+  } catch (error) {
+    if (error?.code !== "ELOCKBUSY") {
+      throw error;
+    }
+  }
+}
+
 function enqueueBackgroundReview(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
@@ -1620,16 +1641,7 @@ function enqueueBackgroundReview(cwd, job, request) {
 
   const child = spawnDetachedReviewWorker(cwd, job.id, job.workspaceRoot, logFile);
   if (child.pid != null) {
-    let pidIdentity = null;
-    try {
-      pidIdentity = getSpawnedProcessIdentity(child.pid);
-    } catch {}
-    patchJob(job.workspaceRoot, job.id, {
-      pid: child.pid,
-      pidIdentity,
-      workerPid: child.pid,
-      workerPidIdentity: pidIdentity,
-    });
+    recordQueuedWorker(job.workspaceRoot, job.id, child.pid);
   }
 
   return {
@@ -1785,11 +1797,30 @@ function markViewedViaStatusAccess(workspaceRoot, jobs) {
     if (!job?.id || job.resultViewedAt || !statusPayloadSurfacesStoredResult(job)) {
       continue;
     }
-    patchJob(workspaceRoot, job.id, { resultViewedAt: viewedAt });
-    changed = true;
+    const storedJob = markTerminalJobViewed(workspaceRoot, job.id, viewedAt);
+    changed ||= Boolean(storedJob?.resultViewedAt);
   }
 
   return changed;
+}
+
+function markTerminalJobViewed(workspaceRoot, jobId, viewedAt = nowIso()) {
+  const storedJob = readJobFile(workspaceRoot, jobId);
+  if (!storedJob || !TERMINAL_JOB_STATUSES.has(storedJob.status)) {
+    return storedJob;
+  }
+  try {
+    transitionJob(
+      workspaceRoot,
+      jobId,
+      [storedJob.status],
+      storedJob.status,
+      { resultViewedAt: viewedAt }
+    );
+    return readJobFile(workspaceRoot, jobId) ?? storedJob;
+  } catch {
+    return storedJob;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1817,9 +1848,7 @@ async function runForegroundCommand(job, runner, options = {}) {
     return execution;
   } finally {
     if (options.markViewedOnSuccess) {
-      patchJob(job.workspaceRoot, job.id, {
-        resultViewedAt: nowIso(),
-      });
+      markTerminalJobViewed(job.workspaceRoot, job.id);
     }
   }
 }
@@ -1884,16 +1913,7 @@ function enqueueDetachedTask(cwd, job, request, options = {}) {
 
   const child = spawnDetachedTaskWorker(cwd, job.id, job.workspaceRoot, logFile);
   if (child.pid != null) {
-    let pidIdentity = null;
-    try {
-      pidIdentity = getSpawnedProcessIdentity(child.pid);
-    } catch {}
-    patchJob(job.workspaceRoot, job.id, {
-      pid: child.pid,
-      pidIdentity,
-      workerPid: child.pid,
-      workerPidIdentity: pidIdentity,
-    });
+    recordQueuedWorker(job.workspaceRoot, job.id, child.pid);
   }
 
   return {
@@ -2047,9 +2067,7 @@ async function runForegroundDetachedTask(cwd, job, request, options = {}) {
   }
 
   if (options.markViewedOnSuccess) {
-    storedJob = patchJob(job.workspaceRoot, job.id, {
-      resultViewedAt: nowIso(),
-    }) ?? storedJob;
+    storedJob = markTerminalJobViewed(job.workspaceRoot, job.id) ?? storedJob;
   }
 
   const resultPayload = buildStoredTaskPayload(storedJob);
@@ -2634,9 +2652,7 @@ function handleResult(argv) {
   const { workspaceRoot, job, state } = resolveResultJob(cwd, reference);
   let storedJob = readStoredJob(workspaceRoot, job.id);
   if (state !== "active") {
-    storedJob = patchJob(workspaceRoot, job.id, {
-      resultViewedAt: nowIso(),
-    }) ?? storedJob;
+    storedJob = markTerminalJobViewed(workspaceRoot, job.id) ?? storedJob;
   }
   const payload = {
     job,

@@ -657,6 +657,32 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createSlowParentPsShim(testEnv, delayMs) {
+  const shimDir = path.join(testEnv.rootDir, "slow-parent-ps");
+  const shimPath = path.join(shimDir, "ps");
+  fs.mkdirSync(shimDir, { recursive: true });
+  fs.writeFileSync(
+    shimPath,
+    [
+      "#!/usr/bin/env node",
+      'const { spawnSync } = require("node:child_process");',
+      "const args = process.argv.slice(2);",
+      'const parent = spawnSync("/bin/ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8" });',
+      'if (!/\\b(?:task|review)-worker\\b/.test(parent.stdout || "")) {',
+      `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delayMs});`,
+      "}",
+      'const result = spawnSync("/bin/ps", args, { encoding: "utf8" });',
+      'process.stdout.write(result.stdout || "");',
+      'process.stderr.write(result.stderr || "");',
+      "process.exitCode = result.status ?? 1;",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(shimPath, 0o755);
+  return shimDir;
+}
+
 function runGit(cwd, args) {
   const result = spawnSync("git", args, {
     cwd,
@@ -4442,6 +4468,47 @@ describe("claude-companion integration", () => {
       }
     } finally {
       await Promise.allSettled([waitSnapshotsPromise]);
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not overwrite a running Claude child when parent worker identity resolves late", async (t) => {
+    if (process.platform !== "darwin") {
+      t.skip("Darwin ps shim reproduces the post-spawn identity race");
+      return;
+    }
+    const testEnv = createTestEnvironment();
+    const shimDir = createSlowParentPsShim(testEnv, 1_000);
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-late-parent-worker-identity",
+      PATH: `${shimDir}${path.delimiter}${testEnv.env.PATH}`,
+    };
+
+    try {
+      const launch = await runCompanionAsyncJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "late-parent-worker-identity delay=2500",
+        ],
+        { env: sessionEnv }
+      );
+      const runningJob = readStoredJobById(testEnv, launch.jobId);
+      assert.equal(runningJob.status, "running");
+      assert.notEqual(runningJob.pid, runningJob.workerPid);
+
+      const result = await waitForTerminalResult(
+        testEnv,
+        launch.jobId,
+        sessionEnv,
+        { timeoutMs: 6_000 }
+      );
+      assert.equal(result.job.status, "completed");
+    } finally {
       cleanupTestEnvironment(testEnv);
     }
   });
