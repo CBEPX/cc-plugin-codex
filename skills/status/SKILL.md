@@ -16,3 +16,4 @@ Output:
 - Present the companion stdout exactly as returned.
 - Do not add extra prose or reformat it.
 - By default, status overview is scoped to the current Codex session in this repository. `--all` widens that overview to all tracked jobs in the current repository workspace.
+- Status inspection may reconcile stale owned jobs. Process cleanup remains PID-identity checked; healthy active jobs are not rewritten.

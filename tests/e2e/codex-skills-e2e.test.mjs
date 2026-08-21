@@ -77,6 +77,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readStdin() {
+  let body = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    body += chunk;
+  }
+  return body;
+}
+
 async function main() {
   if (args[0] === "--version") {
     process.stdout.write("2.1.90 (Claude Code)\\n");
@@ -95,7 +104,7 @@ async function main() {
   }
 
   const promptIndex = args.lastIndexOf("--");
-  const prompt = promptIndex >= 0 ? args.slice(promptIndex + 1).join(" ") : "";
+  const prompt = promptIndex >= 0 ? args.slice(promptIndex + 1).join(" ") : await readStdin();
   const delayMatch = prompt.match(/\\bdelay=(\\d+)\\b/);
   const delay = delayMatch ? Number(delayMatch[1]) : 25;
   const sessionId =
@@ -1722,7 +1731,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Review"],
       shellCommands: [
-        `node ${JSON.stringify(companionScript)} review --view-state on-success --scope working-tree --model haiku`,
+        `node ${JSON.stringify(companionScript)} review --view-state on-terminal --scope working-tree --model haiku`,
       ],
       cwd: workspaceDir,
     });
@@ -1793,7 +1802,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Review"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state on-success --scope working-tree --model haiku`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state on-terminal --scope working-tree --model haiku`,
       ],
       cwd: workspaceDir,
     });
@@ -1944,7 +1953,7 @@ describe("Codex direct-skill E2E", () => {
       userRequest,
       expectedNeedles: ["Claude Code Adversarial Review"],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state on-success --scope working-tree --model haiku focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state on-terminal --scope working-tree --model haiku focus on race conditions`,
       ],
       cwd: workspaceDir,
     });
@@ -2003,7 +2012,7 @@ describe("Codex direct-skill E2E", () => {
         "keep the delegated Claude part on `$cc:review`",
       ],
       shellCommands: [
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state on-success --scope working-tree --model haiku focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state on-terminal --scope working-tree --model haiku focus on race conditions`,
       ],
       cwd: workspaceDir,
     });

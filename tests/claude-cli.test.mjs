@@ -1103,13 +1103,29 @@ describe("classifyClaudeFailure", () => {
     assert.equal(failure.resetText, null);
   });
 
-  it("classifies actionable Claude authentication failures", () => {
+  it("classifies authentication stderr from a failed command without a terminal event", () => {
     const failure = classifyClaudeFailure({
       stderr: "Not logged in. Run claude auth login to continue.",
+      exitCode: 1,
+      receivedTerminalEvent: false,
     });
 
     assert.equal(failure.kind, "claude_auth");
     assert.match(failure.message, /auth login/);
+  });
+
+  it("ignores authentication stderr without trusted failure provenance", () => {
+    const stderr = "Not logged in. Run claude auth login to continue.";
+
+    assert.equal(classifyClaudeFailure({ stderr }), null);
+    assert.equal(
+      classifyClaudeFailure({
+        stderr,
+        exitCode: 1,
+        receivedTerminalEvent: true,
+      }),
+      null
+    );
   });
 
   it("classifies authentication failures from terminal output", () => {
@@ -1344,6 +1360,73 @@ describe("classifyClaudeFailure", () => {
 });
 
 describe("runClaudeTurn", () => {
+  it("sends a large Unicode prompt through stdin and keeps it out of argv", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-stdin-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `let prompt = "";\nprocess.stdin.setEncoding("utf8");\nprocess.stdin.on("data", (chunk) => { prompt += chunk; });\nprocess.stdin.on("end", () => {\n  const result = JSON.stringify({ argv: process.argv.slice(2), prompt });\n  const out = JSON.stringify({ type: "result", result, session_id: "sess-stdin" });\n  process.stdout.write(out + "\\n", () => process.exit(0));\n});\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+      const prompt = "Привет, Claude! 🧪\n".repeat(4_000);
+
+      const result = await runClaudeTurn(process.cwd(), prompt);
+      const payload = JSON.parse(result.finalMessage);
+
+      assert.equal(result.status, "completed");
+      assert.equal(payload.prompt, prompt);
+      assert.equal(payload.argv.includes(prompt), false);
+      assert.equal(payload.argv.includes("--"), false);
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails when the Claude process closes stdin before receiving the prompt", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-stdin-error-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `process.stdin.destroy();\nsetTimeout(() => {\n  const out = JSON.stringify({ type: "result", result: "done", session_id: "sess-stdin-error" });\n  process.stdout.write(out + "\\n", () => process.exit(0));\n}, 100);\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "x".repeat(8 * 1024 * 1024));
+
+      assert.equal(result.status, "failed");
+      assert.match(result.stderr, /Failed to write Claude prompt to stdin/);
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a secondary stdin error hide an authentication failure", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-stdin-auth-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `process.stdin.destroy();\nprocess.stderr.write("Not logged in. Run claude auth login to continue.\\n");\nsetTimeout(() => process.exit(1), 100);\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "x".repeat(8 * 1024 * 1024));
+
+      assert.equal(result.status, "failed");
+      assert.equal(result.warning, undefined);
+      assert.equal(result.failure?.kind, "claude_auth");
+      assert.match(result.stderr, /Not logged in/);
+      assert.match(result.stderr, /Failed to write Claude prompt to stdin/);
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps only the newest stderr bytes on failed Claude runs", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-"));
     const oldPath = process.env.PATH ?? "";
@@ -2173,12 +2256,12 @@ describe("buildArgs", () => {
     assert.equal(args[0], "-p");
   });
 
-  it("ends with -- separator followed by prompt", () => {
-    const args = buildArgs("my prompt");
-    const dashDashIdx = args.indexOf("--");
-    assert.ok(dashDashIdx >= 0);
-    assert.equal(args[dashDashIdx + 1], "my prompt");
-    assert.equal(args[args.length - 1], "my prompt");
+  it("keeps the prompt out of argv so runClaudeTurn can send it through stdin", () => {
+    const prompt = "x".repeat(70_000);
+    const args = buildArgs(prompt);
+
+    assert.equal(args.includes("--"), false);
+    assert.equal(args.includes(prompt), false);
   });
 
   it("defaults output format to json", () => {
@@ -2218,6 +2301,14 @@ describe("buildArgs", () => {
     const idx = args.indexOf("--effort");
     assert.ok(idx >= 0);
     assert.equal(args[idx + 1], "xhigh");
+  });
+
+  it("omits whitespace-only model and effort values", () => {
+    const args = buildArgs("p", { model: "   ", effort: "  " });
+
+    assert.equal(args.includes("--model"), false);
+    assert.equal(args.includes("--effort"), false);
+    assert.equal(args.every((value) => typeof value === "string"), true);
   });
 
   it("passes 'max' through as --effort max when explicitly requested", () => {

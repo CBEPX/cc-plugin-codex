@@ -83,6 +83,7 @@ import {
   generateJobId,
   getConfig,
   getCurrentSession,
+  getCurrentSessionMarker,
   listJobs,
   patchJob,
   readJobFile,
@@ -145,11 +146,11 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/claude-companion.mjs setup [--check] [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
-      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--wait-timeout-ms <ms>] [prompt]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
+      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--wait-timeout-ms <ms>] [prompt]",
       "  node scripts/claude-companion.mjs transfer [--source <claude-jsonl>] [--json]",
-      "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
+      "  node scripts/claude-companion.mjs status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--poll-interval-ms <ms>] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
       "  node scripts/claude-companion.mjs mcp-diagnose [--cwd <path>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [--json]",
@@ -265,7 +266,30 @@ function alignCurrentSessionToOwner(workspaceRoot, ownerSessionId) {
   if (!ownerSessionId) {
     return;
   }
-  setCurrentSession(workspaceRoot, ownerSessionId);
+  const marker = getCurrentSessionMarker(workspaceRoot);
+  setCurrentSession(workspaceRoot, ownerSessionId, {
+    hostOrigin: marker?.sessionId === ownerSessionId ? marker.hostOrigin : undefined,
+  });
+}
+
+function assertDelegationAllowed(workspaceRoot, ownerSessionId, workLabel) {
+  const marker = getCurrentSessionMarker(workspaceRoot);
+  if (!marker || marker.hostOrigin !== "claude-code") {
+    return;
+  }
+  const effectiveOwnerSessionId =
+    ownerSessionId ?? process.env[SESSION_ID_ENV] ?? marker.sessionId;
+  if (effectiveOwnerSessionId !== marker.sessionId) {
+    return;
+  }
+  throw new Error(
+    [
+      `This Codex thread is driven by Claude Code, not by a user prompt, so delegating this ${workLabel} back to Claude Code would loop it between the two assistants.`,
+      "Do not retry this command and do not look for another way to reach Claude Code.",
+      "For an interactive Codex session launched from a Claude Code shell, restart it with CLAUDECODE and CLAUDE_CODE_ENTRYPOINT unset.",
+      `Perform the requested ${workLabel} yourself in this thread and present your own findings directly.`,
+    ].join("\n")
+  );
 }
 
 async function withReleasedReservation(workspaceRoot, explicitJobId, fn) {
@@ -882,7 +906,13 @@ function parseWaitTimeoutMilliseconds(options) {
   }
   const optionName =
     options["wait-timeout-ms"] != null ? "wait-timeout-ms" : "timeout-ms";
-  return parsePositiveMilliseconds(options[optionName], `--${optionName}`);
+  const timeoutMs = parsePositiveMilliseconds(options[optionName], `--${optionName}`);
+  if (timeoutMs != null && optionName === "timeout-ms") {
+    process.stderr.write(
+      "Warning: --timeout-ms is deprecated; use --wait-timeout-ms.\n"
+    );
+  }
+  return timeoutMs;
 }
 
 function readJsonConfig(filePath) {
@@ -1556,7 +1586,7 @@ function buildReviewRequest({
   reviewName,
   userMcpTools,
   allowProjectMcpServers,
-  markViewedOnSuccess
+  markViewedOnTerminal
 }) {
   return {
     cwd,
@@ -1568,7 +1598,7 @@ function buildReviewRequest({
     reviewName,
     userMcpTools: normalizeUserMcpTools(userMcpTools),
     allowProjectMcpServers: Boolean(allowProjectMcpServers),
-    markViewedOnSuccess
+    markViewedOnTerminal
   };
 }
 
@@ -1685,7 +1715,7 @@ function buildTaskRequest({
   resumeLast,
   resumeSessionId,
   jobId,
-  markViewedOnSuccess
+  markViewedOnTerminal
 }) {
   return {
     cwd,
@@ -1696,7 +1726,7 @@ function buildTaskRequest({
     resumeLast,
     resumeSessionId,
     jobId,
-    markViewedOnSuccess
+    markViewedOnTerminal
   };
 }
 
@@ -1753,19 +1783,25 @@ function renderQueuedTaskLaunch(payload) {
   ].join("\n");
 }
 
-function resolveMarkViewedOnSuccess(viewState, launchedInBackground = false) {
+function resolveMarkViewedOnTerminal(viewState, launchedInBackground = false) {
   const normalized = String(viewState ?? "").trim().toLowerCase();
   if (!normalized) {
     return !launchedInBackground;
   }
+  if (normalized === "on-terminal") {
+    return true;
+  }
   if (normalized === "on-success") {
+    process.stderr.write(
+      "Warning: --view-state on-success is deprecated; use on-terminal.\n"
+    );
     return true;
   }
   if (normalized === "defer") {
     return false;
   }
   throw new Error(
-    `Unsupported --view-state value: ${viewState}. Use on-success or defer.`
+    `Unsupported --view-state value: ${viewState}. Use on-terminal or defer.`
   );
 }
 
@@ -1847,7 +1883,7 @@ async function runForegroundCommand(job, runner, options = {}) {
     }
     return execution;
   } finally {
-    if (options.markViewedOnSuccess) {
+    if (options.markViewedOnTerminal) {
       markTerminalJobViewed(job.workspaceRoot, job.id);
     }
   }
@@ -1936,7 +1972,7 @@ function buildStoredTaskPayload(job) {
     status: job?.status === "completed" ? "completed" : "failed",
     jobStatus: job?.status ?? null,
     warning: null,
-    sessionId: job?.threadId ?? job?.sessionId ?? null,
+    sessionId: job?.threadId ?? null,
     resultMissing: true,
     requestedModel: null,
     finalModel: null,
@@ -2066,7 +2102,7 @@ async function runForegroundDetachedTask(cwd, job, request, options = {}) {
     };
   }
 
-  if (options.markViewedOnSuccess) {
+  if (options.markViewedOnTerminal) {
     storedJob = markTerminalJobViewed(job.workspaceRoot, job.id) ?? storedJob;
   }
 
@@ -2221,7 +2257,7 @@ async function handleReviewCommand(argv, config) {
   });
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   const ownerSessionId = resolveOwnerSessionId(options["owner-session-id"]);
-  const markViewedOnSuccess = resolveMarkViewedOnSuccess(
+  const markViewedOnTerminal = resolveMarkViewedOnTerminal(
     options["view-state"],
     Boolean(options.background)
   );
@@ -2233,6 +2269,7 @@ async function handleReviewCommand(argv, config) {
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     // Validate inside the reservation guard so failures do not leak markers.
     config.validateRequest?.(target, focusText);
+    assertDelegationAllowed(workspaceRoot, ownerSessionId, "review");
     const userMcpTools = normalizeUserMcpTools(options["user-mcp-tool"]);
     if (userMcpTools.length > 0) {
       process.stderr.write(
@@ -2269,7 +2306,7 @@ async function handleReviewCommand(argv, config) {
         reviewName: config.reviewName,
         userMcpTools,
         allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
-        markViewedOnSuccess
+        markViewedOnTerminal
       });
       const { payload } = enqueueBackgroundReview(cwd, job, request);
       outputCommandResult(
@@ -2296,7 +2333,7 @@ async function handleReviewCommand(argv, config) {
           onProgress: progress,
           onSpawn,
         }),
-      { json: options.json, markViewedOnSuccess }
+      { json: options.json, markViewedOnTerminal }
     );
   });
 }
@@ -2373,7 +2410,7 @@ async function handleTask(argv) {
   const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
   const foregroundTimeoutMs = parseWaitTimeoutMilliseconds(options);
-  const markViewedOnSuccess = resolveMarkViewedOnSuccess(
+  const markViewedOnTerminal = resolveMarkViewedOnTerminal(
     options["view-state"],
     Boolean(options.background)
   );
@@ -2401,6 +2438,7 @@ async function handleTask(argv) {
   const write = Boolean(options.write);
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
+    assertDelegationAllowed(workspaceRoot, ownerSessionId, "task");
     const taskMetadata = buildTaskRunMetadata({
       prompt,
       resumeLast
@@ -2442,7 +2480,7 @@ async function handleTask(argv) {
         resumeLast,
         resumeSessionId,
         jobId: job.id,
-        markViewedOnSuccess
+        markViewedOnTerminal
       });
       const { payload } = enqueueBackgroundTask(cwd, job, request);
       outputCommandResult(
@@ -2462,7 +2500,7 @@ async function handleTask(argv) {
       resumeLast,
       resumeSessionId,
       jobId: job.id,
-      markViewedOnSuccess
+      markViewedOnTerminal
     });
     await runForegroundDetachedTask(
       cwd,
@@ -2471,7 +2509,7 @@ async function handleTask(argv) {
       {
         json: options.json,
         quietProgress: Boolean(options["quiet-progress"]),
-        markViewedOnSuccess,
+        markViewedOnTerminal,
         timeoutMs: foregroundTimeoutMs,
         pollIntervalMs: options["poll-interval-ms"],
       }
@@ -2536,7 +2574,12 @@ async function handleTaskWorker(argv) {
         onProgress: progress,
         onSpawn,
       }),
-    { logFile, markViewedOnSuccess: Boolean(request.markViewedOnSuccess) }
+    {
+      logFile,
+      markViewedOnTerminal: Boolean(
+        request.markViewedOnTerminal ?? request.markViewedOnSuccess
+      ),
+    }
   );
 }
 
@@ -2584,7 +2627,12 @@ async function handleReviewWorker(argv) {
         onProgress: progress,
         onSpawn,
       }),
-    { logFile, markViewedOnSuccess: Boolean(request.markViewedOnSuccess) }
+    {
+      logFile,
+      markViewedOnTerminal: Boolean(
+        request.markViewedOnTerminal ?? request.markViewedOnSuccess
+      ),
+    }
   );
 }
 
@@ -2595,6 +2643,14 @@ async function handleStatus(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
+  const timeoutOption = options["wait-timeout-ms"] != null
+    ? "wait-timeout-ms"
+    : options["timeout-ms"] != null
+    ? "timeout-ms"
+    : null;
+  if (timeoutOption && !options.wait) {
+    throw new Error(`--${timeoutOption} requires --wait.`);
+  }
   const waitTimeoutMs = parseWaitTimeoutMilliseconds(options);
   const reference = positionals[0] ?? "";
   if (reference) {

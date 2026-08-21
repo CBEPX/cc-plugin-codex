@@ -35,6 +35,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readStdin() {
+  let body = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    body += chunk;
+  }
+  return body;
+}
+
 function sanitize(value) {
   return String(value || "session")
     .toLowerCase()
@@ -69,7 +78,7 @@ async function main() {
   const prompt =
     promptIndex >= 0
       ? args.slice(promptIndex + 1).join(" ")
-      : "";
+      : await readStdin();
   const delay = Number((prompt.match(/\\bdelay=(\\d+)\\b/) || [])[1] || 80);
   if (process.env.CLAUDE_ARGS_FILE) {
     require("node:fs").writeFileSync(
@@ -482,7 +491,7 @@ function writeSessionScopedJob(testEnv, jobId, payload) {
   return { stateDir, jobsDir };
 }
 
-function writeCurrentSessionMarker(testEnv, sessionId) {
+function writeCurrentSessionMarker(testEnv, sessionId, options = {}) {
   const realWorkspace = fs.realpathSync.native(testEnv.workspaceDir);
   const workspaceHash = createHash("sha256").update(realWorkspace).digest("hex").slice(0, 12);
   const stateDir = path.join(
@@ -497,7 +506,15 @@ function writeCurrentSessionMarker(testEnv, sessionId) {
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
     path.join(stateDir, "current-session.json"),
-    JSON.stringify({ sessionId, updatedAt: "2026-04-03T12:00:00Z" }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        sessionId,
+        ...(options.hostOrigin ? { hostOrigin: options.hostOrigin } : {}),
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2
+    ) + "\n",
     "utf8"
   );
 }
@@ -821,6 +838,14 @@ function assertCompletedReviewPayload(payload) {
 }
 
 describe("claude-companion integration", () => {
+  it("documents owner routing, canonical view state, and status wait controls in help", () => {
+    const result = runCompanion(["--help"]);
+
+    assert.match(result.stdout, /--owner-session-id <session-id>/);
+    assert.match(result.stdout, /--view-state <on-terminal\|defer>/);
+    assert.match(result.stdout, /status \[job-id\].*--wait.*--wait-timeout-ms <ms>/);
+  });
+
   it("setup toggles the review gate on and off for the current workspace", () => {
     const testEnv = createTestEnvironment();
 
@@ -904,6 +929,66 @@ describe("claude-companion integration", () => {
       const requests = readJsonLines(fakeCodex.logPath);
       assert.ok(requests.some((request) => request.method === "hooks/list"));
       assert.ok(!requests.some((request) => request.method === "config/batchWrite"));
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("setup --check preserves ready config and state file metadata", () => {
+    const testEnv = createTestEnvironment();
+    const codexDir = path.join(testEnv.homeDir, ".codex");
+    const configFile = path.join(codexDir, "config.toml");
+    const configContent = "[features]\nhooks = true\nplugin_hooks = true\n";
+    const stateDir = stateDirFor(testEnv);
+    const stateFile = path.join(stateDir, "config.json");
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(configFile, configContent, { mode: 0o640 });
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({ version: 1, stopReviewGate: false }, null, 2) + "\n",
+      { mode: 0o600 }
+    );
+    const fixedMtime = new Date("2026-01-01T00:00:00.000Z");
+    fs.utimesSync(configFile, fixedMtime, fixedMtime);
+    fs.utimesSync(stateFile, fixedMtime, fixedMtime);
+    const before = [configFile, stateFile].map((filePath) => ({
+      content: fs.readFileSync(filePath, "utf8"),
+      mode: fs.statSync(filePath).mode & 0o777,
+      mtimeMs: fs.statSync(filePath).mtimeMs,
+    }));
+    const fakeCodex = createFakeCodexAppServer(testEnv, [
+      {
+        key: "cc@sendbird:hooks/hooks.json:session_start:0:0",
+        sourcePath: path.join(PROJECT_ROOT, "hooks", "hooks.json"),
+        source: "plugin",
+        pluginId: "cc@sendbird",
+        currentHash: "sha256:session",
+        trustStatus: "trusted",
+      },
+    ]);
+
+    try {
+      const report = runCompanionJson(
+        ["setup", "--cwd", testEnv.workspaceDir, "--check", "--json"],
+        {
+          env: {
+            ...testEnv.env,
+            CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+            CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([fakeCodex.serverPath]),
+            CC_PLUGIN_CODEX_FORCE_HOOK_TRUST: "1",
+          },
+        }
+      );
+
+      assert.equal(report.ready, true);
+      assert.deepEqual(report.actionsTaken, []);
+      for (const [index, filePath] of [configFile, stateFile].entries()) {
+        const stat = fs.statSync(filePath);
+        assert.equal(fs.readFileSync(filePath, "utf8"), before[index].content);
+        assert.equal(stat.mode & 0o777, before[index].mode);
+        assert.equal(stat.mtimeMs, before[index].mtimeMs);
+      }
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -1920,6 +2005,131 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("refuses same-owner delegation from a Claude-Code-driven thread", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      writeCurrentSessionMarker(testEnv, "cc-thread", { hostOrigin: "claude-code" });
+      const env = { ...testEnv.env };
+      delete env[SESSION_ID_ENV];
+
+      const review = runCompanionExpectFailure(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree"],
+        { env }
+      );
+      assert.match(review.stderr, /driven by Claude Code/);
+      assert.match(review.stderr, /Perform the requested review yourself/);
+      assert.equal(listStoredJobs(testEnv).length, 0);
+
+      const exportedSession = runCompanionExpectFailure(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree"],
+        { env: { ...testEnv.env, [SESSION_ID_ENV]: "cc-thread" } }
+      );
+      assert.match(exportedSession.stderr, /driven by Claude Code/);
+      assert.equal(listStoredJobs(testEnv).length, 0);
+
+      const task = runCompanionExpectFailure(
+        ["task", "--cwd", testEnv.workspaceDir, "investigate something"],
+        { env }
+      );
+      assert.match(task.stderr, /Perform the requested task yourself/);
+      assert.equal(listStoredJobs(testEnv).length, 0);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("allows foreign-owner and unstamped delegation", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      writeCurrentSessionMarker(testEnv, "cc-thread", { hostOrigin: "claude-code" });
+
+      const noSessionEnv = { ...testEnv.env };
+      delete noSessionEnv[SESSION_ID_ENV];
+      runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--owner-session-id",
+          "interactive-parent",
+        ],
+        { env: noSessionEnv }
+      );
+      const alignedMarker = JSON.parse(
+        fs.readFileSync(
+          path.join(stateDirFor(testEnv), "current-session.json"),
+          "utf8"
+        )
+      );
+      assert.equal(alignedMarker.sessionId, "interactive-parent");
+      assert.equal(alignedMarker.hostOrigin, undefined);
+      runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--owner-session-id",
+          "interactive-parent",
+        ],
+        { env: noSessionEnv }
+      );
+
+      writeCurrentSessionMarker(testEnv, "plain-session");
+      runCompanion(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree"],
+        { env: noSessionEnv }
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("sends a Windows-sized review prompt through stdin instead of argv", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      const largeInput = path.join(testEnv.workspaceDir, "large-review-input.txt");
+      fs.writeFileSync(
+        largeInput,
+        "before-line\n".repeat(2_000),
+        "utf8"
+      );
+      runGit(testEnv.workspaceDir, ["add", "large-review-input.txt"]);
+      runGit(testEnv.workspaceDir, ["commit", "-m", "add review fixture"]);
+      fs.writeFileSync(largeInput, "review-line\n".repeat(2_000), "utf8");
+      const invocationFile = path.join(testEnv.rootDir, "large-review-invocation.json");
+
+      const result = runCompanion(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree", "--model", "haiku"],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+
+      const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
+      assert.ok(Buffer.byteLength(invocation.prompt, "utf8") > 32_767);
+      assert.match(invocation.prompt, /review-line/);
+      assert.equal(invocation.args.includes(invocation.prompt), false);
+      assert.match(result.stdout, /Claude Code Review/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("reports review model fallbacks in JSON payloads", () => {
     const testEnv = createTestEnvironment();
 
@@ -2509,6 +2719,94 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.match(result.stderr, /Choose only one of --wait-timeout-ms or --timeout-ms/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects status timeout controls without --wait before numeric validation", () => {
+    const testEnv = createTestEnvironment();
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "status",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--wait-timeout-ms",
+          "not-a-number",
+          "missing-job",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stderr, /--wait-timeout-ms requires --wait/);
+      assert.doesNotMatch(result.stderr, /positive number/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("warns when status accepts the deprecated timeout alias", () => {
+    const testEnv = createTestEnvironment();
+    const jobId = "deprecated-status-timeout";
+    writeSessionScopedJob(testEnv, jobId, {
+      id: jobId,
+      status: "completed",
+      jobClass: "task",
+      createdAt: "2026-04-03T10:00:00Z",
+      completedAt: "2026-04-03T10:00:01Z",
+    });
+
+    try {
+      const result = runCompanion(
+        [
+          "status",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--wait",
+          "--timeout-ms",
+          "100",
+          jobId,
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stderr, /--timeout-ms is deprecated; use --wait-timeout-ms/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not rewrite a healthy active job during status inspection", () => {
+    const testEnv = createTestEnvironment();
+    const jobId = "healthy-status-read";
+    const timestamp = new Date().toISOString();
+    const { jobsDir } = writeSessionScopedJob(testEnv, jobId, {
+      id: jobId,
+      status: "running",
+      jobClass: "task",
+      sessionId: "session-a",
+      pid: process.pid,
+      workerPid: process.pid,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    const jobFile = path.join(jobsDir, `${jobId}.json`);
+    const beforeContent = fs.readFileSync(jobFile, "utf8");
+    const beforeStat = fs.statSync(jobFile);
+
+    try {
+      const report = runCompanionJson(
+        ["status", "--cwd", testEnv.workspaceDir, "--json", "--all"],
+        { env: testEnv.env }
+      );
+
+      assert.ok(report.running.some((job) => job.id === jobId));
+      assert.equal(fs.readFileSync(jobFile, "utf8"), beforeContent);
+      const afterStat = fs.statSync(jobFile);
+      assert.equal(afterStat.mode & 0o777, beforeStat.mode & 0o777);
+      assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -3621,6 +3919,11 @@ describe("claude-companion integration", () => {
       const storedJob = readStoredJobById(testEnv, reserved.jobId);
       assert.equal(storedJob.status, "cancelled");
       assert.match(storedJob.errorMessage, /Cancelled by user/);
+      assert.equal(
+        payload.sessionId,
+        storedJob.result?.sessionId ?? storedJob.threadId ?? null
+      );
+      assert.notEqual(payload.sessionId, storedJob.sessionId);
       if (payload.resultMissing === true) {
         assert.equal(payload.jobStatus, "cancelled");
         assert.match(payload.errorMessage, /Cancelled by user/);
@@ -3767,6 +4070,76 @@ describe("claude-companion integration", () => {
         null,
         "explicit defer should keep the result unread even when companion ran in foreground"
       );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("accepts canonical on-terminal view state and warns for the on-success alias", () => {
+    const testEnv = createTestEnvironment();
+    const canonicalEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-view-state-canonical",
+    };
+    const aliasEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-view-state-alias",
+    };
+
+    try {
+      runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--view-state",
+          "on-terminal",
+          "canonical-view-state delay=20",
+        ],
+        { env: canonicalEnv }
+      );
+      const alias = runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--view-state",
+          "on-success",
+          "alias-view-state delay=20",
+        ],
+        { env: aliasEnv }
+      );
+
+      const canonicalJob = listStoredJobs(testEnv).find(
+        (job) => job.sessionId === "session-view-state-canonical"
+      );
+      const aliasJob = listStoredJobs(testEnv).find(
+        (job) => job.sessionId === "session-view-state-alias"
+      );
+      assert.match(canonicalJob.resultViewedAt, /\d{4}-\d{2}-\d{2}T/);
+      assert.match(aliasJob.resultViewedAt, /\d{4}-\d{2}-\d{2}T/);
+      assert.match(alias.stderr, /--view-state on-success is deprecated; use on-terminal/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("warns when task accepts the deprecated timeout alias", () => {
+    const testEnv = createTestEnvironment();
+    try {
+      const result = runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--timeout-ms",
+          "5000",
+          "deprecated-timeout delay=20",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stderr, /--timeout-ms is deprecated; use --wait-timeout-ms/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

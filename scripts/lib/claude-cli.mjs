@@ -383,7 +383,13 @@ export function classifyClaudeFailure(value = {}) {
       finalMessage &&
       CLAUDE_AUTH_ERROR_RE.test(finalMessage)
   );
-  const stderrAuth = Boolean(stderr && CLAUDE_AUTH_ERROR_RE.test(stderr));
+  const stderrAuth = Boolean(
+    stderr &&
+      value.exitCode !== 0 &&
+      Number.isInteger(value.exitCode) &&
+      value.receivedTerminalEvent === false &&
+      CLAUDE_AUTH_ERROR_RE.test(stderr)
+  );
   if (finalMessageAuth || stderrAuth) {
     return {
       kind: "claude_auth",
@@ -1253,11 +1259,13 @@ export function buildArgs(prompt, options = {}) {
   if (options.noSessionPersistence) {
     args.push("--no-session-persistence");
   }
-  if (options.model) {
-    args.push("--model", resolveModel(options.model));
+  const model = resolveModel(options.model);
+  if (model) {
+    args.push("--model", model);
   }
-  if (options.effort) {
-    args.push("--effort", resolveEffort(options.effort));
+  const effort = resolveEffort(options.effort);
+  if (effort) {
+    args.push("--effort", effort);
   }
   if (options.sessionId) {
     args.push("--session-id", options.sessionId);
@@ -1292,7 +1300,6 @@ export function buildArgs(prompt, options = {}) {
     args.push("--strict-mcp-config");
   }
 
-  args.push("--", prompt);
   return args;
 }
 
@@ -1305,7 +1312,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     outputFormat: "stream-json",
     ...options,
   });
-  const requestedModel = options.model ? resolveModel(options.model) : null;
+  const requestedModel = resolveModel(options.model) ?? null;
   const command = resolveClaudeCommand();
   if (command.error) {
     return {
@@ -1320,7 +1327,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       finalModel: null,
       contextWindow: null,
       modelEvents: [],
-      failure: classifyClaudeFailure({ stderr: command.error }),
+      failure: classifyClaudeFailure({
+        stderr: command.error,
+        exitCode: -1,
+        receivedTerminalEvent: false,
+      }),
       stderr: command.error,
       pid: null,
       pidIdentity: null,
@@ -1333,7 +1344,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       cwd,
       detached: true, // new process group for safe cancellation
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"], // stdin ignored — prompt is passed as CLI arg
+      stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         // Stream subagent (Task) text/thinking so long turns show liveness.
@@ -1342,6 +1353,17 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         CLAUDE_CODE_FORWARD_SUBAGENT_TEXT: "1",
       },
     });
+
+    let stdinError = null;
+    proc.stdin.on("error", (error) => {
+      stdinError = error;
+    });
+    try {
+      proc.stdin.end(String(prompt ?? ""), "utf8");
+    } catch (error) {
+      stdinError = error;
+      proc.stdin.destroy();
+    }
 
     let pidIdentity = null;
     try {
@@ -1380,7 +1402,20 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         if (options.onProgress) options.onProgress(evt);
       }
 
-      const validation = validateTurnCompletion(parser.state, code ?? 1);
+      if (stdinError) {
+        stderr = appendTextTail(
+          stderr,
+          `\nFailed to write Claude prompt to stdin: ${stdinError.message}`,
+          MAX_STDERR_BYTES
+        );
+      }
+      let validation = validateTurnCompletion(parser.state, code ?? 1);
+      if (stdinError && validation.status !== "failed") {
+        validation = {
+          status: "failed",
+          warning: "Claude prompt delivery through stdin failed.",
+        };
+      }
       const modelEvents = [...parser.state.modelEvents];
       const finalModel = parser.state.finalModel;
       const contextWindow = parser.state.contextWindow;
@@ -1391,6 +1426,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
               finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
               finalMessageHasAuthSignal: parser.state.hasTerminalAuthSignal,
               stderr,
+              exitCode: code ?? 1,
+              receivedTerminalEvent: parser.state.receivedTerminalEvent,
             })
           : null;
       if (
@@ -1444,7 +1481,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalModel: null,
         contextWindow: null,
         modelEvents: [],
-        failure: classifyClaudeFailure({ stderr: err.message }),
+        failure: classifyClaudeFailure({
+          stderr: err.message,
+          exitCode: -1,
+          receivedTerminalEvent: false,
+        }),
         stderr: err.message,
         pid: proc.pid,
         pidIdentity,

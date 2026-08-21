@@ -46,7 +46,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.0
 codex plugin add cc@cbepx
 ```
 
@@ -59,8 +59,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.5.4 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.5.4/cc-plugin-codex-1.5.4.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.0 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.0/cc-plugin-codex-1.6.0.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -200,6 +200,8 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`). Aliases are resolved by Claude Code; a full ID pins a version. |
 | `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable) |
 | `--prompt-file <path>` | Read task description from a file |
+| `--view-state on-terminal` | Mark the foreground terminal outcome as viewed |
+| `--view-state defer` | Leave the terminal outcome unread for later inspection |
 | `--wait-timeout-ms <ms>` | Foreground observer timeout before returning a retrievable job |
 | `--timeout-ms <ms>` | Deprecated alias for `--wait-timeout-ms` |
 
@@ -278,6 +280,8 @@ All review and rescue commands support `--background`. Background jobs are track
 5. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
 6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
 
+Job inspection can also reconcile stale `queued`, `running`, or `cancelling` records. It only terminates an orphaned owned process after its recorded PID identity matches; healthy active jobs are left unchanged. `$cc:result` and JSON status access may additionally record that a terminal result was viewed.
+
 **Typical background flow:**
 
 ```text
@@ -306,6 +310,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 - **Token cost.** Every Ctrl+C triggers a Claude invocation. This can drain usage limits quickly if you stop often.
 - **15-minute timeout.** The gate has a hard timeout. If Claude doesn't respond, the stop is allowed.
 - **Skip-on-no-edits.** The gate computes a working-tree fingerprint baseline and skips review when the last Codex turn made no net edits.
+- **Requires a recorded user turn.** If the UserPromptSubmit hook did not record a baseline for this session, the gate skips review instead of reviewing unrelated or headless work.
 - **Not in nested sessions.** Child sessions (e.g., rescue subagents) suppress the gate to avoid feedback loops.
 
 **Only enable when you're actively monitoring the session.**
@@ -336,7 +341,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.0
 codex plugin add cc@cbepx
 ```
 
@@ -357,8 +362,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.5.4 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.5.4/cc-plugin-codex-1.5.4.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.0 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.0/cc-plugin-codex-1.6.0.tgz install
 ```
 
 After install, run:
@@ -388,7 +393,7 @@ $cc:setup
 Re-run the fork marketplace install flow, pinned to the release you want:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.5.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.0
 codex plugin add cc@cbepx
 ```
 

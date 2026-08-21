@@ -51,6 +51,8 @@ const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
 const STOP_REVIEW_SUCCESS_NOTE = "Claude Code stop-time review passed.";
 const STOP_REVIEW_NO_EDIT_NOTE =
   "Claude Code stop-time review skipped: the most recent turn made no net edits.";
+const STOP_REVIEW_NO_BASELINE_NOTE =
+  "Claude Code stop-time review skipped: no user turn was recorded for this Codex session.";
 
 function emitDecision(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -268,10 +270,22 @@ function evaluateTurnEditGate(cwd, workspaceRoot, sessionId) {
   }
 
   const baseline = readTurnBaseline(workspaceRoot, sessionId);
-  if (!baseline?.fingerprint) {
+  if (!baseline) {
+    return {
+      shouldSkipReview: true,
+      skipStatus: "skipped_no_turn_baseline",
+      skipNote: STOP_REVIEW_NO_BASELINE_NOTE,
+      reason: "No turn baseline was recorded for this session.",
+      baseline,
+      current: null,
+    };
+  }
+  if (!baseline.fingerprint) {
     return {
       shouldSkipReview: false,
-      reason: "No turn baseline was recorded for this session.",
+      reason: baseline.captureError
+        ? `Turn-baseline capture failed: ${baseline.captureError}`
+        : "Turn baseline has no usable fingerprint.",
       baseline,
       current: null,
     };
@@ -372,13 +386,13 @@ async function main() {
   };
   if (turnEditGate.shouldSkipReview) {
     persistFinal({
-      status: "skipped_no_turn_edits",
+      status: turnEditGate.skipStatus ?? "skipped_no_turn_edits",
       reason: turnEditGate.reason,
       claudeInvoked: false,
       runningTaskNote,
       ...fingerprintFields,
     });
-    logNote(STOP_REVIEW_NO_EDIT_NOTE);
+    logNote(turnEditGate.skipNote ?? STOP_REVIEW_NO_EDIT_NOTE);
     logNote(runningTaskNote);
     return;
   }

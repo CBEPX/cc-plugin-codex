@@ -1,6 +1,6 @@
 {
   "name": "cc-plugin-codex",
-  "version": "1.5.4",
+  "version": "1.6.0",
   "description": "Claude Code Plugin for Codex (CBEPX fork)",
   "type": "module",
   "author": {
@@ -61,7 +61,7 @@
     "test": "node --import ./tests/test-env.mjs --test tests/*.test.mjs",
     "test:coverage": "c8 --all --include='scripts/**/*.mjs' --include='hooks/**/*.mjs' --reporter=text --reporter=json-summary --reporter=lcov --reports-dir=reports/coverage --check-coverage --lines=89 --statements=89 --branches=79 --functions=96 node --import ./tests/test-env.mjs --test tests/*.test.mjs tests/integration/*.test.mjs tests/e2e/*.test.mjs",
     "test:cross-platform": "node --import ./tests/test-env.mjs --test tests/args.test.mjs tests/cancel-command.test.mjs tests/changelog.test.mjs tests/claude-cli.test.mjs tests/fs.test.mjs tests/install-hooks.test.mjs tests/mutation-config.test.mjs tests/plugin-install-guard.test.mjs tests/process.test.mjs tests/prompts.test.mjs tests/render.test.mjs tests/sandbox-modes.test.mjs tests/skills-contracts.test.mjs tests/structured-output.test.mjs tests/version-sync.test.mjs",
-    "test:lifecycle-contract": "node --import ./tests/test-env.mjs --test --test-name-pattern=\"keeps a running job while its owning worker is alive|falls back to the identity-checked Claude PID|terminates a live Claude child|bounds Windows Claude child cleanup|clears a recycled Claude child PID|clears an identity-unavailable Claude child|reports cancel_failed when a live Claude child|tracks the worker separately|logs when worker identity is unavailable|does not bypass a terminal writer|ignores progress after its job file disappears\" tests/state.test.mjs tests/tracked-jobs.test.mjs",
+    "test:lifecycle-contract": "node --import ./tests/test-env.mjs --test --test-name-pattern=\"keeps a running job while its owning worker is alive|falls back to the identity-checked Claude PID|terminates a live Claude child|waits briefly for a signalled Claude child|bounds Windows Claude child cleanup|clears a recycled Claude child PID|clears an identity-unavailable Claude child|reports cancel_failed when a live Claude child|tracks the worker separately|logs when worker identity is unavailable|does not bypass a terminal writer|ignores progress after its job file disappears\" tests/state.test.mjs tests/tracked-jobs.test.mjs",
     "test:integration": "node --import ./tests/test-env.mjs --test tests/integration/*.test.mjs",
     "test:mutation": "npm run test:mutation:pr",
     "test:mutation:pr": "npm run test:mutation:critical && npm run test:mutation:shard:managed && npm run test:mutation:shard:installer",

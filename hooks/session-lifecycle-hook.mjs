@@ -22,6 +22,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
+import { detectExternalHostOrigin } from "./lib/host-origin.mjs";
 import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
 import { terminateProcessTreeIfIdentityMatches } from "../scripts/lib/process.mjs";
 import {
@@ -341,7 +342,9 @@ function handleSessionStart(input) {
       reportLifecycleFailure("SessionStart", error);
     }
     if (workspaceRoot) {
-      setCurrentSession(workspaceRoot, input.session_id);
+      setCurrentSession(workspaceRoot, input.session_id, {
+        hostOrigin: detectExternalHostOrigin(),
+      });
     }
   }
 }

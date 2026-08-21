@@ -426,6 +426,38 @@ describe("createJobProgressUpdater", () => {
 // ---------------------------------------------------------------------------
 
 describe("runTrackedJob", () => {
+  it("uses the spawn-safe identity probe for its current worker", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-spawn-safe-worker-identity",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "spawn-safe worker identity",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await runTrackedJob(
+        job,
+        async () => {
+          assert.equal(
+            readJobFile(repoDir, job.id).workerPidIdentity,
+            "spawn-safe-identity"
+          );
+          return { exitStatus: 0, rendered: "finished" };
+        },
+        {
+          getProcessIdentityImpl: () => "generic-identity",
+          getSpawnedProcessIdentityImpl: () => "spawn-safe-identity",
+        }
+      );
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("tracks the worker separately from the cancellable Claude process", async () => {
     const repoDir = createTempGitRepo();
     const job = {

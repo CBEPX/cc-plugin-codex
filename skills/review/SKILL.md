@@ -41,9 +41,10 @@ Execution mode rules:
   - Recommend waiting only when the review is clearly tiny, roughly 1-2 files total and no sign of a broader directory-sized change.
   - In every other case, including unclear size, recommend background.
   - When in doubt, run the review instead of declaring that there is nothing to review.
-- Then use `AskUserQuestion` exactly once with two options, putting the recommended option first and suffixing its label with `(Recommended)`:
+- Then ask the user once which execution mode to use, offering two options with the recommended one first and its label suffixed `(Recommended)`:
   - `Wait for results`
   - `Run in background`
+- Use `request_user_input` only when this thread actually has one. If an interactive thread has no question tool, ask in the reply and stop. In a non-interactive thread, proceed with the recommended mode; never spin waiting for a picker.
 
 Argument handling:
 - Preserve the user's arguments exactly.
@@ -57,7 +58,8 @@ Argument handling:
 
 Foreground flow:
 - Run:
-  `node "<plugin-root>/scripts/claude-companion.mjs" review --view-state on-success <arguments with --wait/--background removed>`
+  `node "<plugin-root>/scripts/claude-companion.mjs" review --view-state on-terminal <arguments with --wait/--background removed>`
+- Only when the shell tool schema and active policy permit escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` If a higher-priority policy forbids escalation, obey it and surface any network denial. Do not enable or change global network access, and do not first try the companion command in the default network-disabled sandbox.
 - Foreground review belongs to the main Codex thread. Do not spawn a review subagent, do not invoke a generic review-runner role, and do not proxy this foreground path through any background worker abstraction.
 - Do not fall back to raw `claude`, `claude-code`, `claude review`, `bash -lc ...claude...`, or any other direct Claude CLI syntax when the companion path is available. The foreground syntax contract here is the resolved companion command above, not a hand-rolled Claude invocation.
 - If the resolved companion command fails, surface that failure. Do not silently retry foreground review through a different CLI shape, a generic review runner, or a custom shell wrapper.
@@ -91,6 +93,7 @@ Background flow:
   - execute:
     `node "<plugin-root>/scripts/claude-companion.mjs" review --cwd "<workspaceRoot>" --view-state defer <arguments with --wait/--background removed>`
   - run that command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`
+  - only when the shell tool schema and active policy permit escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` If a higher-priority policy forbids escalation, obey it and surface any network denial. Do not enable or change global network access, and do not first try the companion command in the default network-disabled sandbox
   - If the shell tool returns a session id, keep polling that same session until the companion command exits.
   - Exit code 0 is the only successful completion.
   - Exit code 124 means the job is still running; return the companion output without claiming it finished.

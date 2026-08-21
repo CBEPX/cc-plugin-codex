@@ -26,7 +26,7 @@ Routing controls:
 - Treat `--cwd`, `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
 - Preserve the parent helper's exact non-empty `workspaceRoot` as `--cwd "<workspaceRoot>"`; never substitute the plugin root or the child's default working directory.
 - Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku and fable.
-- `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
+- `--view-state on-terminal` means the user will see this companion result in the current turn, so the companion may mark any terminal outcome viewed.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.
@@ -47,6 +47,7 @@ Task defaults:
 - If the tool output includes stderr progress chatter and a final stdout-style result, ignore the progress chatter and preserve only the final stdout-equivalent result text.
 - Return the stdout of the `task` command exactly as-is.
 - Run the companion command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`.
+- Only when the shell tool schema and active policy permit escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested task.` If a higher-priority policy forbids escalation, obey it and surface any network denial. Do not enable or change global network access, and do not first try the companion command in the default network-disabled sandbox.
 - If the shell tool returns a session id, keep polling that same session until the companion command exits.
 - Exit code 0 is the only successful completion.
 - Exit code 124 means the job is still running; return the companion output without claiming it finished.

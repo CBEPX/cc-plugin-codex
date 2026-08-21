@@ -76,7 +76,7 @@ Subagent launch:
 - If it returns an empty `ownerSessionId`, omit `--owner-session-id` entirely. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
 - Add an internal companion routing flag that reflects whether the user will see this result in the current turn:
-  - Foreground rescue must add `--view-state on-success`
+  - Foreground rescue must add `--view-state on-terminal`
   - Background rescue must add `--view-state defer`
 - Any user-supplied `--model` flag is for the Claude companion only and must be forwarded unchanged to `task`.
 - If that helper returns a non-empty `parentThreadId`, pass it into the child prompt as the parent thread id for one-shot completion notification.
@@ -122,6 +122,7 @@ Subagent launch:
   - identify the child as a transient forwarding worker for Claude Code rescue
   - include exactly one shell command to run
   - run that command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`
+  - only when the shell tool schema and active policy permit escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested task.` If a higher-priority policy forbids escalation, obey it and surface any network denial. Do not enable or change global network access, and do not first try the companion command in the default network-disabled sandbox
   - If the shell tool returns a session id, keep polling that same session until the companion command exits.
   - Exit code 0 is the only successful completion.
   - Exit code 124 means the job is still running; return the companion output without claiming it finished.

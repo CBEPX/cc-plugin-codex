@@ -18,8 +18,9 @@ Foreground contract:
 - Strip `--wait` and `--background` before building the companion command.
 - Keep the shell tool in the active user workspace; do not set its working directory to the plugin path.
 - Foreground command:
-  - `review --view-state on-success ...`
-  - `adversarial-review --view-state on-success ...`
+  - `review --view-state on-terminal ...`
+  - `adversarial-review --view-state on-terminal ...`
+- Only when the shell tool schema and active policy permit escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` If a higher-priority policy forbids escalation, obey it and surface any network denial. Do not enable or change global network access, and do not first try the companion command in the default network-disabled sandbox.
 - Return companion stdout faithfully and do not add review execution commentary around it.
 
 Background contract:
@@ -37,6 +38,7 @@ Background contract:
   - ignore stderr progress chatter such as `[cc] ...`
   - do not inspect the repo or perform the review itself
   - run the companion command in the foreground; do not add shell backgrounding such as `&`, `nohup`, or detached `spawn`
+  - only when the shell tool schema and active policy permit escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` If a higher-priority policy forbids escalation, obey it and surface any network denial. Do not enable or change global network access, and do not first try the companion command in the default network-disabled sandbox
   - If the shell tool returns a session id, keep polling that same session until the companion command exits.
   - Exit code 0 is the only successful completion.
   - Exit code 124 means the job is still running; return the companion output without claiming it finished.

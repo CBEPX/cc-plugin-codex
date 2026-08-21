@@ -10,12 +10,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
+import { detectExternalHostOrigin } from "./lib/host-origin.mjs";
 import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
 import {
   getConfig,
+  getCurrentSessionMarker,
   listJobs,
-  patchJob,
+  setCurrentSession,
   TERMINAL_JOB_STATUSES,
+  transitionJob,
   writeTurnBaseline,
 } from "../scripts/lib/state.mjs";
 import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
@@ -83,9 +86,13 @@ function selectUnreadTerminalJobs(workspaceRoot, sessionId) {
 function markJobsNotified(workspaceRoot, jobs) {
   const timestamp = nowIso();
   for (const job of jobs) {
-    patchJob(workspaceRoot, job.id, {
-      notifiedAt: timestamp,
-    });
+    try {
+      transitionJob(workspaceRoot, job.id, [job.status], job.status, {
+        notifiedAt: timestamp,
+      });
+    } catch {
+      // Notification state is best-effort; still surface the terminal result.
+    }
   }
 }
 
@@ -101,8 +108,18 @@ function captureTurnBaseline(workspaceRoot, sessionId, cwd) {
       capturedAt: nowIso(),
       fingerprint,
     });
-  } catch {
-    // Baseline capture is best-effort. If it fails, Stop falls back to running review.
+  } catch (error) {
+    try {
+      writeTurnBaseline(workspaceRoot, sessionId, {
+        cwd,
+        workspaceRoot,
+        capturedAt: nowIso(),
+        fingerprint: null,
+        captureError: error instanceof Error ? error.message : String(error),
+      });
+    } catch {
+      // Baseline capture is best-effort. A missing record also keeps Stop fail-open.
+    }
   }
 }
 
@@ -124,6 +141,16 @@ async function main() {
   }
 
   const config = getConfig(workspaceRoot);
+  try {
+    const currentSession = getCurrentSessionMarker(workspaceRoot);
+    if (!currentSession || currentSession.sessionId === sessionId) {
+      setCurrentSession(workspaceRoot, sessionId, {
+        hostOrigin: detectExternalHostOrigin(),
+      });
+    }
+  } catch {
+    // Best effort: an invalid session id must not fail a user prompt.
+  }
   if (config.stopReviewGate) {
     captureTurnBaseline(workspaceRoot, sessionId, cwd);
   }
