@@ -36,6 +36,7 @@ import {
   casJobStatus,
   setCurrentSession,
   getCurrentSession,
+  getCurrentSessionMarker,
   clearCurrentSession,
   markSessionCleanupPending,
   listPendingSessionCleanups,
@@ -1204,6 +1205,16 @@ describe("current session marker", () => {
     assert.equal(getCurrentSession(repoDir), sessionId);
   });
 
+  it("stores the external host origin without changing the session fallback", () => {
+    setCurrentSession(repoDir, sessionId, { hostOrigin: "claude-code" });
+
+    assert.equal(getCurrentSession(repoDir), sessionId);
+    assert.deepEqual(getCurrentSessionMarker(repoDir), {
+      sessionId,
+      hostOrigin: "claude-code",
+    });
+  });
+
   it("clears the current session id", () => {
     setCurrentSession(repoDir, sessionId);
     clearCurrentSession(repoDir, sessionId);
@@ -1713,16 +1724,18 @@ describe("reapStaleJobs", () => {
     });
     backdateJob(id, staleTimestamp());
     const terminated = [];
+    let childAlive = true;
 
     const result = reapStaleJobs(
       PROJECT_CWD,
       [readJobFile(PROJECT_CWD, id)],
       {
         platform: "linux",
-        isProcessAliveImpl: (pid) => pid === claudePid,
+        isProcessAliveImpl: (pid) => pid === claudePid && childAlive,
         getProcessIdentityImpl: () => "worker-identity",
         terminateProcessTreeIfIdentityMatchesImpl: (pid, identity) => {
           terminated.push([pid, identity]);
+          childAlive = false;
           return { attempted: true, delivered: true };
         },
       }
@@ -1732,6 +1745,84 @@ describe("reapStaleJobs", () => {
     assert.equal(result[0].status, "failed");
     assert.equal(result[0].pid, null);
     assert.equal(result[0].pidIdentity, null);
+  });
+
+  it("retains Claude child cleanup handles when signal delivery does not stop it", () => {
+    const id = "test-reap-dead-worker-live-child-after-signal";
+    const claudePid = 11119;
+    const workerPid = 22230;
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: claudePid,
+      pidIdentity: "claude-identity",
+      workerPid,
+      workerPidIdentity: "worker-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "linux",
+        isProcessAliveImpl: (pid) => pid === claudePid,
+        getProcessIdentityImpl: () => "worker-identity",
+        terminateProcessTreeIfIdentityMatchesImpl: () => ({
+          attempted: true,
+          delivered: true,
+        }),
+        childExitWaitMs: 0,
+      }
+    );
+
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].pid, claudePid);
+    assert.equal(result[0].pidIdentity, "claude-identity");
+    assert.match(result[0].errorMessage, /manual cleanup/i);
+  });
+
+  it("waits briefly for a signalled Claude child to exit before retaining handles", () => {
+    const id = "test-reap-dead-worker-child-exits-after-signal";
+    const claudePid = 11120;
+    const workerPid = 22231;
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: claudePid,
+      pidIdentity: "claude-identity",
+      workerPid,
+      workerPidIdentity: "worker-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+    let childChecks = 0;
+
+    const result = reapStaleJobs(
+      PROJECT_CWD,
+      [readJobFile(PROJECT_CWD, id)],
+      {
+        platform: "linux",
+        isProcessAliveImpl: (pid) => {
+          if (pid !== claudePid) return false;
+          childChecks += 1;
+          return childChecks < 3;
+        },
+        getProcessIdentityImpl: () => "worker-identity",
+        terminateProcessTreeIfIdentityMatchesImpl: () => ({
+          attempted: true,
+          delivered: true,
+        }),
+        childExitWaitMs: 1_000,
+        sleepSyncImpl: () => {},
+      }
+    );
+
+    assert.equal(childChecks, 3);
+    assert.equal(result[0].pid, null);
+    assert.equal(result[0].pidIdentity, null);
+    assert.doesNotMatch(result[0].errorMessage, /manual cleanup/i);
   });
 
   it("bounds Windows Claude child cleanup to the reaper identity timeout", () => {
@@ -2314,6 +2405,8 @@ describe("reapStaleJobs", () => {
       status: "running",
       pid: process.pid,
       pidIdentity: "stored-identity",
+      workerPid: process.pid,
+      workerPidIdentity: "stored-identity",
       createdAt: nowIso(),
     });
     backdateJob(id, new Date(Date.now() - 301_000).toISOString());
@@ -2340,6 +2433,8 @@ describe("reapStaleJobs", () => {
     assert.equal(result[0].status, "failed");
     assert.equal(result[0].pid, process.pid);
     assert.equal(result[0].pidIdentity, "stored-identity");
+    assert.equal(result[0].workerPid, null);
+    assert.equal(result[0].workerPidIdentity, null);
     assert.equal(result[0].reapedUnverifiable, true);
     assert.match(result[0].errorMessage, /identity remained unverifiable/i);
   });

@@ -355,6 +355,32 @@ describe("enrichJob", () => {
     assert.match(enriched.elapsed, /\d+m/);
   });
 
+  it("reports exact active-job progress freshness from the newest known activity", () => {
+    const repoDir = createTempGitRepo();
+    const logFile = resolveJobLogFile(repoDir, "j-progress-age");
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.writeFileSync(logFile, "[2026-04-03T10:00:04.000Z] Working.\n", "utf8");
+    const logTime = new Date("2026-04-03T10:00:05.000Z");
+    fs.utimesSync(logFile, logTime, logTime);
+
+    try {
+      const enriched = enrichJob(
+        {
+          id: "j-progress-age",
+          status: "running",
+          workspaceRoot: repoDir,
+          updatedAt: "2026-04-03T10:00:03.000Z",
+        },
+        { now: Date.parse("2026-04-03T10:00:08.250Z") }
+      );
+
+      assert.equal(enriched.lastProgressAt, "2026-04-03T10:00:05.000Z");
+      assert.equal(enriched.progressAgeMs, 3250);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("calculates duration for completed job", () => {
     const start = "2024-01-01T10:00:00Z";
     const end = "2024-01-01T10:05:30Z";

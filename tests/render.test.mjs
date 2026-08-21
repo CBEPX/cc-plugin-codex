@@ -473,6 +473,8 @@ describe("renderStatusReport", () => {
           kindLabel: "review",
           startedAt: "2026-04-02T19:00:00.000Z",
           elapsed: "2m 30s",
+          lastProgressAt: "2026-04-02T19:02:25.000Z",
+          progressAgeMs: 5000,
           updatedAt: "2026-04-02T19:02:30.000Z",
         },
       ],
@@ -501,11 +503,13 @@ describe("renderStatusReport", () => {
       needsReview: false,
     };
     const output = renderStatusReport(report);
-    assert.ok(output.startsWith("| Job | Kind | Status | Phase | Started | Ended | Elapsed/Duration | Summary | Actions |"));
+    assert.ok(output.startsWith("| Job | Kind | Status | Phase | Started | Ended | Elapsed/Duration | Last Progress | Progress Age (ms) | Summary | Actions |"));
     assert.ok(output.includes("`$cc:status j1`"));
     assert.ok(output.includes("`$cc:cancel j1`"));
     assert.ok(output.includes("`$cc:result j2`"));
     assert.ok(output.includes("2026-04-02T19:00:00.000Z"));
+    assert.ok(output.includes("2026-04-02T19:02:25.000Z"));
+    assert.ok(output.includes("5000"));
     assert.ok(output.indexOf("j1") < output.indexOf("j2"));
     assert.ok(output.indexOf("j2") < output.indexOf("j3"));
   });
@@ -602,9 +606,13 @@ describe("renderJobStatusReport", () => {
       kindLabel: "review",
       startedAt: "2026-04-02T19:00:00.000Z",
       elapsed: "5s",
+      lastProgressAt: "2026-04-02T19:00:04.000Z",
+      progressAgeMs: 1000,
     };
     const output = renderJobStatusReport(job);
     assert.ok(output.includes("| Elapsed | 5s |"));
+    assert.ok(output.includes("| Last progress | 2026-04-02T19:00:04.000Z |"));
+    assert.ok(output.includes("| Progress age (ms) | 1000 |"));
     assert.ok(output.includes("| Cancel | `$cc:cancel j2` |"));
   });
 

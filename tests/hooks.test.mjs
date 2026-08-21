@@ -251,6 +251,7 @@ function enableReviewGate(testEnv) {
     `${JSON.stringify({ version: 1, stopReviewGate: true }, null, 2)}\n`,
     "utf8"
   );
+  writeStaleTurnBaseline(testEnv, "hook-session");
 }
 
 function readCurrentSessionMarker(testEnv) {
@@ -318,6 +319,12 @@ function writeTurnBaselineSnapshot(testEnv, sessionId, fingerprint) {
     ) + "\n",
     "utf8"
   );
+}
+
+function writeStaleTurnBaseline(testEnv, sessionId) {
+  writeTurnBaselineSnapshot(testEnv, sessionId, {
+    signature: "stale-baseline",
+  });
 }
 
 describe("hooks", () => {
@@ -447,6 +454,92 @@ describe("hooks", () => {
         snapshot.baselineFingerprint?.signature,
         snapshot.currentFingerprint?.signature
       );
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook skips Claude when no user turn was recorded", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(stateDir, "config.json"),
+        JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
+        "utf8"
+      );
+      const argsFile = path.join(testEnv.rootDir, "claude-args.json");
+
+      const result = runHook(
+        STOP_HOOK,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "headless-session",
+          last_assistant_message: "review me",
+        },
+        { ...testEnv.env, CLAUDE_ARGS_FILE: argsFile }
+      );
+
+      assert.equal(result.stdout.trim(), "");
+      assert.match(result.stderr, /no user turn was recorded/i);
+      assert.equal(fs.existsSync(argsFile), false);
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "skipped_no_turn_baseline");
+      assert.equal(snapshot.claudeInvoked, false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("records baseline capture failures and lets Stop run the review", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      enableReviewGate(testEnv);
+      runHook(
+        UNREAD_HOOK,
+        [],
+        {
+          hook_event_name: "UserPromptSubmit",
+          cwd: testEnv.workspaceDir,
+          session_id: "capture-failed-session",
+          prompt: "edit something",
+        },
+        {
+          ...testEnv.env,
+          PATH: testEnv.binDir,
+        }
+      );
+
+      const baseline = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+            "turn-baseline.capture-failed-session.json"
+          ),
+          "utf8"
+        )
+      );
+      assert.equal(baseline.fingerprint, null);
+      assert.match(baseline.captureError, /git/i);
+
+      const result = runHook(
+        STOP_HOOK,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "capture-failed-session",
+          last_assistant_message: "review me",
+        },
+        testEnv.env
+      );
+      assert.equal(result.stdout.trim(), "");
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "allow");
+      assert.equal(snapshot.claudeInvoked, true);
     } finally {
       cleanupHookEnvironment(testEnv);
     }
@@ -1364,6 +1457,50 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
     }
   });
 
+  it("session start stamps Claude Code as the external host origin", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      /** @type {NodeJS.ProcessEnv} */
+      const env = { ...testEnv.env, CLAUDECODE: "1" };
+      delete env[SESSION_ID_ENV];
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "cc-thread" },
+        env
+      );
+
+      assert.equal(readCurrentSessionMarker(testEnv).hostOrigin, "claude-code");
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("session start leaves external host origin unset for plain Codex", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      /** @type {NodeJS.ProcessEnv} */
+      const env = { ...testEnv.env };
+      delete env.CLAUDECODE;
+      delete env.CLAUDE_CODE_ENTRYPOINT;
+      delete env[SESSION_ID_ENV];
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "plain-session" },
+        env
+      );
+
+      const marker = readCurrentSessionMarker(testEnv);
+      assert.equal(marker.sessionId, "plain-session");
+      assert.equal("hostOrigin" in marker, false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
   it("session start exports the Claude transcript path for transfer", () => {
     const testEnv = createHookEnvironment();
 
@@ -1466,6 +1603,7 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
         "utf8"
       );
+      writeStaleTurnBaseline(testEnv, "hook-session");
 
       const result = runHook(
         STOP_HOOK,
@@ -1510,6 +1648,7 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
         "utf8"
       );
+      writeStaleTurnBaseline(testEnv, "hook-session");
 
       const result = runHook(
         STOP_HOOK,
@@ -1557,6 +1696,7 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
         "utf8"
       );
+      writeStaleTurnBaseline(testEnv, "hook-session");
 
       const result = runHook(
         STOP_HOOK,
@@ -1703,6 +1843,7 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
         "utf8"
       );
+      writeStaleTurnBaseline(testEnv, "hook-session");
 
       const result = runHook(
         STOP_HOOK,
@@ -1742,6 +1883,7 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
         "utf8"
       );
+      writeStaleTurnBaseline(testEnv, "hook-session");
       writeStateJob(testEnv, "running-review-job", {
         id: "running-review-job",
         status: "running",

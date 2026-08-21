@@ -305,13 +305,13 @@ function formatStatusDuration(job) {
 
 function renderStatusTable(rows) {
   const lines = [
-    "| Job | Kind | Status | Phase | Started | Ended | Elapsed/Duration | Summary | Actions |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Job | Kind | Status | Phase | Started | Ended | Elapsed/Duration | Last Progress | Progress Age (ms) | Summary | Actions |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
 
   for (const job of rows) {
     lines.push(
-      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(formatJobTimestamp(job.startedAt))} | ${escapeMarkdownCell(formatJobTimestamp(job.completedAt))} | ${escapeMarkdownCell(formatStatusDuration(job))} | ${escapeMarkdownCell(job.summary ?? "")} | ${formatStatusActions(job)} |`
+      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(formatJobTimestamp(job.startedAt))} | ${escapeMarkdownCell(formatJobTimestamp(job.completedAt))} | ${escapeMarkdownCell(formatStatusDuration(job))} | ${escapeMarkdownCell(job.lastProgressAt ?? "")} | ${escapeMarkdownCell(job.progressAgeMs ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${formatStatusActions(job)} |`
     );
   }
 
@@ -476,6 +476,8 @@ export function renderJobStatusReport(job, platform = process.platform) {
   pushKeyValueTableRow(lines, "Ended", job.completedAt ?? "");
   if (isPendingJob(job)) pushKeyValueTableRow(lines, "Elapsed", job.elapsed ?? "");
   else pushKeyValueTableRow(lines, "Duration", job.duration ?? job.elapsed ?? "");
+  pushKeyValueTableRow(lines, "Last progress", job.lastProgressAt ?? "");
+  pushKeyValueTableRow(lines, "Progress age (ms)", job.progressAgeMs ?? "");
   const ownerSessionId = resolveOwningSessionId(job);
   const claudeSessionId = resolveClaudeSessionId(job);
   if (claudeSessionId) {

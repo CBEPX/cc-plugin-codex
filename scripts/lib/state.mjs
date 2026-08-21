@@ -294,23 +294,40 @@ export function getConfig(cwd) {
 // Current session marker (fallback when Codex does not propagate env vars)
 // ---------------------------------------------------------------------------
 
-export function setCurrentSession(cwd, sessionId) {
+export function setCurrentSession(cwd, sessionId, options = {}) {
   sanitizeId(sessionId, "session ID");
   ensureStateDir(cwd);
   writeAtomic(resolveCurrentSessionFile(cwd), {
     sessionId,
+    ...(options.hostOrigin ? { hostOrigin: String(options.hostOrigin) } : {}),
     updatedAt: nowIso(),
   });
 }
 
-export function getCurrentSession(cwd) {
+function readCurrentSessionPayload(cwd) {
   const filePath = resolveCurrentSessionFile(cwd);
   try {
     const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    return sanitizeId(payload.sessionId, "session ID");
+    sanitizeId(payload.sessionId, "session ID");
+    return payload;
   } catch {
     return null;
   }
+}
+
+export function getCurrentSession(cwd) {
+  return readCurrentSessionPayload(cwd)?.sessionId ?? null;
+}
+
+export function getCurrentSessionMarker(cwd) {
+  const payload = readCurrentSessionPayload(cwd);
+  if (!payload) {
+    return null;
+  }
+  return {
+    sessionId: payload.sessionId,
+    hostOrigin: typeof payload.hostOrigin === "string" ? payload.hostOrigin : null,
+  };
 }
 
 export function clearCurrentSession(cwd, sessionId = null) {
@@ -547,11 +564,16 @@ function isWithinReapGracePeriod(job, now = Date.now(), graceMs = REAP_GRACE_MS)
 export function reapStaleJobs(cwd, jobs, options = {}) {
   const platform = options.platform ?? process.platform;
   const isProcessAliveImpl = options.isProcessAliveImpl ?? isProcessAlive;
+  const childExitWaitMs = Number.isFinite(options.childExitWaitMs)
+    ? Math.max(0, Math.min(options.childExitWaitMs, 1_000))
+    : 1_000;
+  const sleepSyncImpl = options.sleepSyncImpl ?? sleepSync;
   const getProcessIdentityImpl =
     options.getProcessIdentityImpl ?? getProcessIdentity;
   const terminateProcessTreeIfIdentityMatchesImpl =
     options.terminateProcessTreeIfIdentityMatchesImpl ??
     terminateProcessTreeIfIdentityMatches;
+  const childExitDeadline = Date.now() + childExitWaitMs;
 
   return jobs.map((job) => {
     if (isWithinReapGracePeriod(job)) return job;
@@ -774,13 +796,26 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
           };
         }
       }
-      const childResolved = Boolean(
-        childCleanup?.delivered ||
+      let childResolved = Boolean(
         childCleanup?.reason === "process-missing" ||
-        childCleanup?.reason === "identity-mismatch" ||
-        (childCleanup?.reason === "identity-unavailable" &&
-          !isProcessAliveImpl(job.pid))
+        childCleanup?.reason === "identity-mismatch"
       );
+      if (childCleanup && !childResolved) {
+        do {
+          childResolved = !isProcessAliveImpl(job.pid);
+          if (
+            !childResolved &&
+            childCleanup.delivered &&
+            Date.now() < childExitDeadline
+          ) {
+            sleepSyncImpl(Math.min(50, childExitDeadline - Date.now()));
+          }
+        } while (
+          !childResolved &&
+          childCleanup.delivered &&
+          Date.now() < childExitDeadline
+        );
+      }
       const unresolvedClaudeChild = hasDistinctClaudeChild && !childResolved;
       const nextStatus = job.status === "cancelling"
         ? (identityUnavailableTooLong || unresolvedClaudeChild
@@ -794,6 +829,8 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
             completedAt: nowIso(),
             phase: nextStatus,
             reapedUnverifiable: true,
+            workerPid: null,
+            workerPidIdentity: null,
             ...(nextStatus === "cancel_failed"
               ? { pgid: job.pgid ?? job.pid ?? trackedPid }
               : {}),

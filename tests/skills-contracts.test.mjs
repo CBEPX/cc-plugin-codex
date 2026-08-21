@@ -125,7 +125,7 @@ test("review skills preserve foreground/background routing contracts", () => {
       skill,
       [
         `claude-companion.mjs" ${name} ...`,
-        `${name} --view-state on-success`,
+        `${name} --view-state on-terminal`,
         "background-routing-context --kind review --json",
         `${name} --cwd "<workspaceRoot>" --view-state defer`,
         "--owner-session-id <owner-session-id>",
@@ -214,7 +214,7 @@ test("rescue keeps host execution controls out of the companion task", () => {
       "task-resume-candidate --owner-session-id <owner-session-id> --json",
       "background-routing-context --kind task --json",
       '--cwd "<workspaceRoot>"',
-      "--view-state on-success",
+      "--view-state on-terminal",
       "--view-state defer",
       "--owner-session-id <owner-session-id>",
       "--job-id <reserved-job-id>",
@@ -254,8 +254,8 @@ test("internal runtime references preserve executable routing invariants", () =>
     [
       'node "<plugin-root>/scripts/claude-companion.mjs" review ...',
       'node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review ...',
-      "review --view-state on-success",
-      "adversarial-review --view-state on-success",
+      "review --view-state on-terminal",
+      "adversarial-review --view-state on-terminal",
       "background-routing-context --kind review --json",
       "Never derive the workspace from the plugin root",
       "Never emit an empty routing placeholder such as `--owner-session-id  --job-id`",
@@ -311,4 +311,46 @@ test("setup keeps native hook repair in the companion flow", () => {
     "setup"
   );
   assert.doesNotMatch(setup, /install-hooks\.mjs/i);
+});
+
+test("review skills use only an available Codex question tool", () => {
+  for (const relativePath of [
+    "skills/review/SKILL.md",
+    "skills/adversarial-review/SKILL.md",
+  ]) {
+    const contract = read(relativePath);
+    assert.doesNotMatch(contract, /AskUserQuestion/);
+    assert.match(contract, /request_user_input/);
+    assert.match(contract, /only when this thread actually has one/i);
+    assert.match(contract, /non-interactive thread/i);
+    assert.match(contract, /recommended mode/i);
+  }
+});
+
+test("companion skills keep network escalation narrow and policy-aware", () => {
+  const contracts = [
+    read("skills/review/SKILL.md"),
+    read("skills/adversarial-review/SKILL.md"),
+    read("skills/rescue/SKILL.md"),
+    read("internal-skills/review-runtime/runtime.md"),
+    read("internal-skills/cli-runtime/runtime.md"),
+  ];
+
+  for (const contract of contracts) {
+    assert.match(contract, /sandbox_permissions: "require_escalated"/i);
+    assert.match(contract, /only (?:when|if).*(?:schema|tool).*(?:policy|permit)/i);
+    assert.match(contract, /higher-priority policy/i);
+    assert.match(contract, /do not (?:enable|change).*global network/i);
+    assert.match(contract, /do not first try.*network-disabled sandbox/i);
+  }
+});
+
+test("synthetic task results never use the owning Codex session as a Claude session", () => {
+  const source = read("scripts/claude-companion.mjs");
+  const start = source.indexOf("function buildStoredTaskPayload");
+  const end = source.indexOf("\nfunction renderForegroundTaskStillRunning", start);
+  const implementation = source.slice(start, end);
+
+  assert.match(implementation, /sessionId: job\?\.threadId \?\? null/);
+  assert.doesNotMatch(implementation, /sessionId:.*job\?\.sessionId/);
 });

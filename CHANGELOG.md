@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Expose exact `lastProgressAt` and numeric `progressAgeMs` freshness telemetry for active jobs in JSON and Markdown status output without adding automatic stall detection or termination.
+- Record the external Claude Code host on session markers so headless same-owner delegation can be rejected before creating recursive jobs.
+
+### Changed
+
+- Send Claude prompts through stdin instead of process arguments, including large Unicode review context, while keeping model and effort flags absent when their resolved values are empty.
+- Make `--view-state on-terminal` the canonical foreground result-view contract; retain `on-success` as a warning alias and keep `defer` unchanged. Warn when the deprecated `--timeout-ms` alias is accepted, and require status timeout controls to accompany `--wait`.
+- Document that status/result inspection may identity-check and reconcile owned orphan jobs, while healthy reads and ready `setup --check` runs leave managed files unchanged.
+
+### Fixed
+
+- Trust stderr authentication text only for non-zero Claude exits without a terminal event, preserve structured authentication and rate-limit classification precedence, and surface stdin delivery failures as tracked command failures.
+- Skip stop-review execution when the current turn has no captured baseline, use only the available Codex question tool, and keep network escalation narrow and subordinate to the active sandbox policy.
+- Serialize unread notification updates through same-status transitions, require post-signal liveness proof before clearing Claude child handles, clear stale worker identity metadata at the Windows unverifiable ceiling, and use the spawn-safe identity probe for tracked workers.
+- Keep owning Codex session IDs out of synthetic Claude session fields while retaining legacy stored-job compatibility without rewriting state on disk.
+
 ## v1.5.4
 
 ### Added

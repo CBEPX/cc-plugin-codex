@@ -87,6 +87,28 @@ function formatElapsedDuration(startValue, endValue = null) {
   return `${seconds}s`;
 }
 
+function resolveProgressFreshness(job, logFile, now = Date.now()) {
+  const candidates = [
+    job.lastProgressAt,
+    job.updatedAt,
+    job.startedAt,
+    job.createdAt,
+  ]
+    .map((value) => Date.parse(value ?? ""))
+    .filter(Number.isFinite);
+  try {
+    candidates.push(fs.statSync(logFile).mtimeMs);
+  } catch {}
+  if (candidates.length === 0) {
+    return { lastProgressAt: null, progressAgeMs: null };
+  }
+  const lastProgressMs = Math.max(...candidates);
+  return {
+    lastProgressAt: new Date(lastProgressMs).toISOString(),
+    progressAgeMs: Math.max(0, now - lastProgressMs),
+  };
+}
+
 const ACTIVE_STATUSES = new Set(["running", "cancelling"]);
 
 function inferJobPhase(job, progressPreview = []) {
@@ -115,6 +137,9 @@ export function enrichJob(job, options = {}) {
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
   const managedLogFile =
     job?.workspaceRoot && job?.id ? resolveJobLogFile(job.workspaceRoot, job.id) : null;
+  const progressFreshness = ACTIVE_STATUSES.has(job.status)
+    ? resolveProgressFreshness(job, managedLogFile, options.now ?? Date.now())
+    : { lastProgressAt: null, progressAgeMs: null };
   const enriched = {
     ...job,
     kindLabel: getJobTypeLabel(job),
@@ -123,6 +148,7 @@ export function enrichJob(job, options = {}) {
         ? readJobProgressPreview(managedLogFile, maxProgressLines)
         : [],
     logFile: managedLogFile,
+    ...progressFreshness,
     elapsed: formatElapsedDuration(
       job.startedAt ?? job.createdAt,
       TERMINAL_JOB_STATUSES.has(job.status) ? (job.completedAt ?? null) : null

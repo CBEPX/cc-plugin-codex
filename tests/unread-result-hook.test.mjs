@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../", import.meta.url))
@@ -82,7 +82,7 @@ function readJob(testEnv, jobId) {
   );
 }
 
-function runHook(testEnv, payload) {
+function runHook(testEnv, payload, extraEnv = {}) {
   const result = spawnSync(process.execPath, [HOOK_SCRIPT], {
     cwd: PROJECT_ROOT,
     env: {
@@ -90,6 +90,7 @@ function runHook(testEnv, payload) {
       HOME: testEnv.homeDir,
       USERPROFILE: testEnv.homeDir,
       CODEX_HOME: path.join(testEnv.homeDir, ".codex"),
+      ...extraEnv,
     },
     input: JSON.stringify(payload),
     encoding: "utf8",
@@ -167,6 +168,90 @@ test("injects one-shot context for same-session completed unread jobs and marks 
       prompt: "another request",
     });
     assert.equal(second, "");
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("does not mark a job notified after its terminal status changes", () => {
+  const testEnv = createEnv();
+  try {
+    const job = {
+      id: "task-status-race",
+      sessionId: "session-a",
+      status: "completed",
+      summary: "finished before retry",
+      createdAt: "2026-04-03T10:00:00Z",
+      updatedAt: "2026-04-03T10:01:00Z",
+      completedAt: "2026-04-03T10:01:00Z",
+    };
+    writeJob(testEnv, job);
+    const jobFile = path.join(
+      stateDirFor(testEnv),
+      "jobs",
+      `${job.id}.json`
+    );
+
+    runHook(
+      testEnv,
+      {
+        hook_event_name: "UserPromptSubmit",
+        cwd: testEnv.workspaceDir,
+        session_id: "session-a",
+        prompt: "continue working",
+      },
+      {
+        NODE_OPTIONS: `--import=${pathToFileURL(
+          path.join(PROJECT_ROOT, "tests", "fixtures", "swap-job-after-read.mjs")
+        ).href}`,
+        CC_TEST_SWAP_JOB_FILE: jobFile,
+        CC_TEST_SWAP_JOB_JSON: JSON.stringify({
+          ...job,
+          status: "running",
+          completedAt: null,
+        }),
+      }
+    );
+
+    assert.equal(readJob(testEnv, job.id).status, "running");
+    assert.equal(readJob(testEnv, job.id).notifiedAt, undefined);
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("still announces terminal jobs when notification state is temporarily locked", () => {
+  const testEnv = createEnv();
+  try {
+    const job = {
+      id: "task-lock-race",
+      sessionId: "session-a",
+      status: "completed",
+      summary: "finished during lock contention",
+      createdAt: "2026-04-03T10:00:00Z",
+      updatedAt: "2026-04-03T10:01:00Z",
+      completedAt: "2026-04-03T10:01:00Z",
+    };
+    writeJob(testEnv, job);
+    fs.writeFileSync(
+      path.join(stateDirFor(testEnv), "jobs", `${job.id}.json.lock`),
+      JSON.stringify({
+        pid: process.pid,
+        timestamp: Date.now(),
+        token: "held-by-test",
+      }) + "\n",
+      "utf8"
+    );
+
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue working",
+    });
+
+    assert.match(output, /task-lock-race/);
+    assert.equal(readJob(testEnv, job.id).notifiedAt, undefined);
   } finally {
     cleanupEnv(testEnv);
   }
@@ -252,6 +337,42 @@ test("records a turn baseline for the current session on UserPromptSubmit", () =
     assert.equal(baseline.cwd, testEnv.workspaceDir);
     assert.ok(typeof baseline.fingerprint?.signature === "string");
     assert.ok(typeof baseline.fingerprint?.unstagedDiffHash === "string");
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("does not replace an existing parent marker from an unmarked child prompt", () => {
+  const testEnv = createEnv();
+  try {
+    const stateDir = stateDirFor(testEnv);
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, "current-session.json"),
+      JSON.stringify(
+        {
+          sessionId: "parent-session",
+          hostOrigin: "claude-code",
+          updatedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+
+    runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "child-session",
+      prompt: "continue working",
+    });
+
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(stateDir, "current-session.json"), "utf8")
+    );
+    assert.equal(marker.sessionId, "parent-session");
+    assert.equal(marker.hostOrigin, "claude-code");
   } finally {
     cleanupEnv(testEnv);
   }

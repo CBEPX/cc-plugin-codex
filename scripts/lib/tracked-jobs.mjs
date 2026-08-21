@@ -12,7 +12,11 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { getProcessIdentity, terminateProcessTree } from "./process.mjs";
+import {
+  getProcessIdentity,
+  getSpawnedProcessIdentity,
+  terminateProcessTree,
+} from "./process.mjs";
 import { nowIso, ensureStateDir, getCurrentSession, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
 
 export { nowIso };
@@ -358,8 +362,10 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
 
 export async function runTrackedJob(job, runner, options = {}) {
   const workerPid = process.pid;
-  const getProcessIdentityImpl =
-    options.getProcessIdentityImpl ?? getProcessIdentity;
+  const getWorkerProcessIdentityImpl =
+    options.getSpawnedProcessIdentityImpl ??
+    options.getProcessIdentityImpl ??
+    getSpawnedProcessIdentity;
   const storedJob = readJobFile(job.workspaceRoot, job.id);
   let workerPidIdentity =
     [job, storedJob].find(
@@ -370,7 +376,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     )?.workerPidIdentity ?? null;
   if (!workerPidIdentity) {
     try {
-      workerPidIdentity = getProcessIdentityImpl(workerPid);
+      workerPidIdentity = getWorkerProcessIdentityImpl(workerPid);
     } catch {}
   }
   // ponytail: without a stable worker identity, fall back to the child's

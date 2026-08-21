@@ -15,3 +15,4 @@ Supported arguments: `[job-id]`
 Output:
 - Present the full companion stdout exactly as returned.
 - Do not summarize or condense it.
+- Result inspection records terminal output as viewed and may reconcile stale owned jobs. Process cleanup remains PID-identity checked.
