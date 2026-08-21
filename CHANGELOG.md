@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v1.6.0
+
 ### Added
 
 - Expose exact `lastProgressAt` and numeric `progressAgeMs` freshness telemetry for active jobs in JSON and Markdown status output without adding automatic stall detection or termination.
