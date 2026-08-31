@@ -10,6 +10,7 @@
  *
  * Adapted from codex-companion.mjs:
  * - Uses claude-cli.mjs instead of app-server/broker
+ * - Optional `--guest grok` (or CC_GUEST=grok) runs grok-cli.mjs instead
  * - MODEL_ALIASES: Claude aliases are passed through for Claude Code to resolve
  * - Default model when --model is unset: opus
  * - Default effort by model: opus -> xhigh, sonnet -> high, haiku/fable -> unset
@@ -31,6 +32,7 @@ import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
+import { resolveGuest } from "./lib/guest.mjs";
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
@@ -51,6 +53,15 @@ import {
   pruneStaleSandboxSettings,
   pruneStaleReviewMcpConfigs,
 } from "./lib/claude-cli.mjs";
+import {
+  GROK_READ_ONLY_TOOLS,
+  getGrokAvailability,
+  getGrokAuthStatus,
+  resolveGrokEffort,
+  resolveGrokModel,
+  runGrokReview,
+  runGrokTurn,
+} from "./lib/grok-cli.mjs";
 import {
   createReviewIsolation,
   pruneStaleReviewWorktrees,
@@ -150,10 +161,10 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/claude-companion.mjs setup [--check] [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
-      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--wait-timeout-ms <ms>] [prompt]",
+      "  node scripts/claude-companion.mjs setup [--check] [--guest <claude|grok>] [--enable-review-gate|--disable-review-gate] [--json]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--guest <claude|grok>] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
+      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--guest <claude|grok>] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--guest <claude|grok>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--wait-timeout-ms <ms>] [prompt]",
       "  node scripts/claude-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--poll-interval-ms <ms>] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
@@ -347,6 +358,39 @@ function parseCommandInput(argv, config = {}) {
   });
 }
 
+function resolveCommandGuest(options = {}) {
+  return resolveGuest(options.guest);
+}
+
+function resolveGuestModelAndEffort(guest, options = {}) {
+  if (guest === "grok") {
+    return {
+      model: resolveGrokModel(options.model),
+      effort: resolveGrokEffort(options.effort),
+    };
+  }
+  const requestedModel = normalizeRequestedModel(options.model);
+  const model = resolveDefaultModel(requestedModel);
+  const effort = resolveDefaultEffort(model, options.effort);
+  return { model, effort };
+}
+
+function assertGrokRejectsUserMcp(guest, options = {}) {
+  if (guest !== "grok") {
+    return;
+  }
+  const tools = normalizeUserMcpTools(options["user-mcp-tool"]);
+  if (tools.length > 0 || options["allow-project-mcp-servers"]) {
+    throw new Error(
+      "--user-mcp-tool and --allow-project-mcp-servers are only supported for --guest claude."
+    );
+  }
+}
+
+function guestActorLabel(guest) {
+  return guest === "grok" ? "Grok" : "Claude Code";
+}
+
 function resolveCommandCwd(options = {}) {
   const resolvedCwd = options.cwd
     ? path.resolve(process.cwd(), options.cwd)
@@ -410,6 +454,12 @@ function firstMeaningfulLine(text, fallback) {
 function formatClaudeFailureSummary(failure, fallback) {
   if (failure?.kind === "claude_auth") {
     return "Claude Code authentication failed; run `claude auth login`.";
+  }
+  if (failure?.kind === "grok_auth") {
+    return "Grok authentication failed; run `grok login`.";
+  }
+  if (failure?.kind === "grok_rate_limit") {
+    return "Grok usage limit reached.";
   }
   if (failure?.kind !== "claude_rate_limit") {
     return fallback;
@@ -750,6 +800,29 @@ function ensureClaudeReady(cwd) {
   }
 }
 
+function ensureGrokReady(cwd) {
+  const availability = getGrokAvailability(cwd);
+  if (!availability.available) {
+    throw new Error(
+      "Grok CLI is not installed or is missing required runtime support. Install it, then rerun `$cc:setup --guest grok`."
+    );
+  }
+  const authStatus = getGrokAuthStatus(cwd);
+  if (!authStatus.loggedIn) {
+    throw new Error(
+      "Grok CLI is not authenticated. Run `grok login` and retry."
+    );
+  }
+}
+
+function ensureGuestReady(guest, cwd) {
+  if (guest === "grok") {
+    ensureGrokReady(cwd);
+    return;
+  }
+  ensureClaudeReady(cwd);
+}
+
 function buildSetupDiagnostics(cwd) {
   const pluginInfo = currentPluginCacheInstallInfo();
   let packageVersion = null;
@@ -769,18 +842,34 @@ function buildSetupDiagnostics(cwd) {
 
 function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const guest = options.guest ?? "claude";
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
   const claudeStatus = getClaudeAvailability(cwd);
   const authStatus = getClaudeAuthStatus(cwd);
+  const grokStatus = getGrokAvailability(cwd);
+  const grokAuthStatus = getGrokAuthStatus(cwd);
   const hooksStatus = checkHooksStatus();
   const config = getConfig(workspaceRoot);
+  const guestReady =
+    guest === "grok"
+      ? grokStatus.available && grokAuthStatus.loggedIn
+      : claudeStatus.available && authStatus.loggedIn;
 
   const nextSteps = [];
-  if (!claudeStatus.available) {
-    nextSteps.push("Install Claude Code CLI.");
-  }
-  if (claudeStatus.available && !authStatus.loggedIn) {
-    nextSteps.push("Run `claude auth login`.");
+  if (guest === "grok") {
+    if (!grokStatus.available) {
+      nextSteps.push("Install Grok CLI.");
+    }
+    if (grokStatus.available && !grokAuthStatus.loggedIn) {
+      nextSteps.push("Run `grok login`.");
+    }
+  } else {
+    if (!claudeStatus.available) {
+      nextSteps.push("Install Claude Code CLI.");
+    }
+    if (claudeStatus.available && !authStatus.loggedIn) {
+      nextSteps.push("Run `claude auth login`.");
+    }
   }
   if (!hooksStatus.installed) {
     nextSteps.push(
@@ -805,13 +894,15 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}
   return {
     ready:
       nodeStatus.available &&
-      claudeStatus.available &&
-      authStatus.loggedIn &&
+      guestReady &&
       hooksStatus.installed &&
       hookTrust?.ready !== false,
+    guest,
     node: nodeStatus,
     claude: claudeStatus,
     auth: authStatus,
+    grok: grokStatus,
+    grokAuth: grokAuthStatus,
     hooks: hooksStatus,
     hookTrust,
     checkOnly: Boolean(options.checkOnly),
@@ -828,9 +919,10 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}
 
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "guest"],
     booleanOptions: ["json", "check", "enable-review-gate", "disable-review-gate"]
   });
+  const guest = resolveCommandGuest(options);
 
   if (options["enable-review-gate"] && options["disable-review-gate"]) {
     throw new Error("Choose either --enable-review-gate or --disable-review-gate.");
@@ -883,6 +975,7 @@ async function handleSetup(argv) {
 
   const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust, {
     checkOnly: Boolean(options.check),
+    guest,
   });
   outputResult(
     options.json ? finalReport : renderSetupReport(finalReport),
@@ -1201,7 +1294,174 @@ function renderMcpDiagnostic(report) {
 // Review execution
 // ---------------------------------------------------------------------------
 
+async function executeGrokReviewRun(request) {
+  ensureGrokReady(request.cwd);
+  ensureGitRepository(request.cwd);
+
+  try { pruneStaleReviewWorktrees(request.cwd); } catch {}
+
+  const target = resolveReviewTarget(request.cwd, {
+    base: request.base,
+    scope: request.scope
+  });
+  const focusText = request.focusText?.trim() ?? "";
+  const reviewName = request.reviewName ?? "Review";
+  const actor = guestActorLabel("grok");
+
+  const context = collectReviewContext(request.cwd, target);
+  const prompt =
+    reviewName === "Review"
+      ? buildReviewPrompt(context)
+      : buildAdversarialReviewPrompt(context, focusText);
+  const schema =
+    reviewName === "Review" ? null : readOutputSchema(REVIEW_SCHEMA_PATH);
+  const isolation = createReviewIsolation(
+    reviewName === "Review" ? request.cwd : context.repoRoot,
+    target,
+    { label: reviewName === "Review" ? "review" : "adversarial-review" }
+  );
+  let result;
+  try {
+    result = await runGrokReview(isolation.cwd, prompt, {
+      model: request.model,
+      effort: request.effort,
+      onProgress: request.onProgress,
+      onSpawn: request.onSpawn,
+      jsonSchema: schema ?? undefined,
+    });
+  } finally {
+    isolation.cleanup();
+  }
+
+  const modelFallbacks = normalizeModelFallbacks(result.modelEvents);
+  if (reviewName === "Review") {
+    const payload = {
+      review: reviewName,
+      target,
+      sessionId: result.sessionId,
+      guest: "grok",
+      codex: {
+        status: result.status,
+        warning: result.warning ?? null,
+        stderr: result.stderr,
+        failure: result.failure ?? null,
+        stdout: result.result,
+        requestedModel: result.requestedModel ?? null,
+        finalModel: result.finalModel ?? null,
+        contextWindow: result.contextWindow ?? null,
+        modelFallbacks,
+        parseErrors: result.parseErrors ?? [],
+        unresolvedParseErrors: result.unresolvedParseErrors ?? 0
+      }
+    };
+    const rendered = appendModelFallbackSummary(
+      [
+        `# ${actor} ${reviewName}`,
+        "",
+        `Target: ${target.label}`,
+        "",
+        typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
+        ""
+      ].join("\n"),
+      modelFallbacks
+    );
+    return {
+      exitStatus: resolveClaudeExitStatus(result),
+      threadId: result.sessionId,
+      turnId: null,
+      payload,
+      rendered,
+      summary: formatClaudeFailureSummary(
+        result.failure,
+        firstMeaningfulLine(
+          typeof result.result === "string" ? result.result : "",
+          `${reviewName} completed.`
+        )
+      ),
+      jobTitle: `${actor} ${reviewName}`,
+      jobClass: "review",
+      targetLabel: target.label
+    };
+  }
+
+  const parsed = parseStructuredOutput(
+    typeof result.result === "string" && result.result.trim()
+      ? result.result
+      : result.structuredOutput != null
+        ? JSON.stringify(result.structuredOutput)
+        : typeof result.result === "string"
+          ? result.result
+          : JSON.stringify(result.result),
+    {
+      status: result.status,
+      failureMessage: result.stderr
+    }
+  );
+  if (result.structuredOutput != null) {
+    parsed.parsed = result.structuredOutput;
+    parsed.parseError = null;
+    if (!parsed.rawOutput) {
+      parsed.rawOutput = JSON.stringify(result.structuredOutput);
+    }
+  }
+  const payload = {
+    review: reviewName,
+    target,
+    sessionId: result.sessionId,
+    guest: "grok",
+    context: {
+      repoRoot: context.repoRoot,
+      branch: context.branch,
+      summary: context.summary
+    },
+    codex: {
+      status: result.status,
+      warning: result.warning ?? null,
+      stderr: result.stderr,
+      failure: result.failure ?? null,
+      stdout: typeof result.result === "string" ? result.result : JSON.stringify(result.result),
+      requestedModel: result.requestedModel ?? null,
+      finalModel: result.finalModel ?? null,
+      contextWindow: result.contextWindow ?? null,
+      modelFallbacks,
+      parseErrors: result.parseErrors ?? [],
+      unresolvedParseErrors: result.unresolvedParseErrors ?? 0
+    },
+    result: parsed.parsed,
+    rawOutput: parsed.rawOutput,
+    parseError: parsed.parseError
+  };
+  return {
+    exitStatus: resolveClaudeExitStatus(result),
+    threadId: result.sessionId,
+    turnId: null,
+    payload,
+    rendered: appendModelFallbackSummary(
+      renderReviewResult(parsed, {
+        reviewLabel: reviewName,
+        targetLabel: context.target.label,
+        reasoningSummary: null
+      }),
+      modelFallbacks
+    ),
+    summary: formatClaudeFailureSummary(
+      result.failure,
+      parsed.parsed?.summary ??
+        firstMeaningfulLine(
+          typeof result.result === "string" ? result.result : "",
+          parsed.parseError ?? `${reviewName} finished.`
+        )
+    ),
+    jobTitle: `${actor} ${reviewName}`,
+    jobClass: "review",
+    targetLabel: context.target.label
+  };
+}
+
 async function executeReviewRun(request) {
+  if ((request.guest ?? "claude") === "grok") {
+    return executeGrokReviewRun(request);
+  }
   ensureClaudeReady(request.cwd);
   ensureGitRepository(request.cwd);
 
@@ -1411,18 +1671,21 @@ async function executeReviewRun(request) {
 // Task execution
 // ---------------------------------------------------------------------------
 
-function buildTaskRunMetadata({ prompt, resumeLast = false }) {
+function buildTaskRunMetadata({ prompt, resumeLast = false, guest = "claude" }) {
+  const actor = guestActorLabel(guest);
   if (
     !resumeLast &&
     String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)
   ) {
     return {
-      title: "Claude Code Stop Gate Review",
-      summary: "Stop-gate review of previous Claude turn"
+      title: `${actor} Stop Gate Review`,
+      summary: guest === "grok"
+        ? "Stop-gate review of previous Grok turn"
+        : "Stop-gate review of previous Claude turn"
     };
   }
 
-  const title = resumeLast ? "Claude Code Resume" : "Claude Code Task";
+  const title = resumeLast ? `${actor} Resume` : `${actor} Task`;
   const fallbackSummary = resumeLast ? "Continue previous task" : "Task";
   return {
     title,
@@ -1430,7 +1693,88 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   };
 }
 
+async function executeGrokTaskRun(request) {
+  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
+  ensureGrokReady(request.cwd);
+
+  const taskMetadata = buildTaskRunMetadata({
+    prompt: request.prompt,
+    resumeLast: request.resumeLast,
+    guest: "grok",
+  });
+
+  const grokOptions = {
+    model: request.model ?? undefined,
+    effort: request.effort ?? undefined,
+    onProgress: request.onProgress,
+    onSpawn: request.onSpawn,
+  };
+  if (!request.write) {
+    grokOptions.tools = GROK_READ_ONLY_TOOLS;
+  }
+  if (request.resumeLast && request.resumeSessionId) {
+    grokOptions.resumeSessionId = request.resumeSessionId;
+  }
+  if (!request.prompt && !request.resumeSessionId) {
+    throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
+  }
+
+  const prompt = request.prompt || "Continue where you left off.";
+  const result = await runGrokTurn(workspaceRoot, prompt, grokOptions);
+  const rawOutput =
+    typeof result.finalMessage === "string" ? result.finalMessage : "";
+  const failureMessage = result.stderr ?? "";
+  const modelFallbacks = normalizeModelFallbacks(result.modelEvents);
+  const rendered = appendModelFallbackSummary(
+    renderTaskResult({
+      rawOutput,
+      failureMessage,
+      failure: result.failure ?? null
+    }),
+    modelFallbacks
+  );
+  const payload = {
+    status: result.status,
+    warning: result.warning ?? null,
+    sessionId: result.sessionId,
+    guest: "grok",
+    requestedModel: result.requestedModel ?? null,
+    finalModel: result.finalModel ?? null,
+    contextWindow: result.contextWindow ?? null,
+    modelFallbacks,
+    failure: result.failure ?? null,
+    parseErrors: result.parseErrors ?? [],
+    unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
+    rawOutput,
+    touchedFiles: Array.isArray(result.touchedFiles) ? result.touchedFiles : []
+  };
+
+  return {
+    exitStatus: resolveClaudeExitStatus(result),
+    threadId: result.sessionId,
+    turnId: null,
+    payload,
+    rendered,
+    summary: formatClaudeFailureSummary(
+      result.failure,
+      firstMeaningfulLine(
+        rawOutput,
+        firstMeaningfulLine(
+          failureMessage,
+          `${taskMetadata.title} finished.`
+        )
+      )
+    ),
+    jobTitle: taskMetadata.title,
+    jobClass: "task",
+    write: Boolean(request.write)
+  };
+}
+
 async function executeTaskRun(request) {
+  if ((request.guest ?? "claude") === "grok") {
+    return executeGrokTaskRun(request);
+  }
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
   ensureClaudeReady(request.cwd);
 
@@ -1540,7 +1884,8 @@ async function executeTaskRun(request) {
 // Job management helpers
 // ---------------------------------------------------------------------------
 
-function buildReviewJobMetadata(reviewName, target) {
+function buildReviewJobMetadata(reviewName, target, guest = "claude") {
+  const actor = guestActorLabel(guest);
   return {
     kind:
       reviewName === "Adversarial Review"
@@ -1548,8 +1893,8 @@ function buildReviewJobMetadata(reviewName, target) {
         : "review",
     title:
       reviewName === "Review"
-        ? "Claude Code Review"
-        : `Claude Code ${reviewName}`,
+        ? `${actor} Review`
+        : `${actor} ${reviewName}`,
     summary: `${reviewName} ${target.label}`
   };
 }
@@ -1643,7 +1988,8 @@ function buildReviewRequest({
   reviewName,
   userMcpTools,
   allowProjectMcpServers,
-  markViewedOnTerminal
+  markViewedOnTerminal,
+  guest
 }) {
   return {
     cwd,
@@ -1655,7 +2001,8 @@ function buildReviewRequest({
     reviewName,
     userMcpTools: normalizeUserMcpTools(userMcpTools),
     allowProjectMcpServers: Boolean(allowProjectMcpServers),
-    markViewedOnTerminal
+    markViewedOnTerminal,
+    guest: guest ?? "claude"
   };
 }
 
@@ -1772,7 +2119,8 @@ function buildTaskRequest({
   resumeLast,
   resumeSessionId,
   jobId,
-  markViewedOnTerminal
+  markViewedOnTerminal,
+  guest
 }) {
   return {
     cwd,
@@ -1783,7 +2131,8 @@ function buildTaskRequest({
     resumeLast,
     resumeSessionId,
     jobId,
-    markViewedOnTerminal
+    markViewedOnTerminal,
+    guest: guest ?? "claude"
   };
 }
 
@@ -2340,7 +2689,8 @@ async function handleReviewCommand(argv, config) {
       "view-state",
       "job-id",
       "owner-session-id",
-      "user-mcp-tool"
+      "user-mcp-tool",
+      "guest"
     ],
     repeatableOptions: ["user-mcp-tool"],
     booleanOptions: ["json", "background", "wait", "allow-project-mcp-servers"],
@@ -2348,6 +2698,9 @@ async function handleReviewCommand(argv, config) {
       m: "model"
     }
   });
+
+  const guest = resolveCommandGuest(options);
+  assertGrokRejectsUserMcp(guest, options);
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -2367,9 +2720,8 @@ async function handleReviewCommand(argv, config) {
     Boolean(options.background)
   );
 
-  const requestedModel = normalizeRequestedModel(options.model);
-  const resolvedModel = resolveDefaultModel(requestedModel);
-  const resolvedEffort = resolveDefaultEffort(resolvedModel, options.effort);
+  const { model: resolvedModel, effort: resolvedEffort } =
+    resolveGuestModelAndEffort(guest, options);
 
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     // Validate inside the reservation guard so failures do not leak markers.
@@ -2386,7 +2738,7 @@ async function handleReviewCommand(argv, config) {
         );
       }
     }
-    const metadata = buildReviewJobMetadata(config.reviewName, target);
+    const metadata = buildReviewJobMetadata(config.reviewName, target, guest);
     alignCurrentSessionToOwner(workspaceRoot, ownerSessionId);
 
     const job = createCompanionJob({
@@ -2411,7 +2763,8 @@ async function handleReviewCommand(argv, config) {
         reviewName: config.reviewName,
         userMcpTools,
         allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
-        markViewedOnTerminal
+        markViewedOnTerminal,
+        guest
       });
       const { payload } = enqueueBackgroundReview(cwd, job, request);
       outputCommandResult(
@@ -2437,6 +2790,7 @@ async function handleReviewCommand(argv, config) {
           allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
           onProgress: progress,
           onSpawn,
+          guest,
         }),
       { json: options.json, markViewedOnTerminal }
     );
@@ -2491,6 +2845,7 @@ async function handleTask(argv) {
       "wait-timeout-ms",
       "timeout-ms",
       "poll-interval-ms",
+      "guest",
     ],
     booleanOptions: [
       "json",
@@ -2506,13 +2861,18 @@ async function handleTask(argv) {
     }
   });
 
+  const guest = resolveCommandGuest(options);
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
 
-  const requestedModel = normalizeRequestedModel(options.model);
-  const model = resolveDefaultModel(requestedModel);
-  const resolvedEffort = resolveDefaultEffort(model, options.effort);
-  const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
+  const resolved = resolveGuestModelAndEffort(guest, options);
+  const model = resolved.model;
+  const effort =
+    guest === "grok"
+      ? resolved.effort ?? null
+      : resolved.effort
+        ? resolveEffort(resolved.effort)
+        : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
   const foregroundTimeoutMs = parseWaitTimeoutMilliseconds(options);
   const markViewedOnTerminal = resolveMarkViewedOnTerminal(
@@ -2539,7 +2899,7 @@ async function handleTask(argv) {
   if (!prompt && !resumeLast) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume.");
   }
-  ensureClaudeReady(cwd);
+  ensureGuestReady(guest, cwd);
 
   const write = Boolean(options.write);
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
@@ -2547,7 +2907,8 @@ async function handleTask(argv) {
     assertDelegationAllowed(workspaceRoot, ownerSessionId, "task");
     const taskMetadata = buildTaskRunMetadata({
       prompt,
-      resumeLast
+      resumeLast,
+      guest,
     });
     alignCurrentSessionToOwner(workspaceRoot, ownerSessionId);
 
@@ -2586,7 +2947,8 @@ async function handleTask(argv) {
         resumeLast,
         resumeSessionId,
         jobId: job.id,
-        markViewedOnTerminal
+        markViewedOnTerminal,
+        guest,
       });
       const { payload } = enqueueBackgroundTask(cwd, job, request);
       outputCommandResult(
@@ -2606,7 +2968,8 @@ async function handleTask(argv) {
       resumeLast,
       resumeSessionId,
       jobId: job.id,
-      markViewedOnTerminal
+      markViewedOnTerminal,
+      guest,
     });
     await runForegroundDetachedTask(
       cwd,

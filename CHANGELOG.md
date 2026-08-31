@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Let `$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, and `$cc:setup` run Grok as the guest via `--guest grok` or `CC_GUEST=grok`. The default guest remains Claude; Grok uses `--prompt-file` plus `--output-format json` and does not inherit Claude model aliases or Claude MCP tools.
+
 ## v1.6.1
 
 ### Added
