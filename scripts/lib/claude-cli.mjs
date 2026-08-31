@@ -1113,6 +1113,20 @@ export function createReviewMcpConfig(gitRoot, options = {}) {
   return tmpFile;
 }
 
+export function createStrictMcpConfig(mcpServers = {}) {
+  const dir = path.join(resolvePluginRuntimeRoot(), "mcp");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmpFile = path.join(
+    dir,
+    `cc-mcp-${process.pid}-${Date.now().toString(36)}-${randomBytes(6).toString("hex")}.json`
+  );
+  fs.writeFileSync(tmpFile, JSON.stringify({ mcpServers }), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return tmpFile;
+}
+
 export function cleanupReviewMcpConfig(filePath) {
   if (filePath) {
     try { fs.unlinkSync(filePath); } catch {}

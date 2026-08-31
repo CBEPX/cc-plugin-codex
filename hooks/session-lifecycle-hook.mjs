@@ -16,6 +16,7 @@
  */
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
@@ -42,7 +43,13 @@ import {
 } from "../scripts/lib/session-cleanup.mjs";
 import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 import { TRANSCRIPT_PATH_ENV } from "../scripts/lib/claude-session-transfer.mjs";
+import { resolvePluginStateRoot } from "../scripts/lib/codex-paths.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
+import {
+  listWorkflows,
+  markWorkflowBranchFailure,
+  readWorkflow,
+} from "../scripts/lib/workflows.mjs";
 
 export { SESSION_ID_ENV };
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -279,6 +286,60 @@ function cleanupSessionJobs(workspaceRoot, jobs, trigger, cleanupDeadlineAt) {
   return { jobs: [...updatedJobsById.values()], preparationComplete };
 }
 
+function markSessionWorkflowsRetryable(workspaceRoot, sessionId, cleanupDeadlineAt) {
+  const canonicalRoot = (() => {
+    try {
+      return fs.realpathSync.native(workspaceRoot);
+    } catch {
+      return path.resolve(workspaceRoot);
+    }
+  })();
+  const workspaceHash = createHash("sha256")
+    .update(canonicalRoot)
+    .digest("hex")
+    .slice(0, 12);
+  const workflowsDir = path.join(
+    resolvePluginStateRoot(),
+    workspaceHash,
+    "workflows"
+  );
+  if (!fs.existsSync(workflowsDir)) return;
+
+  for (const listed of listWorkflows(workspaceRoot)) {
+    if (listed.currentOwnerSessionId !== sessionId) continue;
+    const targets = [
+      ...Object.entries(listed.branches ?? {}).flatMap(([branchId, branch]) =>
+        branch.status === "running"
+          ? [{ stage: branch.stage ?? "memo", branchId }]
+          : []
+      ),
+      ...Object.entries(listed.stages ?? {}).flatMap(([stage, state]) =>
+        state.status === "running" ? [{ stage, branchId: null }] : []
+      ),
+    ];
+    for (const target of targets) {
+      if (remainingCleanupMs(cleanupDeadlineAt) < 1) return;
+      const current = readWorkflow(workspaceRoot, listed.id, { mode: listed.mode });
+      const state = target.branchId
+        ? current?.branches?.[target.branchId]
+        : current?.stages?.[target.stage];
+      if (!current || state?.status !== "running") continue;
+      try {
+        markWorkflowBranchFailure(workspaceRoot, current.id, {
+          stage: target.stage,
+          ...(target.branchId ? { branchId: target.branchId } : {}),
+          revision: current.revision,
+          epoch: current.epoch,
+          mode: current.mode,
+          reason: "SESSION_ENDED",
+        });
+      } catch (error) {
+        reportLifecycleFailure("SessionEnd workflow", error);
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Event handlers
 // ---------------------------------------------------------------------------
@@ -370,6 +431,11 @@ function handleSessionEnd(input) {
       workspaceRoot ??= resolveLifecycleWorkspaceRoot(cwd);
       markSessionCleanupPending(workspaceRoot, sessionId);
       cleanupMarkerRecorded = true;
+      markSessionWorkflowsRetryable(
+        workspaceRoot,
+        sessionId,
+        cleanupDeadlineAt
+      );
       const sessionJobs = listStoredJobs(workspaceRoot).filter(
         (job) =>
           job.sessionId === sessionId &&
