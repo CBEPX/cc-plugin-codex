@@ -1183,13 +1183,10 @@ export function transitionJob(
   options = {}
 ) {
   const jobFile = resolveJobFile(cwd, jobId);
-  const lockFile = jobFile + ".lock";
   const expectedList = Array.isArray(expectedStatuses)
     ? expectedStatuses
     : [expectedStatuses];
-  const lockToken = acquireJobLock(lockFile, options);
-
-  try {
+  return withStateFileLock(jobFile, () => {
     const job = JSON.parse(fs.readFileSync(jobFile, "utf8"));
     if (!expectedList.includes(job.status)) {
       return {
@@ -1211,22 +1208,30 @@ export function transitionJob(
       previousStatus: job.status,
       job: updatedJob,
     };
-  } finally {
-    releaseJobLock(lockFile, lockToken);
-  }
+  }, options);
 }
 
 // ---------------------------------------------------------------------------
 // Atomic write helper
 // ---------------------------------------------------------------------------
 
-function writeAtomic(filePath, data) {
+export function writeAtomic(filePath, data) {
   const tmp = filePath + `.tmp.${process.pid}.${Date.now().toString(36)}.${randomBytes(4).toString("hex")}`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });
   fs.renameSync(tmp, filePath);
+}
+
+export function withStateFileLock(filePath, callback, options = {}) {
+  const lockFile = `${filePath}.lock`;
+  const lockToken = acquireJobLock(lockFile, options);
+  try {
+    return callback();
+  } finally {
+    releaseJobLock(lockFile, lockToken);
+  }
 }
 
 // ---------------------------------------------------------------------------

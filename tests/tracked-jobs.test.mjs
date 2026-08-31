@@ -51,6 +51,23 @@ describe("SESSION_ID_ENV", () => {
   });
 });
 
+describe("workflow-linked job records", () => {
+  it("classifies linked work outside generic rescue while preserving workflow metadata", () => {
+    const job = createJobRecord({
+      id: "workflow-child",
+      kind: "task",
+      jobClass: "task",
+      workflowId: "workflow-parent",
+      workflowStage: "memo",
+    }, { sessionId: "owner-session" });
+
+    assert.equal(job.jobClass, "workflow");
+    assert.equal(job.workflowId, "workflow-parent");
+    assert.equal(job.workflowStage, "memo");
+    assert.equal(job.sessionId, "owner-session");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // nowIso (re-exported)
 // ---------------------------------------------------------------------------

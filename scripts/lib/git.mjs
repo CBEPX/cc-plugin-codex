@@ -88,35 +88,12 @@ function hashText(value) {
   return createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 }
 
-function buildUntrackedMetadataFingerprint(repoRoot, relativePaths) {
-  const hash = createHash("sha256");
-  const normalizedPaths = [...relativePaths].sort();
-
-  for (const relativePath of normalizedPaths) {
-    hash.update(relativePath, "utf8");
-    hash.update("\0", "utf8");
-    const absolutePath = path.join(repoRoot, relativePath);
-    try {
-      const stat = fs.statSync(absolutePath);
-      hash.update(String(stat.size), "utf8");
-      hash.update("\0", "utf8");
-      hash.update(String(Math.trunc(stat.mtimeMs)), "utf8");
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        hash.update("ENOENT", "utf8");
-      } else {
-        throw error;
-      }
-    }
-    hash.update("\0", "utf8");
-  }
-
-  return hash.digest("hex");
-}
-
 export function getWorkingTreeFingerprint(cwd) {
   const repoRoot = getRepoRoot(cwd);
-  const stagedDiffHash = gitChecked(repoRoot, ["write-tree"]).stdout.trim();
+  const head = gitChecked(repoRoot, ["rev-parse", "HEAD"]).stdout.trim();
+  const stagedDiffHash = hashText(
+    gitChecked(repoRoot, ["ls-files", "--stage", "-z"]).stdout
+  );
   const unstaged = gitChecked(repoRoot, [
     "diff",
     "--name-only",
@@ -130,19 +107,17 @@ export function getWorkingTreeFingerprint(cwd) {
     "ls-files",
     "--others",
     "--exclude-standard",
+    "-z",
   ]).stdout
-    .trim()
-    .split("\n")
+    .split("\0")
     .filter(Boolean)
     .sort();
 
   const unstagedDiffHash = hashWorkingTreePaths(repoRoot, unstaged);
-  const untrackedFingerprintHash = buildUntrackedMetadataFingerprint(
-    repoRoot,
-    untracked
-  );
+  const untrackedFingerprintHash = hashWorkingTreePaths(repoRoot, untracked);
   const signature = hashText(
     [
+      head,
       stagedDiffHash,
       unstagedDiffHash,
       untrackedFingerprintHash,
@@ -152,6 +127,7 @@ export function getWorkingTreeFingerprint(cwd) {
 
   return {
     repoRoot,
+    head,
     stagedDiffHash,
     unstagedDiffHash,
     untrackedFingerprintHash,

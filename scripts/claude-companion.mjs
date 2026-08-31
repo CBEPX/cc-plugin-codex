@@ -129,6 +129,17 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
+  casStartWorkflowStage,
+  completeWorkflowCancellation,
+  getWorkflowRetryContext,
+  listWorkflows,
+  markWorkflowBranchFailure,
+  readWorkflow,
+  rebindWorkflowOwner,
+  reserveWorkflow,
+  submitWorkflowStage,
+} from "./lib/workflows.mjs";
+import {
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
@@ -157,9 +168,9 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/claude-companion.mjs setup [--check] [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--workflow-id <id> --workflow-stage <stage>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
       "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--wait-timeout-ms <ms>] [prompt]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--workflow-id <id> --workflow-stage <stage>] [--wait-timeout-ms <ms>] [prompt]",
       "  node scripts/claude-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--poll-interval-ms <ms>] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
@@ -169,7 +180,16 @@ function printUsage() {
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs task-resume-candidate [--json]",
       "  node scripts/claude-companion.mjs task-reserve-job [--json]",
-      "  node scripts/claude-companion.mjs review-reserve-job [--json]"
+      "  node scripts/claude-companion.mjs review-reserve-job [--json]",
+      "  node scripts/claude-companion.mjs workflow-create [--cwd <path>] [--json] < workflow.json",
+      "  node scripts/claude-companion.mjs workflow-read <workflow-id> [--mode <design|research>] [--json]",
+      "  node scripts/claude-companion.mjs workflow-list [--mode <design|research>] [--json]",
+      "  node scripts/claude-companion.mjs workflow-start-stage <workflow-id> --stage <stage> --revision <n> --epoch <n> [--branch <id>] [--mode <design|research>] [--json]",
+      "  node scripts/claude-companion.mjs workflow-submit-stage <workflow-id> --stage <stage> --revision <n> --epoch <n> [--branch <id>] [--field <field>] [--json] < payload.json",
+      "  node scripts/claude-companion.mjs workflow-fail-branch <workflow-id> --stage <stage> --revision <n> --epoch <n> --reason <reason> [--branch <id>] [--cancel-failed] [--json]",
+      "  node scripts/claude-companion.mjs workflow-retry-context <workflow-id> --retry [--required-stage <stage>...] [--required-branch <id>...] [--json]",
+      "  node scripts/claude-companion.mjs workflow-rebind <workflow-id> --revision <n> --epoch <n> --owner-session-id <id> [--json]",
+      "  node scripts/claude-companion.mjs workflow-cancel-linked-jobs <workflow-id> --revision <n> --epoch <n> [--json]"
     ].join("\n")
   );
 }
@@ -384,6 +404,70 @@ function resolveCommandCwd(options = {}) {
 
 function resolveCommandWorkspace(options = {}) {
   return resolveWorkspaceRoot(resolveCommandCwd(options));
+}
+
+function parseWorkflowCounter(value, label) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative integer.`);
+  }
+  return parsed;
+}
+
+function requireWorkflowId(positionals) {
+  const value = positionals[0];
+  if (!value || value.startsWith("--")) {
+    throw new Error("A workflow ID is required.");
+  }
+  return sanitizeId(value, "workflow ID");
+}
+
+function readJsonStdin(label) {
+  const source = readStdinIfPiped().trim();
+  if (!source) {
+    throw new Error(`${label} must be provided as JSON on stdin.`);
+  }
+  let value;
+  try {
+    value = JSON.parse(source);
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error.message}`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a JSON object.`);
+  }
+  return value;
+}
+
+function resolveWorkflowJobBinding(
+  workspaceRoot,
+  workflowIdValue,
+  workflowStageValue,
+  ownerSessionId
+) {
+  const hasWorkflowId = workflowIdValue != null;
+  const hasWorkflowStage = workflowStageValue != null;
+  if (!hasWorkflowId && !hasWorkflowStage) {
+    return null;
+  }
+  if (hasWorkflowId !== hasWorkflowStage) {
+    throw new Error("Workflow-linked work requires both --workflow-id and --workflow-stage.");
+  }
+  const workflowId = sanitizeId(workflowIdValue, "workflow ID");
+  const workflowStage = sanitizeId(workflowStageValue, "workflow stage");
+  const workflow = readWorkflow(workspaceRoot, workflowId);
+  if (!workflow) {
+    throw new Error(`WORKFLOW_NOT_FOUND: No workflow found for ${workflowId}.`);
+  }
+  if (
+    ownerSessionId &&
+    workflow.currentOwnerSessionId !== ownerSessionId
+  ) {
+    throw new Error(
+      `WORKFLOW_OWNER_MISMATCH: Workflow ${workflowId} belongs to owner session ${workflow.currentOwnerSessionId}. Rebind it explicitly before continuing.`
+    );
+  }
+  return { workflowId, workflowStage, workflow };
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,18 +1607,22 @@ function createCompanionJob({
   write = false,
   sessionId = null,
   explicitJobId = null,
+  workflowId = null,
+  workflowStage = null,
 }) {
   const resolvedJobId = explicitJobId ?? generateJobId(prefix);
+  const linkedWorkflow = workflowId && workflowStage;
   return createJobRecord(
     {
       id: resolvedJobId,
       kind,
-      kindLabel: getJobKindLabel(kind, jobClass),
+      kindLabel: linkedWorkflow ? "workflow" : getJobKindLabel(kind, jobClass),
       title,
       workspaceRoot,
       jobClass,
       summary,
-      write
+      write,
+      ...(linkedWorkflow ? { workflowId, workflowStage } : {}),
     },
     {
       cwd: workspaceRoot,
@@ -1700,7 +1788,8 @@ function buildTaskJob(
   taskMetadata,
   write,
   ownerSessionId = null,
-  explicitJobId = null
+  explicitJobId = null,
+  workflowBinding = null
 ) {
   return createCompanionJob({
     prefix: "task",
@@ -1712,6 +1801,8 @@ function buildTaskJob(
     write,
     sessionId: ownerSessionId,
     explicitJobId,
+    workflowId: workflowBinding?.workflowId ?? null,
+    workflowStage: workflowBinding?.workflowStage ?? null,
   });
 }
 
@@ -2292,6 +2383,8 @@ async function handleReviewCommand(argv, config) {
       "view-state",
       "job-id",
       "owner-session-id",
+      "workflow-id",
+      "workflow-stage",
       "user-mcp-tool"
     ],
     repeatableOptions: ["user-mcp-tool"],
@@ -2326,6 +2419,12 @@ async function handleReviewCommand(argv, config) {
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     // Validate inside the reservation guard so failures do not leak markers.
     config.validateRequest?.(target, focusText);
+    const workflowBinding = resolveWorkflowJobBinding(
+      workspaceRoot,
+      options["workflow-id"],
+      options["workflow-stage"],
+      ownerSessionId
+    );
     assertDelegationAllowed(workspaceRoot, ownerSessionId, "review");
     const userMcpTools = normalizeUserMcpTools(options["user-mcp-tool"]);
     if (userMcpTools.length > 0) {
@@ -2349,7 +2448,9 @@ async function handleReviewCommand(argv, config) {
       jobClass: "review",
       summary: metadata.summary,
       sessionId: ownerSessionId,
-      explicitJobId
+      explicitJobId,
+      workflowId: workflowBinding?.workflowId ?? null,
+      workflowStage: workflowBinding?.workflowStage ?? null,
     });
 
     if (options.background) {
@@ -2441,6 +2542,8 @@ async function handleTask(argv) {
       "view-state",
       "owner-session-id",
       "job-id",
+      "workflow-id",
+      "workflow-stage",
       "wait-timeout-ms",
       "timeout-ms",
       "poll-interval-ms",
@@ -2497,6 +2600,12 @@ async function handleTask(argv) {
   const write = Boolean(options.write);
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
+    const workflowBinding = resolveWorkflowJobBinding(
+      workspaceRoot,
+      options["workflow-id"],
+      options["workflow-stage"],
+      ownerSessionId
+    );
     assertDelegationAllowed(workspaceRoot, ownerSessionId, "task");
     const taskMetadata = buildTaskRunMetadata({
       prompt,
@@ -2507,12 +2616,16 @@ async function handleTask(argv) {
     // Resolve resume session inside the reservation guard so failures do not leak markers.
     let resumeSessionId = null;
     if (resumeLast) {
-      resumeSessionId = await resolveLatestResumableSession(workspaceRoot, {
-        ownerSessionId,
-      });
+      resumeSessionId = workflowBinding
+        ? workflowBinding.workflow.claudeSessionId
+        : await resolveLatestResumableSession(workspaceRoot, {
+            ownerSessionId,
+          });
       if (!resumeSessionId) {
         throw new Error(
-          "No previous Claude Code task session was found for this repository."
+          workflowBinding
+            ? `Workflow ${workflowBinding.workflowId} does not own a Claude session yet.`
+            : "No previous Claude Code task session was found for this repository."
         );
       }
     }
@@ -2526,7 +2639,8 @@ async function handleTask(argv) {
       taskMetadata,
       write,
       ownerSessionId,
-      explicitJobId
+      explicitJobId,
+      workflowBinding
     );
 
     if (options.background) {
@@ -2883,6 +2997,221 @@ function handleReserveJob(argv, prefix) {
   outputResult(payload, options.json);
 }
 
+function handleWorkflowCreate(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"],
+  });
+  const cwd = resolveCommandCwd(options);
+  const input = readJsonStdin("Workflow definition");
+  const workflow = reserveWorkflow(cwd, {
+    ...input,
+    originSessionId:
+      input.originSessionId ?? resolveCommandOwnerSessionId(null, resolveWorkspaceRoot(cwd)),
+  });
+  outputResult(workflow, options.json);
+}
+
+function handleWorkflowRead(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "mode"],
+    booleanOptions: ["json"],
+  });
+  const workflowId = requireWorkflowId(positionals);
+  const workflow = readWorkflow(resolveCommandCwd(options), workflowId, {
+    mode: options.mode,
+  });
+  if (!workflow) {
+    throw new Error(`WORKFLOW_NOT_FOUND: No workflow found for ${workflowId}.`);
+  }
+  outputResult(workflow, options.json);
+}
+
+function handleWorkflowList(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "mode"],
+    booleanOptions: ["json"],
+  });
+  outputResult(
+    listWorkflows(resolveCommandCwd(options), { mode: options.mode }),
+    options.json
+  );
+}
+
+function workflowMutationOptions(options) {
+  return {
+    revision: parseWorkflowCounter(options.revision, "Workflow revision"),
+    epoch: parseWorkflowCounter(options.epoch, "Workflow epoch"),
+    ...(options.mode ? { mode: options.mode } : {}),
+  };
+}
+
+function handleWorkflowStartStage(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "mode", "stage", "branch", "revision", "epoch"],
+    booleanOptions: ["json"],
+  });
+  const workflow = casStartWorkflowStage(
+    resolveCommandCwd(options),
+    requireWorkflowId(positionals),
+    {
+      ...workflowMutationOptions(options),
+      stage: options.stage,
+      branchId: options.branch,
+    }
+  );
+  outputResult(workflow, options.json);
+}
+
+function handleWorkflowSubmitStage(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: [
+      "cwd",
+      "mode",
+      "stage",
+      "branch",
+      "revision",
+      "epoch",
+      "field",
+      "claude-session-id",
+      "status",
+      "phase",
+    ],
+    booleanOptions: ["json"],
+  });
+  const workflow = submitWorkflowStage(
+    resolveCommandCwd(options),
+    requireWorkflowId(positionals),
+    {
+      ...workflowMutationOptions(options),
+      stage: options.stage,
+      branchId: options.branch,
+      field: options.field,
+      claudeSessionId: options["claude-session-id"],
+      status: options.status,
+      phase: options.phase,
+      payload: readJsonStdin("Stage payload"),
+    }
+  );
+  outputResult(workflow, options.json);
+}
+
+function handleWorkflowBranchFailure(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: [
+      "cwd",
+      "mode",
+      "stage",
+      "branch",
+      "revision",
+      "epoch",
+      "reason",
+    ],
+    booleanOptions: ["json", "cancel-failed"],
+  });
+  const workflow = markWorkflowBranchFailure(
+    resolveCommandCwd(options),
+    requireWorkflowId(positionals),
+    {
+      ...workflowMutationOptions(options),
+      stage: options.stage,
+      branchId: options.branch,
+      reason: options.reason,
+      cancelFailed: Boolean(options["cancel-failed"]),
+    }
+  );
+  outputResult(workflow, options.json);
+}
+
+function handleWorkflowRetryContext(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "mode", "required-stage", "required-branch"],
+    repeatableOptions: ["required-stage", "required-branch"],
+    booleanOptions: ["json", "retry"],
+  });
+  if (!options.retry) {
+    throw new Error("workflow-retry-context requires --retry.");
+  }
+  const context = getWorkflowRetryContext(
+    resolveCommandCwd(options),
+    requireWorkflowId(positionals),
+    {
+      mode: options.mode,
+      ...(options["required-stage"]
+        ? { requiredStages: options["required-stage"] }
+        : {}),
+      ...(options["required-branch"]
+        ? { requiredBranches: options["required-branch"] }
+        : {}),
+    }
+  );
+  outputResult(context, options.json);
+}
+
+function handleWorkflowRebind(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "mode", "revision", "epoch", "owner-session-id"],
+    booleanOptions: ["json"],
+  });
+  const workflow = rebindWorkflowOwner(
+    resolveCommandCwd(options),
+    requireWorkflowId(positionals),
+    {
+      ...workflowMutationOptions(options),
+      currentOwnerSessionId: options["owner-session-id"],
+    }
+  );
+  outputResult(workflow, options.json);
+}
+
+async function handleWorkflowCancelLinkedJobs(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "mode", "revision", "epoch"],
+    booleanOptions: ["json"],
+  });
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const workflowId = requireWorkflowId(positionals);
+  const mutation = workflowMutationOptions(options);
+  const current = readWorkflow(workspaceRoot, workflowId, { mode: options.mode });
+  if (!current) {
+    throw new Error(`WORKFLOW_NOT_FOUND: No workflow found for ${workflowId}.`);
+  }
+  if (current.revision !== mutation.revision) {
+    throw new Error(
+      `STALE_REVISION: Expected revision ${mutation.revision}, found ${current.revision}.`
+    );
+  }
+  if (current.epoch !== mutation.epoch) {
+    throw new Error(`STALE_EPOCH: Expected epoch ${mutation.epoch}, found ${current.epoch}.`);
+  }
+
+  const linkedJobs = listJobs(workspaceRoot).filter(
+    (job) =>
+      job.workflowId === workflowId &&
+      (ACTIVE_JOB_STATUSES.has(job.status) || job.status === "cancel_failed")
+  );
+  const cancelledJobIds = [];
+  const failedJobIds = [];
+  for (const job of linkedJobs) {
+    if (job.status !== "queued" && job.status !== "running") {
+      failedJobIds.push(job.id);
+      continue;
+    }
+    const result = await cancelStoredJob(workspaceRoot, job);
+    if (result.payload.status === "cancelled") {
+      cancelledJobIds.push(job.id);
+    } else {
+      failedJobIds.push(job.id);
+    }
+  }
+  const workflow = completeWorkflowCancellation(workspaceRoot, workflowId, {
+    ...mutation,
+    failedJobIds,
+  });
+  outputResult({ workflow, cancelledJobIds, failedJobIds }, options.json);
+}
+
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -3039,6 +3368,34 @@ async function main() {
       break;
     case "review-reserve-job":
       handleReserveJob(argv, "review");
+      break;
+    case "workflow-create":
+    case "workflow-reserve":
+      handleWorkflowCreate(argv);
+      break;
+    case "workflow-read":
+      handleWorkflowRead(argv);
+      break;
+    case "workflow-list":
+      handleWorkflowList(argv);
+      break;
+    case "workflow-start-stage":
+      handleWorkflowStartStage(argv);
+      break;
+    case "workflow-submit-stage":
+      handleWorkflowSubmitStage(argv);
+      break;
+    case "workflow-fail-branch":
+      handleWorkflowBranchFailure(argv);
+      break;
+    case "workflow-retry-context":
+      handleWorkflowRetryContext(argv);
+      break;
+    case "workflow-rebind":
+      handleWorkflowRebind(argv);
+      break;
+    case "workflow-cancel-linked-jobs":
+      await handleWorkflowCancelLinkedJobs(argv);
       break;
     case "cancel":
       await handleCancel(argv);

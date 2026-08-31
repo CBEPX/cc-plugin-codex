@@ -286,4 +286,41 @@ describe("collectReviewContext", () => {
     assert.equal(typeof fingerprint.stagedDiffHash, "string");
     assert.equal(typeof fingerprint.unstagedDiffHash, "string");
   });
+
+  it("fingerprints HEAD and untracked file contents rather than metadata alone", () => {
+    const repo = createRepo();
+    const untrackedPath = path.join(repo, "notes.txt");
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    fs.writeFileSync(untrackedPath, "alpha\n", "utf8");
+
+    const before = getWorkingTreeFingerprint(repo);
+    const originalTimes = fs.statSync(untrackedPath);
+    fs.writeFileSync(untrackedPath, "bravo\n", "utf8");
+    fs.utimesSync(untrackedPath, originalTimes.atime, originalTimes.mtime);
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.equal(before.head, runGit(repo, ["rev-parse", "HEAD"]));
+    assert.notEqual(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+    assert.notEqual(after.signature, before.signature);
+  });
+
+  it("fingerprints untracked contents when a Git path contains a newline", () => {
+    const repo = createRepo();
+    const unusualPath = path.join(repo, "line\nbreak.txt");
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    fs.writeFileSync(unusualPath, "first\n", "utf8");
+    const before = getWorkingTreeFingerprint(repo);
+
+    fs.writeFileSync(unusualPath, "second\n", "utf8");
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.equal(before.untrackedCount, 1);
+    assert.notEqual(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+  });
 });
