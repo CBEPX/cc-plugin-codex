@@ -413,6 +413,78 @@ describe("MCP capability discovery", () => {
     });
   });
 
+  it("reprobes safely when a credential rotates within the cache TTL", async () => {
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const requestLog = path.join(homeDir, "rotation-requests.log");
+      const serverPath = path.join(homeDir, "identity-server.mjs");
+      fs.writeFileSync(
+        serverPath,
+        [
+          'import fs from "node:fs";',
+          'import readline from "node:readline";',
+          "const credential = process.env.IDENTITY_TOKEN;",
+          "const toolName = credential.endsWith('_A') ? 'alpha_search' : 'beta_search';",
+          "const input = readline.createInterface({ input: process.stdin });",
+          "input.on('line', (line) => {",
+          "  const request = JSON.parse(line);",
+          "  if (request.method === 'initialize') fs.appendFileSync(process.env.FAKE_MCP_REQUEST_LOG, 'initialize\\n');",
+          "  const result = request.method === 'initialize'",
+          "    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'identity', version: '1' } }",
+          "    : { tools: [{ name: toolName, description: 'Search for ' + credential, annotations: { readOnlyHint: true } }] };",
+          "  if (request.id != null) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');",
+          "});",
+          "",
+        ].join("\n"),
+        "utf8"
+      );
+      const configPath = path.join(homeDir, ".claude.json");
+      const writeConfig = (credential) => fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          mcpServers: {
+            identity: {
+              command: process.execPath,
+              args: [serverPath],
+              env: {
+                IDENTITY_TOKEN: credential,
+                FAKE_MCP_REQUEST_LOG: requestLog,
+              },
+            },
+          },
+        }),
+        "utf8"
+      );
+
+      writeConfig("ROTATION_CREDENTIAL_A");
+      const first = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir }),
+        { now: 1000 }
+      );
+      writeConfig("ROTATION_CREDENTIAL_B");
+      const second = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir }),
+        { now: 1000 + 60 * 1000 }
+      );
+
+      assert.equal(
+        first.discovered[0].configFingerprint,
+        second.discovered[0].configFingerprint
+      );
+      assert.deepEqual(first.catalog.map((tool) => tool.toolName), ["alpha_search"]);
+      assert.deepEqual(second.catalog.map((tool) => tool.toolName), ["beta_search"]);
+      assert.equal(first.catalog[0].description, "Search for [redacted]");
+      assert.equal(second.catalog[0].description, "Search for [redacted]");
+      assert.doesNotMatch(
+        JSON.stringify({ first, second }),
+        /ROTATION_CREDENTIAL_[AB]/
+      );
+      assert.equal(
+        fs.readFileSync(requestLog, "utf8").trim().split("\n").length,
+        2
+      );
+    });
+  });
+
   it("runs at most four server probes concurrently", async () => {
     await withTempHome(async ({ homeDir, cwd }) => {
       let activeInitializes = 0;
@@ -612,6 +684,150 @@ describe("MCP capability discovery", () => {
 
       assert.doesNotMatch(JSON.stringify(result), /SECRET_ARGUMENT_VALUE/);
       assert.match(result.catalog[0].description, /\[redacted\]/);
+    });
+  });
+
+  it("sanitizes a sensitive value passed through a CLI header flag", async () => {
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const serverPath = path.join(homeDir, "echo-header-server.mjs");
+      fs.writeFileSync(
+        serverPath,
+        [
+          'import readline from "node:readline";',
+          "const credential = process.argv.at(-1).split(/\\s+/u).at(-1);",
+          "const input = readline.createInterface({ input: process.stdin });",
+          "input.on('line', (line) => {",
+          "  const request = JSON.parse(line);",
+          "  const result = request.method === 'initialize'",
+          "    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'header', version: '1' } }",
+          "    : { tools: [{ name: 'search', description: 'Search with ' + credential, annotations: { readOnlyHint: true } }] };",
+          "  if (request.id != null) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');",
+          "});",
+          "",
+        ].join("\n"),
+        "utf8"
+      );
+      const configPath = path.join(homeDir, ".claude.json");
+      const writeConfig = (credential) => fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          mcpServers: {
+            header: {
+              command: process.execPath,
+              args: [serverPath, "--header", `Authorization: Bearer ${credential}`],
+            },
+          },
+        }),
+        "utf8"
+      );
+
+      writeConfig("HEADER_CREDENTIAL_A");
+      const first = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir }),
+        { now: 1000 }
+      );
+      writeConfig("HEADER_CREDENTIAL_B");
+      const second = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir }),
+        { now: 1000 + 11 * 60 * 1000 }
+      );
+
+      assert.equal(
+        first.discovered[0].configFingerprint,
+        second.discovered[0].configFingerprint
+      );
+      assert.doesNotMatch(
+        JSON.stringify({ first, second }),
+        /HEADER_CREDENTIAL_[AB]/
+      );
+      assert.equal(first.catalog[0].description, "Search with [redacted]");
+      assert.equal(second.catalog[0].description, "Search with [redacted]");
+    });
+  });
+
+  it("rejects a tool whose name contains a configured secret", async () => {
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const credential = "Credential123";
+      const serverPath = writeStdioServer(homeDir, {
+        initialize: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "echo-name", version: "1" },
+        },
+        "tools/list": {
+          tools: [{
+            name: credential,
+            description: "Read-only lookup",
+            annotations: { readOnlyHint: true },
+          }],
+        },
+      });
+      fs.writeFileSync(
+        path.join(homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            echoName: {
+              command: process.execPath,
+              args: [serverPath],
+              env: { MCP_NAME_TOKEN: credential },
+            },
+          },
+        }),
+        "utf8"
+      );
+
+      const probe = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir })
+      );
+      const selection = mcp.selectMcpCapabilities(probe, {
+        autoTools: probe.catalog.map((tool) => tool.toolId),
+      });
+
+      assert.doesNotMatch(JSON.stringify({ probe, selection }), /Credential123/);
+      assert.deepEqual(probe.catalog, []);
+      assert.deepEqual(selection.eligible, []);
+      assert.deepEqual(selection.selected, []);
+    });
+  });
+
+  it("redacts overlapping configured secrets longest-first", async () => {
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const serverPath = writeStdioServer(homeDir, {
+        initialize: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "overlap", version: "1" },
+        },
+        "tools/list": {
+          tools: [{
+            name: "search",
+            description: "Search with abcdef",
+            annotations: { readOnlyHint: true },
+          }],
+        },
+      });
+      fs.writeFileSync(
+        path.join(homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            overlap: {
+              command: process.execPath,
+              args: [serverPath],
+              env: {
+                SHORT_TOKEN: "abc",
+                LONG_TOKEN: "abcdef",
+              },
+            },
+          },
+        }),
+        "utf8"
+      );
+
+      const result = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir })
+      );
+
+      assert.equal(result.catalog[0].description, "Search with [redacted]");
     });
   });
 

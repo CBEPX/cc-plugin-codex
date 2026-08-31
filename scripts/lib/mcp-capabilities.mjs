@@ -6,12 +6,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const MCP_PROBE_CACHE_TTL_MS = 10 * 60 * 1000;
+const SENSITIVE_NAME_PATTERN = /(?:token|secret|password|authorization|api.?key|cookie)/iu;
+const probeCacheSalt = randomBytes(32);
 const probeCache = new Map();
 export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = new Set([
   "mcp__context7__query-docs",
@@ -28,9 +30,31 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
+function sensitiveHeader(value) {
+  const match = /^\s*([^:]+):\s*(.+)$/u.exec(value);
+  if (!match || !SENSITIVE_NAME_PATTERN.test(match[1])) return null;
+  return { name: match[1], value: match[2] };
+}
+
+function argumentSecretValues(args, index) {
+  const argument = args[index];
+  if (typeof argument !== "string") return [];
+  const values = [];
+  const previous = args[index - 1];
+  if (typeof previous === "string" && SENSITIVE_NAME_PATTERN.test(previous)) {
+    values.push(argument);
+  }
+  const header = sensitiveHeader(argument);
+  if (header) values.push(header.value);
+  if (SENSITIVE_NAME_PATTERN.test(argument.slice(0, argument.indexOf("=") + 1))) {
+    values.push(argument.slice(argument.indexOf("=") + 1));
+  }
+  return values;
+}
+
 function secretFreeFingerprintValue(value, key = "", sensitive = false) {
   const nextSensitive = sensitive || /^(?:env|headers|oauth|auth)$/iu.test(key) ||
-    /(?:token|secret|password|authorization|api.?key)/iu.test(key);
+    SENSITIVE_NAME_PATTERN.test(key);
   if (typeof value === "string") {
     if (nextSensitive) return "[redacted]";
     if (key === "url") {
@@ -46,14 +70,14 @@ function secretFreeFingerprintValue(value, key = "", sensitive = false) {
   }
   if (Array.isArray(value)) {
     return value.map((item, index) => {
-      const previous = value[index - 1];
-      const argumentIsSecret = key === "args" &&
-        typeof previous === "string" &&
-        /(?:token|secret|password|authorization|api.?key)/iu.test(previous);
-      if (typeof item === "string" && argumentIsSecret) return "[redacted]";
       if (typeof item === "string" && key === "args" &&
-          /(?:token|secret|password|authorization|api.?key)[^=]*=/iu.test(item)) {
-        return `${item.slice(0, item.indexOf("=") + 1)}[redacted]`;
+          argumentSecretValues(value, index).length > 0) {
+        const header = sensitiveHeader(item);
+        if (header) return `${header.name}: [redacted]`;
+        if (item.includes("=") && SENSITIVE_NAME_PATTERN.test(item.slice(0, item.indexOf("=")))) {
+          return `${item.slice(0, item.indexOf("=") + 1)}[redacted]`;
+        }
+        return "[redacted]";
       }
       return secretFreeFingerprintValue(item, key, nextSensitive);
     });
@@ -77,6 +101,12 @@ function serverFingerprint(name, config, sourceDetail) {
     .digest("hex");
 }
 
+function serverCacheKey(name, config, sourceDetail) {
+  return createHmac("sha256", probeCacheSalt)
+    .update(stableJson({ name, config, sourceDetail }))
+    .digest("hex");
+}
+
 function serverTransport(config) {
   if (typeof config.command === "string" && config.command) return "stdio";
   if (typeof config.url === "string" && config.url) {
@@ -94,40 +124,36 @@ function requiresOAuth(config) {
 
 function configSecretValues(config) {
   const secrets = new Set();
+  const addSecret = (value) => {
+    if (value.length < 3) return;
+    secrets.add(value);
+    const scheme = /^(?:Bearer|Basic)\s+(.+)$/iu.exec(value);
+    if (scheme?.[1].length >= 3) secrets.add(scheme[1]);
+  };
   const visit = (value, sensitive = false) => {
     if (typeof value === "string") {
-      if (sensitive && value.length >= 3) secrets.add(value);
+      if (sensitive) addSecret(value);
       return;
     }
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
       visit(child, sensitive || /^(?:env|headers|oauth|auth)$/iu.test(key) ||
-        /(?:token|secret|password|authorization|api.?key)/iu.test(key));
+        SENSITIVE_NAME_PATTERN.test(key));
     }
   };
   visit(config);
   if (Array.isArray(config.args)) {
-    for (const [index, argument] of config.args.entries()) {
-      if (typeof argument !== "string") continue;
-      const previous = config.args[index - 1];
-      if (typeof previous === "string" &&
-          /(?:token|secret|password|authorization|api.?key)/iu.test(previous) &&
-          argument.length >= 3) {
-        secrets.add(argument);
-      }
-      if (/(?:token|secret|password|authorization|api.?key)[^=]*=/iu.test(argument)) {
-        const value = argument.slice(argument.indexOf("=") + 1);
-        if (value.length >= 3) secrets.add(value);
-      }
+    for (const index of config.args.keys()) {
+      for (const secret of argumentSecretValues(config.args, index)) addSecret(secret);
     }
   }
   if (typeof config.url === "string") {
     try {
       const url = new URL(config.url);
-      if (url.username) secrets.add(url.username);
-      if (url.password) secrets.add(url.password);
+      if (url.username) addSecret(url.username);
+      if (url.password) addSecret(url.password);
       for (const value of url.searchParams.values()) {
-        if (value.length >= 3) secrets.add(value);
+        addSecret(value);
       }
     } catch {}
   }
@@ -136,8 +162,33 @@ function configSecretValues(config) {
 
 function redactSecrets(value, secrets) {
   let redacted = value;
-  for (const secret of secrets) redacted = redacted.split(secret).join("[redacted]");
+  for (const secret of [...new Set(secrets)].sort((left, right) => right.length - left.length)) {
+    redacted = redacted.split(secret).join("[redacted]");
+  }
   return redacted;
+}
+
+function sanitizeProbeResult(result, secrets) {
+  if (result.code) return { code: result.code };
+  const tools = [];
+  for (const tool of result.tools) {
+    if (!tool || typeof tool.name !== "string" ||
+        !/^[A-Za-z0-9_-]+$/u.test(tool.name) ||
+        secrets.some((secret) => tool.name.includes(secret))) continue;
+    tools.push({
+      name: tool.name,
+      description: typeof tool.description === "string"
+        ? redactSecrets(tool.description, secrets)
+        : "",
+      annotations: tool.annotations && typeof tool.annotations === "object"
+        ? {
+            readOnlyHint: tool.annotations.readOnlyHint === true,
+            destructiveHint: tool.annotations.destructiveHint === true,
+          }
+        : undefined,
+    });
+  }
+  return { tools };
 }
 
 function hasToolsCapability(result) {
@@ -507,13 +558,17 @@ export async function probeMcpCapabilities(discovery, options = {}) {
       });
       return;
     }
-    const cached = probeCache.get(server.configFingerprint);
+    const config = discovery.available[server.name];
+    const sourceDetail = discovery.sourceDetails[server.name] ?? null;
+    const cacheKey = serverCacheKey(server.name, config, sourceDetail);
+    const cached = probeCache.get(cacheKey);
     let result = cached?.expiresAt > now ? cached.result : null;
     if (!result) {
-      result = server.transport === "stdio"
-        ? await stdioProbe(discovery.available[server.name], timeoutMs)
-        : await httpProbe(discovery.available[server.name], timeoutMs);
-      probeCache.set(server.configFingerprint, {
+      const probed = server.transport === "stdio"
+        ? await stdioProbe(config, timeoutMs)
+        : await httpProbe(config, timeoutMs);
+      result = sanitizeProbeResult(probed, configSecretValues(config));
+      probeCache.set(cacheKey, {
         expiresAt: now + MCP_PROBE_CACHE_TTL_MS,
         result,
       });
@@ -528,20 +583,14 @@ export async function probeMcpCapabilities(discovery, options = {}) {
       });
       return;
     }
-    const secrets = configSecretValues(discovery.available[server.name]);
     for (const tool of result.tools) {
-      if (!tool || typeof tool.name !== "string" ||
-          !/^[A-Za-z0-9_-]+$/u.test(tool.name)) continue;
-      const description = typeof tool.description === "string"
-        ? redactSecrets(tool.description, secrets)
-        : "";
       const toolId = `mcp__${server.name}__${tool.name}`;
       catalog.push({
         toolId,
         serverName: server.name,
         toolName: tool.name,
-        description,
-        capability: description,
+        description: tool.description,
+        capability: tool.description,
         source: server.source,
         transport: server.transport,
         configFingerprint: server.configFingerprint,
