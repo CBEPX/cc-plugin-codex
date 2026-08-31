@@ -36,7 +36,7 @@ const shards = {
   "job-control": {
     command: "npm run test:mutation:job-control:unit",
     // Public selection and cancellation paths; process mechanics are covered separately.
-    mutate: ["scripts/lib/job-control.mjs:207-472"],
+    mutate: ["scripts/lib/job-control.mjs:207-468"],
   },
   managed: {
     command: "npm run test:mutation:managed:unit",

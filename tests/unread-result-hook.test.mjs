@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -148,6 +148,31 @@ function runHook(testEnv, payload, extraEnv = {}) {
   return result.stdout.trim();
 }
 
+function runHookAsync(testEnv, payload, extraEnv = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [HOOK_SCRIPT], {
+      cwd: PROJECT_ROOT,
+      env: {
+        ...process.env,
+        HOME: testEnv.homeDir,
+        USERPROFILE: testEnv.homeDir,
+        CODEX_HOME: path.join(testEnv.homeDir, ".codex"),
+        ...extraEnv,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout: stdout.trim(), stderr }));
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
 function readTurnBaseline(testEnv, sessionId) {
   return JSON.parse(
     fs.readFileSync(
@@ -278,6 +303,90 @@ test("announces workflow milestones once and never announces their linked jobs",
     });
     assert.match(completedOutput, /workflow-notify.*completed/);
     assert.deepEqual(readWorkflow(testEnv, workflow.id).notifiedEvents, ["checkpoint", "completed"]);
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("concurrent hooks emit exactly one workflow milestone after one CAS claim", async () => {
+  const testEnv = createEnv();
+  try {
+    const workflow = writeWorkflow(testEnv, { id: "workflow-concurrent-notify" });
+    const workflowFile = path.join(
+      stateDirFor(testEnv),
+      "workflows",
+      `${workflow.id}.json`
+    );
+    const barrierDir = path.join(testEnv.rootDir, "workflow-read-barrier");
+    fs.mkdirSync(barrierDir);
+    const payload = {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue with something else",
+    };
+    const raceEnv = {
+      NODE_OPTIONS: `--import=${pathToFileURL(
+        path.join(PROJECT_ROOT, "tests", "fixtures", "workflow-read-barrier.mjs")
+      ).href}`,
+      CC_TEST_WORKFLOW_FILE: workflowFile,
+      CC_TEST_WORKFLOW_BARRIER_DIR: barrierDir,
+      CC_TEST_WORKFLOW_BARRIER_COUNT: "2",
+    };
+
+    const results = await Promise.all([
+      runHookAsync(testEnv, payload, raceEnv),
+      runHookAsync(testEnv, payload, raceEnv),
+    ]);
+
+    assert.deepEqual(results.map(({ status }) => status), [0, 0]);
+    assert.equal(
+      results.filter(({ stdout }) => stdout.includes("workflow-concurrent-notify")).length,
+      1,
+      JSON.stringify(results)
+    );
+    assert.deepEqual(readWorkflow(testEnv, workflow.id).notifiedEvents, ["checkpoint"]);
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("does not announce a workflow milestone claimed as viewed after selection", () => {
+  const testEnv = createEnv();
+  try {
+    const workflow = writeWorkflow(testEnv, { id: "workflow-view-race" });
+    const workflowFile = path.join(
+      stateDirFor(testEnv),
+      "workflows",
+      `${workflow.id}.json`
+    );
+    const viewed = {
+      ...workflow,
+      revision: workflow.revision + 1,
+      viewedEvents: ["checkpoint"],
+      updatedAt: "2026-09-01T10:02:00Z",
+    };
+
+    const output = runHook(
+      testEnv,
+      {
+        hook_event_name: "UserPromptSubmit",
+        cwd: testEnv.workspaceDir,
+        session_id: "session-a",
+        prompt: "continue with something else",
+      },
+      {
+        NODE_OPTIONS: `--import=${pathToFileURL(
+          path.join(PROJECT_ROOT, "tests", "fixtures", "swap-job-after-read.mjs")
+        ).href}`,
+        CC_TEST_SWAP_JOB_FILE: workflowFile,
+        CC_TEST_SWAP_JOB_JSON: `${JSON.stringify(viewed, null, 2)}\n`,
+      }
+    );
+
+    assert.equal(output, "");
+    assert.deepEqual(readWorkflow(testEnv, workflow.id).viewedEvents, ["checkpoint"]);
+    assert.equal(readWorkflow(testEnv, workflow.id).notifiedEvents, undefined);
   } finally {
     cleanupEnv(testEnv);
   }

@@ -303,6 +303,68 @@ describe("peer workflow store", () => {
     assert.deepEqual(fs.readFileSync(resolveWorkflowFile(repo, workflow.id)), before);
   });
 
+  it("rejects a late stage submission after cancellation without changing stored bytes", () => {
+    const repo = createRepo();
+    let workflow = createWorkflow(repo, { id: "workflow-late-submit" });
+    workflow = casStartWorkflowStage(repo, workflow.id, {
+      stage: "memo",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+    });
+    workflow = completeWorkflowCancellation(repo, workflow.id, {
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      failedJobIds: [],
+    });
+    const workflowFile = resolveWorkflowFile(repo, workflow.id);
+    const before = fs.readFileSync(workflowFile);
+
+    const code = errorCode(() => submitWorkflowStage(repo, workflow.id, {
+      stage: "memo",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      payload: { summary: "late result" },
+    }));
+
+    assert.deepEqual(
+      { code, unchanged: fs.readFileSync(workflowFile).equals(before) },
+      { code: "WORKFLOW_TERMINAL", unchanged: true }
+    );
+    assert.equal(readWorkflow(repo, workflow.id).status, "cancelled");
+  });
+
+  it("rejects a late branch failure after cancellation without changing stored bytes", () => {
+    const repo = createRepo();
+    let workflow = createWorkflow(repo, { id: "workflow-late-failure" });
+    workflow = casStartWorkflowStage(repo, workflow.id, {
+      stage: "memo",
+      branchId: "alpha",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+    });
+    workflow = completeWorkflowCancellation(repo, workflow.id, {
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      failedJobIds: [],
+    });
+    const workflowFile = resolveWorkflowFile(repo, workflow.id);
+    const before = fs.readFileSync(workflowFile);
+
+    const code = errorCode(() => markWorkflowBranchFailure(repo, workflow.id, {
+      stage: "memo",
+      branchId: "alpha",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      reason: "late worker failure",
+    }));
+
+    assert.deepEqual(
+      { code, unchanged: fs.readFileSync(workflowFile).equals(before) },
+      { code: "WORKFLOW_TERMINAL", unchanged: true }
+    );
+    assert.equal(readWorkflow(repo, workflow.id).status, "cancelled");
+  });
+
   it("reports only failed or missing retry work without rewriting successful payloads", () => {
     const repo = createRepo();
     let workflow = createWorkflow(repo);

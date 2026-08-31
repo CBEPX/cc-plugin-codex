@@ -561,6 +561,9 @@ export function submitWorkflowStage(cwd, workflowId, options) {
   }
   let violated = false;
   const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+    }
     const target = targetState(workflow, options.stage, options.branchId);
     if (target.state.status === "completed") {
       throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
@@ -625,6 +628,9 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
   }
   let violated = false;
   const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+    }
     const target = targetState(workflow, options.stage, options.branchId);
     if (target.state.status === "completed") {
       throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);

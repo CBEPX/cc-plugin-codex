@@ -27,6 +27,7 @@ import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 import {
   listWorkflows,
   markWorkflowNotification,
+  readWorkflow,
   workflowNotificationEvent,
 } from "../scripts/lib/workflows.mjs";
 
@@ -128,18 +129,38 @@ function markJobsNotified(workspaceRoot, jobs) {
 }
 
 function markWorkflowsNotified(workspaceRoot, workflows) {
+  const claimed = [];
   for (const { workflow, event } of workflows) {
-    try {
-      markWorkflowNotification(workspaceRoot, workflow.id, {
-        event,
-        revision: workflow.revision,
-        epoch: workflow.epoch,
-        mode: workflow.mode,
-      });
-    } catch {
-      // Notification state is best-effort; still surface the aggregate milestone.
+    let current = workflow;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const updated = markWorkflowNotification(workspaceRoot, current.id, {
+          event,
+          revision: current.revision,
+          epoch: current.epoch,
+          mode: current.mode,
+        });
+        claimed.push({ workflow: updated, event });
+        break;
+      } catch (error) {
+        if (error?.code !== "STALE_REVISION" && error?.code !== "STALE_EPOCH") break;
+        try {
+          current = readWorkflow(workspaceRoot, current.id);
+        } catch {
+          break;
+        }
+        if (
+          !current ||
+          workflowNotificationEvent(current) !== event ||
+          (current.notifiedEvents ?? []).includes(event) ||
+          (current.viewedEvents ?? []).includes(event)
+        ) {
+          break;
+        }
+      }
     }
   }
+  return claimed;
 }
 
 function captureTurnBaseline(workspaceRoot, sessionId, cwd) {
@@ -212,11 +233,12 @@ async function main() {
   }
 
   markJobsNotified(workspaceRoot, jobs);
-  markWorkflowsNotified(workspaceRoot, workflows);
+  const claimedWorkflows = markWorkflowsNotified(workspaceRoot, workflows);
   const sections = [
-    ...(workflows.length > 0 ? [buildWorkflowContext(workflows)] : []),
+    ...(claimedWorkflows.length > 0 ? [buildWorkflowContext(claimedWorkflows)] : []),
     ...(jobs.length > 0 ? [buildAdditionalContext(jobs)] : []),
   ];
+  if (sections.length === 0) return;
   process.stdout.write(`${sections.join("\n\n")}\n`);
 }
 

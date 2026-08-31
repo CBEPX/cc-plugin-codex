@@ -307,20 +307,24 @@ export function buildStatusSnapshot(cwd, options = {}) {
   };
 }
 
-function matchLocalTarget(workspaceRoot, reference) {
+function matchStatusTarget(workspaceRoot, reference) {
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const workflows = listWorkflows(workspaceRoot);
   const exact = [
-    ...jobs.filter(({ id }) => id === reference).map((job) => ({ targetType: "job", job })),
-    ...workflows.filter(({ id }) => id === reference).map((workflow) => ({ targetType: "workflow", workflow })),
+    ...jobs.filter(({ id }) => id === reference).map((job) => ({ targetType: "job", workspaceRoot, job })),
+    ...workflows.filter(({ id }) => id === reference).map((workflow) => ({ targetType: "workflow", workspaceRoot, workflow })),
   ];
   if (exact.length === 1) return exact[0];
   if (exact.length > 1) {
     throw new Error(`Reference "${reference}" matches both a job and workflow. Use an exact unique id.`);
   }
+  const global = findExactJobAcrossWorkspaces(reference);
+  if (global) {
+    return { targetType: "job", ...global };
+  }
   const prefixed = [
-    ...jobs.filter(({ id }) => id.startsWith(reference)).map((job) => ({ targetType: "job", job })),
-    ...workflows.filter(({ id }) => id.startsWith(reference)).map((workflow) => ({ targetType: "workflow", workflow })),
+    ...jobs.filter(({ id }) => id.startsWith(reference)).map((job) => ({ targetType: "job", workspaceRoot, job })),
+    ...workflows.filter(({ id }) => id.startsWith(reference)).map((workflow) => ({ targetType: "workflow", workspaceRoot, workflow })),
   ];
   if (prefixed.length === 1) return prefixed[0];
   if (prefixed.length > 1) {
@@ -331,27 +335,19 @@ function matchLocalTarget(workspaceRoot, reference) {
 
 export function buildSingleStatusSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const local = matchLocalTarget(workspaceRoot, reference);
-  if (local && "workflow" in local) {
+  const target = matchStatusTarget(workspaceRoot, reference);
+  if (target && "workflow" in target) {
     return {
       targetType: "workflow",
-      workspaceRoot,
-      workflow: enrichWorkflow(local.workflow),
+      workspaceRoot: target.workspaceRoot,
+      workflow: enrichWorkflow(target.workflow),
     };
   }
-  if (local && "job" in local) {
+  if (target && "job" in target) {
     return {
       targetType: "job",
-      workspaceRoot,
-      job: enrichJob(local.job, { maxProgressLines: options.maxProgressLines }),
-    };
-  }
-  const global = findExactJobAcrossWorkspaces(reference);
-  if (global) {
-    return {
-      targetType: "job",
-      workspaceRoot: global.workspaceRoot,
-      job: enrichJob(global.job, { maxProgressLines: options.maxProgressLines }),
+      workspaceRoot: target.workspaceRoot,
+      job: enrichJob(target.job, { maxProgressLines: options.maxProgressLines }),
     };
   }
   throw new Error(`No job or workflow found for "${reference}". Run status to list known work.`);

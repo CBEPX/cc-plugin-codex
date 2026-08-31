@@ -31,7 +31,7 @@ import {
   resolveJobsDir,
   resolveJobLogFile,
 } from "../scripts/lib/state.mjs";
-import { reserveWorkflow } from "../scripts/lib/workflows.mjs";
+import { reserveWorkflow, resolveWorkflowsDir } from "../scripts/lib/workflows.mjs";
 
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -340,6 +340,70 @@ describe("unified workflow target resolution", () => {
       if (!("job" in explicitLinked)) assert.fail("expected job target");
       assert.equal(explicitLinked.job.id, "workflow-cancel-linked");
     });
+  });
+
+  it("prefers local exact, then cross-workspace exact, before local prefixes for every surface", () => {
+    const sourceRepo = createTempGitRepo();
+    const otherRepo = createTempGitRepo();
+    const globalJobId = "task-cross-workspace-exact-a1b2c3";
+    const localWorkflowId = "workflow-local-exact-d4e5f6";
+    try {
+      writeJobAt(sourceRepo, {
+        id: `${globalJobId}-local-prefix`,
+        status: "running",
+        jobClass: "task",
+        workspaceRoot: sourceRepo,
+        createdAt: "2026-09-01T10:00:00Z",
+        updatedAt: "2026-09-01T10:00:00Z",
+      });
+      writeJobAt(otherRepo, {
+        id: globalJobId,
+        status: "running",
+        jobClass: "task",
+        workspaceRoot: otherRepo,
+        createdAt: "2026-09-01T10:00:00Z",
+        updatedAt: "2026-09-01T10:00:00Z",
+      });
+
+      const crossWorkspace = [
+        buildSingleStatusSnapshot(sourceRepo, globalJobId),
+        resolveResultTarget(sourceRepo, globalJobId),
+        resolveCancelableTarget(sourceRepo, globalJobId),
+      ];
+      assert.deepEqual(
+        crossWorkspace.map(({ targetType, workspaceRoot, job }) => [targetType, workspaceRoot, job?.id]),
+        Array(3).fill(["job", otherRepo, globalJobId])
+      );
+
+      const workflow = writePeerWorkflow(sourceRepo, { id: localWorkflowId });
+      writeJobAt(otherRepo, {
+        id: localWorkflowId,
+        status: "running",
+        jobClass: "task",
+        workspaceRoot: otherRepo,
+        createdAt: "2026-09-01T10:00:00Z",
+        updatedAt: "2026-09-01T10:00:00Z",
+      });
+      const localExact = [
+        buildSingleStatusSnapshot(sourceRepo, localWorkflowId),
+        resolveResultTarget(sourceRepo, localWorkflowId),
+        resolveCancelableTarget(sourceRepo, localWorkflowId),
+      ];
+      assert.deepEqual(
+        localExact.map(({ targetType, workspaceRoot, workflow: resolved }) => [
+          targetType,
+          workspaceRoot,
+          resolved?.id,
+        ]),
+        Array(3).fill(["workflow", workflow.workspaceRoot, workflow.id])
+      );
+    } finally {
+      for (const repoDir of [sourceRepo, otherRepo]) {
+        fs.rmSync(resolveJobsDir(repoDir), { recursive: true, force: true });
+        fs.rmSync(resolveWorkflowsDir(repoDir), { recursive: true, force: true });
+        fs.rmSync(repoDir, { recursive: true, force: true });
+      }
+    }
   });
 });
 
