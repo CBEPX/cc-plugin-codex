@@ -13,10 +13,12 @@ import { fileURLToPath } from "node:url";
 import { callCodexAppServer } from "./lib/codex-app-server.mjs";
 import { ensureNativePluginHooksEnabled } from "./lib/codex-config.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
+import { installHookLauncher } from "./lib/hook-launcher-install.mjs";
 import {
   getManagedPluginSignals,
   LEGACY_MARKETPLACE_NAME,
   listManagedPluginCacheEntries,
+  pluginDataNamespaceForMarketplace,
   pluginIdForMarketplace,
   PLUGIN_NAME,
 } from "./lib/plugin-identity.mjs";
@@ -279,6 +281,10 @@ async function installOrUpdate() {
     allowSkipLegacyCleanup: true,
   });
   const hooksChanged = configureNativePluginHooks();
+  installHookLauncher(
+    PACKAGE_ROOT,
+    pluginDataNamespaceForMarketplace(marketplaceConfig.marketplaceName)
+  );
 
   const marketplace = await addMarketplaceThroughCodex(marketplaceConfig);
   const marketplacePath = path.join(
@@ -292,7 +298,7 @@ async function installOrUpdate() {
 
   console.log(`Installed ${PLUGIN_NAME} from ${marketplaceConfig.source} into the Codex plugin cache.`);
   if (hooksChanged) {
-    console.log("Enabled [features].hooks and [features].plugin_hooks in ~/.codex/config.toml.");
+    console.log("Enabled [features].hooks in ~/.codex/config.toml.");
     console.log("Restart Codex to make newly enabled native plugin hooks active in existing sessions.");
   }
 }

@@ -645,9 +645,19 @@ fs.readdirSync = (directory, ...args) => {
     const sessionStartHandler = manifest.hooks.SessionStart[0].hooks[0];
     const handler = manifest.hooks.SessionEnd[0].hooks[0];
 
+    for (const eventHandlers of Object.values(manifest.hooks)) {
+      for (const entry of eventHandlers) {
+        for (const hook of entry.hooks) {
+          assert.match(hook.command, /\$\{PLUGIN_DATA\}\/runtime\/hook-launcher\.mjs/u);
+          assert.doesNotMatch(hook.command, /"\$PLUGIN_DATA/u);
+          assert.doesNotMatch(hook.command, /\$PLUGIN_ROOT/u);
+        }
+      }
+    }
+
     assert.equal("timeout" in sessionStartHandler, false);
     assert.equal(handler.timeout, 3);
-    assert.match(handler.command, /session-lifecycle-hook\.mjs.*SessionEnd/u);
+    assert.match(handler.command, /session-lifecycle SessionEnd/u);
   });
 
   it("session lifecycle hook refuses to kill a stored PID without a matching identity", () => {

@@ -304,8 +304,8 @@ test("setup keeps native hook repair in the companion flow", () => {
     [
       'claude-companion.mjs" setup --check --json',
       "`--check` is read-only",
+      "stable hook launcher",
       "[features].hooks",
-      "[features].plugin_hooks",
       "native hook trust hashes",
     ],
     "setup"

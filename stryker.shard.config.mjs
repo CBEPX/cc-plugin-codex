@@ -24,19 +24,19 @@ const shards = {
       "scripts/lib/state.mjs:188-228",
       "scripts/lib/state.mjs:297-388",
       "scripts/lib/state.mjs:420-468",
-      "scripts/lib/state.mjs:545-875",
-      "scripts/lib/state.mjs:924-1096",
-      "scripts/lib/state.mjs:1162-1219",
-      "scripts/lib/state.mjs:1225-1271",
+      "scripts/lib/state.mjs:545-886",
+      "scripts/lib/state.mjs:935-1107",
+      "scripts/lib/state.mjs:1173-1230",
+      "scripts/lib/state.mjs:1236-1282",
       "scripts/lib/tracked-jobs.mjs:30-43",
       "scripts/lib/tracked-jobs.mjs:286-344",
-      "scripts/lib/tracked-jobs.mjs:363-522",
+      "scripts/lib/tracked-jobs.mjs:363-517",
     ],
   },
   "job-control": {
     command: "npm run test:mutation:job-control:unit",
     // Public selection and cancellation paths; process mechanics are covered separately.
-    mutate: ["scripts/lib/job-control.mjs:170-273"],
+    mutate: ["scripts/lib/job-control.mjs:175-338"],
   },
   managed: {
     command: "npm run test:mutation:managed:unit",
@@ -49,8 +49,8 @@ const shards = {
     command: "npm run test:mutation:installer:unit",
     mutate: [
       // Marketplace validation/config cleanup and the complete uninstall orchestration.
-      "scripts/installer-cli.mjs:96-234",
-      "scripts/installer-cli.mjs:275-371",
+      "scripts/installer-cli.mjs:98-236",
+      "scripts/installer-cli.mjs:277-377",
     ],
   },
 };

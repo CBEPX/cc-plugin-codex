@@ -608,6 +608,8 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
         transitionJob(cwd, job.id, ["queued"], "failed", {
           errorMessage: "Worker did not start before the startup grace period elapsed. Auto-reaped.",
           completedAt: nowIso(),
+          reapedBy: "status-reaper",
+          reapReason: "startup-timeout",
           pid: null,
           pidIdentity: null,
           workerPid: null,
@@ -817,6 +819,11 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
         );
       }
       const unresolvedClaudeChild = hasDistinctClaudeChild && !childResolved;
+      const reapReason = identityUnavailableTooLong
+        ? "identity-unverifiable"
+        : processExists
+          ? "identity-mismatch"
+          : "process-missing";
       const nextStatus = job.status === "cancelling"
         ? (identityUnavailableTooLong || unresolvedClaudeChild
             ? "cancel_failed"
@@ -828,6 +835,8 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
               `Process ${trackedPid} identity remained unverifiable beyond the bounded Windows recheck window. Manual cleanup may be required.`,
             completedAt: nowIso(),
             phase: nextStatus,
+            reapedBy: "status-reaper",
+            reapReason,
             reapedUnverifiable: true,
             workerPid: null,
             workerPidIdentity: null,
@@ -846,6 +855,8 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
                     : ""
                 }`,
             completedAt: nowIso(),
+            reapedBy: "status-reaper",
+            reapReason,
             ...(unresolvedClaudeChild
               ? {}
               : { pid: null, pidIdentity: null }),

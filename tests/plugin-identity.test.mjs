@@ -13,9 +13,18 @@ import {
   getPreferredMarketplaceName,
   listManagedPluginCacheEntries,
   parseManagedPluginSections,
+  pluginDataNamespaceForMarketplace,
   pluginConfigHeader,
   pluginIdForMarketplace,
 } from "../scripts/lib/plugin-identity.mjs";
+
+it("pluginDataNamespaceForMarketplace matches the Codex host namespace", () => {
+  assert.equal(pluginDataNamespaceForMarketplace("cbepx"), "cc-cbepx");
+  assert.throws(
+    () => pluginDataNamespaceForMarketplace("../outside"),
+    /Invalid marketplace name/u
+  );
+});
 
 const tempDirs = [];
 

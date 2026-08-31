@@ -887,20 +887,23 @@ function mergeTerminalResultText(existingText, terminalText) {
 // Turn Completion Validation
 // ---------------------------------------------------------------------------
 
-export function validateTurnCompletion(state, exitCode) {
+export function validateTurnCompletion(state, exitCode, options = {}) {
   if (exitCode !== 0) {
     return { status: "failed", exitCode };
-  }
-  if (state.unresolvedParseErrors > 0) {
-    return {
-      status: "unknown",
-      warning: `${state.unresolvedParseErrors} unrecovered parse errors`,
-    };
   }
   if (!state.receivedTerminalEvent) {
     return {
       status: "unknown",
       warning: "No terminal result event received despite exit code 0",
+    };
+  }
+  if (state.unresolvedParseErrors > 0) {
+    const warning =
+      `${state.unresolvedParseErrors} unrecovered parse error` +
+      (state.unresolvedParseErrors === 1 ? "" : "s");
+    return {
+      status: options.allowTerminalWithParseErrors ? "completed" : "unknown",
+      warning,
     };
   }
   if (state.unknownEvents.length > 0) {
@@ -1327,6 +1330,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       finalModel: null,
       contextWindow: null,
       modelEvents: [],
+      parseErrors: [],
+      unresolvedParseErrors: 0,
       failure: classifyClaudeFailure({
         stderr: command.error,
         exitCode: -1,
@@ -1409,7 +1414,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
           MAX_STDERR_BYTES
         );
       }
-      let validation = validateTurnCompletion(parser.state, code ?? 1);
+      let validation = validateTurnCompletion(parser.state, code ?? 1, {
+        allowTerminalWithParseErrors: Boolean(
+          options.allowTerminalWithParseErrors
+        ),
+      });
       if (stdinError && validation.status !== "failed") {
         validation = {
           status: "failed",
@@ -1461,6 +1470,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalModel,
         contextWindow,
         modelEvents,
+        parseErrors: [...parser.state.parseErrors],
+        unresolvedParseErrors: parser.state.unresolvedParseErrors,
         failure,
         stderr,
         pid: proc.pid,
@@ -1481,6 +1492,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalModel: null,
         contextWindow: null,
         modelEvents: [],
+        parseErrors: [],
+        unresolvedParseErrors: 0,
         failure: classifyClaudeFailure({
           stderr: err.message,
           exitCode: -1,
@@ -1512,6 +1525,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
   const result = await runClaudeTurn(cwd, prompt, {
     noSessionPersistence: true,
     allowedTools: SANDBOX_REVIEW_TOOLS,
+    allowTerminalWithParseErrors: true,
     ...options,
   });
 
@@ -1526,6 +1540,8 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     finalModel: result.finalModel,
     contextWindow: result.contextWindow,
     modelEvents: result.modelEvents,
+    parseErrors: result.parseErrors,
+    unresolvedParseErrors: result.unresolvedParseErrors,
     failure: result.failure,
     stderr: result.stderr,
     pid: result.pid,

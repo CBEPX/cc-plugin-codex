@@ -903,7 +903,22 @@ describe("installer-cli", () => {
 
     assert.match(config, /\[plugins\."cc@sendbird"\]/);
     assert.match(config, /hooks = true/);
-    assert.match(config, /plugin_hooks = true/);
+    assert.doesNotMatch(config, /plugin_hooks/);
+    assert.equal(
+      fs.readFileSync(
+        path.join(
+          homeDir,
+          ".codex",
+          "plugins",
+          "data",
+          "cc-sendbird",
+          "runtime",
+          "hook-launcher.mjs"
+        ),
+        "utf8"
+      ),
+      fs.readFileSync(path.join(sourceRoot, "scripts", "hook-launcher.mjs"), "utf8")
+    );
     assert.ok(!fs.existsSync(legacyInstallDir), "installer should not create a stable local plugin root");
     assert.ok(!fs.existsSync(hooksFile), "installer should not write global hooks.json");
     assert.ok(fs.existsSync(cachedReviewSkill));
@@ -1019,7 +1034,7 @@ describe("installer-cli", () => {
     assert.equal(fs.statSync(managedConfig).mode & 0o777, 0o644);
     const config = fs.readFileSync(managedConfig, "utf8");
     assert.match(config, /hooks = true/);
-    assert.match(config, /plugin_hooks = true/);
+    assert.doesNotMatch(config, /plugin_hooks/);
     assert.match(config, /\[plugins\."cc@sendbird"\]/);
   });
 

@@ -86,3 +86,36 @@ test("cancel uses the in-lock PID when the list snapshot is stale", () => {
 test("cancel does not silently succeed when the list snapshot has no PID", () => {
   runCancelSnapshotRace("cancel-missing-pid-race", null);
 });
+
+test("cancel reports when a selected job became terminal before the transition", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cc-cancel-terminal-race-"));
+  cleanup.push(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd }).status, 0);
+  const id = "cancel-terminal-race";
+  const createdAt = new Date().toISOString();
+  const snapshot = { id, status: "running", createdAt, updatedAt: createdAt };
+  const completed = {
+    ...snapshot,
+    status: "completed",
+    completedAt: createdAt,
+  };
+  writeJobFile(cwd, id, snapshot);
+
+  const result = spawnSync(
+    process.execPath,
+    ["--import", SWAP_PRELOAD, COMPANION, "cancel", id, "--cwd", cwd],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CC_TEST_SWAP_JOB_FILE: resolveJobFile(cwd, id),
+        CC_TEST_SWAP_JOB_JSON: `${JSON.stringify(completed, null, 2)}\n`,
+        CC_TEST_SWAP_JOB_AFTER_READ: "1",
+      },
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /already completed/u);
+  assert.doesNotMatch(result.stdout, /Cancelled cancel-terminal-race/u);
+});

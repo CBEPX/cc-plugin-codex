@@ -1635,6 +1635,8 @@ describe("reapStaleJobs", () => {
     assert.equal(result.length, 1);
     assert.equal(result[0].status, "failed");
     assert.ok(result[0].errorMessage.includes("Auto-reaped"));
+    assert.equal(result[0].reapedBy, "status-reaper");
+    assert.equal(result[0].reapReason, "process-missing");
     assert.equal(result[0].pid, null);
     assert.equal(result[0].pidIdentity, null);
     assert.ok(result[0].completedAt);

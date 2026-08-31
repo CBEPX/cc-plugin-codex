@@ -14,6 +14,19 @@ const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../", import.meta.url))
 );
 const SCRIPT_PATH = path.join(PROJECT_ROOT, "scripts", "install-hooks.mjs");
+const HOOK_LAUNCHER_SOURCE = path.join(PROJECT_ROOT, "scripts", "hook-launcher.mjs");
+
+function hookLauncherPath(homeDir) {
+  return path.join(
+    homeDir,
+    ".codex",
+    "plugins",
+    "data",
+    "cc-cbepx",
+    "runtime",
+    "hook-launcher.mjs"
+  );
+}
 
 function makeTempHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "claude-install-hooks-"));
@@ -60,7 +73,11 @@ describe("install-hooks.mjs", () => {
     const config = fs.readFileSync(configFile, "utf8");
     assert.match(config, /\[features\]/);
     assert.match(config, /hooks = true/);
-    assert.match(config, /plugin_hooks = true/);
+    assert.doesNotMatch(config, /plugin_hooks/);
+    assert.equal(
+      fs.readFileSync(hookLauncherPath(homeDir), "utf8"),
+      fs.readFileSync(HOOK_LAUNCHER_SOURCE, "utf8")
+    );
     assert.match(result.stdout, /native Codex plugin hooks/i);
   });
 
@@ -81,9 +98,27 @@ describe("install-hooks.mjs", () => {
 
     assert.match(config, /\[features\]/);
     assert.match(config, /hooks = true/);
-    assert.match(config, /plugin_hooks = true/);
+    assert.doesNotMatch(config, /plugin_hooks/);
     assert.doesNotMatch(config, /codex_hooks/);
     assert.match(result.stdout, /Enabled native Codex plugin hooks/i);
+  });
+
+  it("preserves an obsolete plugin_hooks setting while enabling hooks", () => {
+    const homeDir = makeTempHome();
+    tempHomes.push(homeDir);
+    const codexDir = path.join(homeDir, ".codex");
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(codexDir, "config.toml"),
+      "[features]\nhooks = false\nplugin_hooks = false\n",
+      "utf8"
+    );
+
+    runInstallHooks(homeDir);
+
+    const config = fs.readFileSync(path.join(codexDir, "config.toml"), "utf8");
+    assert.match(config, /hooks = true/);
+    assert.match(config, /plugin_hooks = false/);
   });
 
   it("removes stale managed global hook commands", () => {

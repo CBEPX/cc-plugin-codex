@@ -46,21 +46,21 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.0
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.1
 codex plugin add cc@cbepx
 ```
 
 Then run `$cc:setup` once inside Codex.
 
-`cc-plugin-codex` uses Codex native plugin hooks. The active plugin copy lives under Codex's plugin cache, and hook commands resolve through `$PLUGIN_ROOT`; there is no separate local checkout install.
+`cc-plugin-codex` uses Codex native plugin hooks. Hook commands enter through a small launcher under `$PLUGIN_DATA`; it resolves the current valid version from Codex's plugin cache, so an already-running session does not keep executing a deleted cache path.
 
 The optional `npx` helper can install this fork release and enable the required Codex feature gates:
 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.0 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.0/cc-plugin-codex-1.6.0.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.1 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.1/cc-plugin-codex-1.6.1.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -266,7 +266,7 @@ $cc:setup --disable-review-gate     # turn it off
 ```
 
 Setup checks Claude Code availability, native plugin hook feature gates, and review-gate state. `--check` reports required repairs without changing config or hook trust. If Claude Code isn't installed, setup offers to install it.
-This is also the repair path for marketplace-installed copies of the plugin: `$cc:setup` confirms `[features].hooks = true` and `[features].plugin_hooks = true`, then trusts this plugin's current native hook hashes so Codex loads the bundled hooks from the active plugin cache.
+This is also the repair path for marketplace-installed copies of the plugin: `$cc:setup` installs or refreshes the stable hook launcher, confirms `[features].hooks = true`, then trusts this plugin's current native hook hashes.
 
 ## Background Jobs
 
@@ -341,7 +341,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.0
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.1
 codex plugin add cc@cbepx
 ```
 
@@ -351,7 +351,7 @@ Then run:
 $cc:setup
 ```
 
-Marketplace/plugin install places the plugin under Codex's plugin cache. `$cc:setup` verifies Claude Code, confirms `[features].hooks = true` plus `[features].plugin_hooks = true`, and trusts the current `hooks/hooks.json` hook hashes from the active plugin cache.
+Marketplace/plugin install places the plugin under Codex's plugin cache. `$cc:setup` verifies Claude Code, installs or refreshes the stable hook launcher, confirms `[features].hooks = true`, and trusts the current `hooks/hooks.json` hook hashes.
 
 ### Upstream Sendbird build
 
@@ -362,8 +362,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.0 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.0/cc-plugin-codex-1.6.0.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.1 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.1/cc-plugin-codex-1.6.1.tgz install
 ```
 
 After install, run:
@@ -393,7 +393,7 @@ $cc:setup
 Re-run the fork marketplace install flow, pinned to the release you want:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.0
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.1
 codex plugin add cc@cbepx
 ```
 
@@ -415,7 +415,7 @@ claude auth login
 Re-run install and restart Codex. This plugin expects Codex plugin support and no longer installs local skill-wrapper fallbacks.
 
 **Hooks not firing**
-Check that `hooks = true` and `plugin_hooks = true` are set in `~/.codex/config.toml` under `[features]`. Run `$cc:setup` to verify and auto-repair the feature gates plus this plugin's hook trust hashes, then restart Codex if those flags were just changed.
+Check that `hooks = true` is set in `~/.codex/config.toml` under `[features]`. Run `$cc:setup` to verify and auto-repair the stable launcher, feature gate, and this plugin's hook trust hashes, then restart Codex if the flag was just changed.
 
 **A background job finished but I did not get the result nudge**
 Use:
