@@ -39,15 +39,15 @@ Initial execution is always background: do not wait in the parent turn. Return t
 
 ## Child contracts
 
-The Codex reasoning worker is not a forwarder. It researches independently with the repo and web routes exposed to its turn, performs zero workspace writes, and sends one object with `content`, `repoCitations`, `webCitations`, and public `toolEvents` as JSON on stdin to `peer-submit-memo`. It then waits for the Claude branch. If Claude completed, it compares the separate frozen memos and sends `agreements`, `disagreements`, and `decisionsNeeded` as JSON on stdin to `peer-checkpoint`. If Claude is incomplete, it stops without replacing either memo.
+The Codex reasoning worker is not a forwarder. It researches independently with the repo and web routes exposed to its turn, performs zero workspace writes, and sends one object with `content`, `repoCitations`, `webCitations`, and public `toolEvents` as JSON on stdin to `peer-submit-memo`. That command accepts only the Codex memo; Claude memo submission occurs only inside the trusted `peer-claude-turn` execution path. It then polls `peer-wait`, whose status-only view redacts the sibling payload until the Codex memo is sealed. If Claude completed, it compares the separate frozen memos and sends `agreements`, `disagreements`, and `decisionsNeeded` as JSON on stdin to `peer-checkpoint`. If Claude is incomplete, it stops without replacing either memo.
 
 The pure Claude forwarder must run exactly one companion command, in the foreground, and return stdout unchanged. It does no repository inspection or reasoning itself. Never use shell backgrounding (`nohup`, detached spawn, or an ampersand operator). Never invoke `codex exec`. If the shell yields a session, poll that same session until exit.
 
 `peer-claude-turn` gives Claude only Read, Glob, Grep, the selected `WebSearch, WebFetch` route, and exact selected MCP tools. The companion enforces `permission-mode=dontAsk`, a strict MCP config, no Bash, and no Agent. It records requested/final/fallback model telemetry and actual public tool-event names.
 
-Each foreground Claude peer turn is registered as a workflow-linked tracked job owned by the workflow session, so SessionEnd can terminate the identity-matched Claude process before marking unfinished work retryable.
+Each foreground Claude peer turn is registered as a workflow-linked tracked job owned by the workflow session, so SessionEnd can terminate the identity-matched Claude process before marking unfinished work retryable. A failed or unresolved linked cancellation leaves the target `cancel_failed` with no retry work.
 
-Every initial memo needs non-empty structured content, a canonical in-workspace repository citation, a direct `https://` citation, and an unchanged workspace fingerprint. Claude additionally needs actual repository and web tool events. Missing evidence becomes `incomplete`; never waive or fabricate it.
+Every initial memo needs non-empty structured content, a canonical in-workspace repository citation, a direct `https://` citation, and an unchanged workspace fingerprint. Claude additionally needs actual repository and web tool events, and continuation requires non-empty structured critique content. Missing evidence becomes `incomplete`; never waive or fabricate it.
 
 `peer-checkpoint` preserves separate frozen memos and adds agreements, disagreements, source/tool manifests, and decisions needed. Its final `commands` entries are the exact `$cc:<mode> --continue <workflow-id>` and `$cc:<mode> --retry <workflow-id>` commands.
 
@@ -72,4 +72,4 @@ Run `peer-resume-plan <id> --retry --owner-session-id <current-id> --json`. Exec
 
 Never restart or replace a completed branch/stage; retry only the missing stage. A cross-session retry uses the explicit workflow rebind, never generic task resume.
 
-SessionEnd owns shutdown: active linked companion work is stopped, only unfinished branches/stages become retryable, and no child may keep the workflow running headless.
+SessionEnd owns shutdown: active linked companion work is stopped first; only targets whose linked cancellation is terminally successful become retryable. Cancellation failure remains `cancel_failed`, exposes no retry work, and no child may keep the workflow running headless.

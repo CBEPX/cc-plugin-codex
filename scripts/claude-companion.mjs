@@ -62,6 +62,8 @@ import {
 import {
   buildInitialAgentPlan,
   buildPeerCheckpoint,
+  buildPeerWaitView,
+  isPeerWorkflow,
   nextPeerRetryWork,
   normalizePeerRequest,
   PEER_CLAUDE_ALLOWED_BASE_TOOLS,
@@ -201,8 +203,9 @@ function printUsage() {
       "  node scripts/claude-companion.mjs workflow-rebind <workflow-id> --revision <n> --epoch <n> --owner-session-id <id> [--json]",
       "  node scripts/claude-companion.mjs workflow-cancel-linked-jobs <workflow-id> --revision <n> --epoch <n> [--json]",
       "  node scripts/claude-companion.mjs peer-create --mode <design|research> [peer options] <brief>",
-      "  node scripts/claude-companion.mjs peer-submit-memo <workflow-id> --branch <codex|claude> --brief-hash <hash> < memo.json",
+      "  node scripts/claude-companion.mjs peer-submit-memo <workflow-id> --branch codex --brief-hash <hash> < memo.json",
       "  node scripts/claude-companion.mjs peer-claude-turn <workflow-id> --brief-hash <hash>",
+      "  node scripts/claude-companion.mjs peer-wait <workflow-id> [--mode <design|research>] [--json]",
       "  node scripts/claude-companion.mjs peer-checkpoint <workflow-id> --brief-hash <hash> < comparison.json",
       "  node scripts/claude-companion.mjs peer-resume-plan <workflow-id> --continue|--retry --owner-session-id <id>",
       "  node scripts/claude-companion.mjs peer-claude-critique <workflow-id> --brief-hash <hash>",
@@ -3215,6 +3218,14 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       throw new Error(result.failure?.kind ?? result.warning ?? "CLAUDE_TURN_FAILED");
     }
     const parsed = parsePeerClaudePayload(result, critique ? "Claude critique" : "Claude memo");
+    if (critique && (
+      !parsed.content ||
+      typeof parsed.content !== "object" ||
+      Array.isArray(parsed.content) ||
+      Object.keys(parsed.content).length === 0
+    )) {
+      throw new Error("EVIDENCE_INCOMPLETE: Claude critique content must be a non-empty JSON object.");
+    }
     const model = {
       requestedModel: result.requestedModel ?? peerModelValue(workflow, "claude"),
       finalModel: result.finalModel ?? null,
@@ -3224,7 +3235,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     };
     const payload = critique
       ? {
-          content: parsed.content,
+          content: JSON.parse(JSON.stringify(parsed.content)),
           toolEvents: result.toolUses.map(({ tool }) => ({ tool })),
           model,
           sessionId: result.sessionId,
@@ -3341,8 +3352,10 @@ function handlePeerSubmitMemo(argv) {
   const workflowId = requireWorkflowId(positionals);
   const workflow = readPeerWorkflow(cwd, workflowId, null, options["brief-hash"]);
   const branch = options.branch;
-  if (branch !== "codex" && branch !== "claude") {
-    throw new Error("INVALID_PEER_BRANCH: Use codex or claude.");
+  if (branch !== "codex") {
+    throw new Error(
+      "CODEX_MEMO_ONLY: peer-submit-memo accepts only the Codex worker memo; Claude submission is internal."
+    );
   }
   const rawMemo = readJsonStdin("Peer memo");
   startPeerTarget(cwd, workflowId, "memo", branch);
@@ -3535,7 +3548,25 @@ function handleWorkflowRead(argv) {
   if (!workflow) {
     throw new Error(`WORKFLOW_NOT_FOUND: No workflow found for ${workflowId}.`);
   }
-  outputResult(workflow, options.json);
+  outputResult(
+    isPeerWorkflow(workflow) && workflow.branches.codex.status !== "completed"
+      ? buildPeerWaitView(workflow)
+      : workflow,
+    options.json
+  );
+}
+
+function handlePeerWait(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "mode"],
+    booleanOptions: ["json"],
+  });
+  const workflow = readPeerWorkflow(
+    resolveCommandCwd(options),
+    requireWorkflowId(positionals),
+    options.mode
+  );
+  outputResult(buildPeerWaitView(workflow), options.json);
 }
 
 function handleWorkflowList(argv) {
@@ -3543,10 +3574,12 @@ function handleWorkflowList(argv) {
     valueOptions: ["cwd", "mode"],
     booleanOptions: ["json"],
   });
-  outputResult(
-    listWorkflows(resolveCommandCwd(options), { mode: options.mode }),
-    options.json
-  );
+  const workflows = listWorkflows(resolveCommandCwd(options), { mode: options.mode });
+  outputResult(workflows.map((workflow) =>
+    isPeerWorkflow(workflow) && workflow.branches.codex.status !== "completed"
+      ? buildPeerWaitView(workflow)
+      : workflow
+  ), options.json);
 }
 
 function workflowMutationOptions(options) {
@@ -3557,14 +3590,31 @@ function workflowMutationOptions(options) {
   };
 }
 
+function rejectPublicPeerClaudeMutation(cwd, workflowId, options) {
+  const workflow = readWorkflow(cwd, workflowId, {
+    ...(options.mode ? { mode: options.mode } : {}),
+  });
+  if (
+    isPeerWorkflow(workflow) &&
+    (options.branch === "claude" || options.stage === "critique")
+  ) {
+    throw new Error(
+      "TRUSTED_CLAUDE_PATH_REQUIRED: Claude peer state is mutable only by the trusted Claude turn."
+    );
+  }
+}
+
 function handleWorkflowStartStage(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "mode", "stage", "branch", "revision", "epoch"],
     booleanOptions: ["json"],
   });
+  const cwd = resolveCommandCwd(options);
+  const workflowId = requireWorkflowId(positionals);
+  rejectPublicPeerClaudeMutation(cwd, workflowId, options);
   const workflow = casStartWorkflowStage(
-    resolveCommandCwd(options),
-    requireWorkflowId(positionals),
+    cwd,
+    workflowId,
     {
       ...workflowMutationOptions(options),
       stage: options.stage,
@@ -3590,9 +3640,12 @@ function handleWorkflowSubmitStage(argv) {
     ],
     booleanOptions: ["json"],
   });
+  const cwd = resolveCommandCwd(options);
+  const workflowId = requireWorkflowId(positionals);
+  rejectPublicPeerClaudeMutation(cwd, workflowId, options);
   const workflow = submitWorkflowStage(
-    resolveCommandCwd(options),
-    requireWorkflowId(positionals),
+    cwd,
+    workflowId,
     {
       ...workflowMutationOptions(options),
       stage: options.stage,
@@ -3620,9 +3673,12 @@ function handleWorkflowBranchFailure(argv) {
     ],
     booleanOptions: ["json", "cancel-failed"],
   });
+  const cwd = resolveCommandCwd(options);
+  const workflowId = requireWorkflowId(positionals);
+  rejectPublicPeerClaudeMutation(cwd, workflowId, options);
   const workflow = markWorkflowBranchFailure(
-    resolveCommandCwd(options),
-    requireWorkflowId(positionals),
+    cwd,
+    workflowId,
     {
       ...workflowMutationOptions(options),
       stage: options.stage,
@@ -3916,6 +3972,9 @@ async function main() {
       break;
     case "peer-claude-turn":
       await handlePeerClaudeTurn(argv);
+      break;
+    case "peer-wait":
+      handlePeerWait(argv);
       break;
     case "peer-checkpoint":
       handlePeerCheckpoint(argv);

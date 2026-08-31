@@ -81,6 +81,9 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
 
   includesAll(runtime, [
     "peer-submit-memo",
+    "accepts only the Codex memo",
+    "peer-wait",
+    "redacts the sibling payload until the Codex memo is sealed",
     "JSON on stdin",
     "peer-claude-turn",
     "Read, Glob, Grep",
@@ -92,6 +95,7 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
     "canonical in-workspace repository citation",
     "direct `https://` citation",
     "actual repository and web tool events",
+    "non-empty structured critique content",
     "unchanged workspace fingerprint",
     "peer-checkpoint",
     "separate frozen memos",
@@ -101,6 +105,7 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
     "--resume",
     "--fork-session",
     "retry only the missing stage",
+    "A failed or unresolved linked cancellation leaves the target `cancel_failed` with no retry work",
     "peer-final",
   ], "peer runtime");
 });

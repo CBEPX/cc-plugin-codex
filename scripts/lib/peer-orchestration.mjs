@@ -161,7 +161,7 @@ export function buildInitialAgentPlan(workflow, options) {
     ` --cwd ${quoted(workflow.workspaceRoot)} --branch codex` +
     ` --brief-hash ${quoted(workflow.briefHash)} --json`;
   const readCommand =
-    `node ${quoted(companionPath)} workflow-read ${quoted(workflow.id)}` +
+    `node ${quoted(companionPath)} peer-wait ${quoted(workflow.id)}` +
     ` --cwd ${quoted(workflow.workspaceRoot)} --mode ${quoted(workflow.mode)} --json`;
   const checkpointCommand =
     `node ${quoted(companionPath)} peer-checkpoint ${quoted(workflow.id)}` +
@@ -179,7 +179,7 @@ export function buildInitialAgentPlan(workflow, options) {
       "You cannot read the sibling memo before submitting your own.",
       "Submit one structured memo as JSON on stdin to the peer-submit-memo companion command.",
       submitMemoCommand,
-      "After submission, poll workflow-read until the Claude branch is completed or retryable_failed.",
+      "After submission, poll peer-wait until the Claude branch is completed or retryable_failed.",
       readCommand,
       "When both memos completed, compare the frozen payloads and submit agreements, disagreements, and decisionsNeeded as JSON on stdin to peer-checkpoint.",
       checkpointCommand,
@@ -319,8 +319,58 @@ export function buildPeerCheckpoint(workflow, input = {}) {
   };
 }
 
+function peerBranchStatus(branch) {
+  return {
+    status: branch?.status ?? "missing",
+    failureReason: branch?.failureReason ?? null,
+    attempts: branch?.attempts ?? 0,
+  };
+}
+
+export function isPeerWorkflow(workflow) {
+  return Boolean(
+    workflow &&
+      ["design", "research"].includes(workflow.mode) &&
+      workflow.branches?.codex &&
+      workflow.branches?.claude
+  );
+}
+
+export function buildPeerWaitView(workflow) {
+  if (!isPeerWorkflow(workflow)) {
+    throw peerError("INVALID_PEER_WORKFLOW", "A design or research peer workflow is required.");
+  }
+  const codexSealed = workflow.branches.codex.status === "completed";
+  const claudeSealed = workflow.branches.claude.status === "completed";
+  return {
+    workflowId: workflow.id,
+    mode: workflow.mode,
+    status: workflow.status,
+    phase: workflow.phase,
+    revision: workflow.revision,
+    epoch: workflow.epoch,
+    briefHash: workflow.briefHash,
+    branches: {
+      codex: peerBranchStatus(workflow.branches.codex),
+      claude: peerBranchStatus(workflow.branches.claude),
+    },
+    readyForCheckpoint: codexSealed && claudeSealed,
+    ...(codexSealed ? {
+      memos: {
+        codex: workflow.branches.codex.payload,
+        claude: claudeSealed ? workflow.branches.claude.payload : null,
+      },
+    } : {}),
+  };
+}
+
 export function nextPeerRetryWork(workflow) {
-  const retryable = new Set(["pending", "retryable_failed", "cancel_failed"]);
+  const retryable = new Set(["pending", "retryable_failed"]);
+  const cancellationUnresolved = [
+    ...Object.values(workflow.branches ?? {}),
+    ...Object.values(workflow.stages ?? {}),
+  ].some((target) => target?.status === "cancel_failed");
+  if (cancellationUnresolved) return [];
   const branchWork = ["codex", "claude"]
     .filter((id) => retryable.has(workflow.branches?.[id]?.status))
     .map((id) => ({ kind: "branch", id }));

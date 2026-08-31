@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SANDBOX_STOP_REVIEW_TOOLS } from "../scripts/lib/claude-cli.mjs";
 import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
+import { nextPeerRetryWork } from "../scripts/lib/peer-orchestration.mjs";
 import { getProcessIdentity } from "../scripts/lib/process.mjs";
 import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
@@ -669,6 +670,119 @@ describe("hooks", () => {
         content: { finding: "frozen" },
       });
     } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd keeps peer work cancel_failed when its linked process cannot be cancelled", async (t) => {
+    if (process.platform !== "darwin") {
+      t.skip("Darwin ps identity lookup behavior");
+      return;
+    }
+
+    const testEnv = createHookEnvironment();
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" }
+    );
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+
+    try {
+      const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+      const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+      const identity = getProcessIdentity(child.pid);
+      const timestamp = new Date().toISOString();
+      writePeerWorkflow(testEnv, {
+        version: 1,
+        id: "workflow-linked-cancel-failure",
+        mode: "design",
+        status: "running",
+        phase: "memo",
+        revision: 1,
+        epoch: 0,
+        workspaceRoot,
+        fingerprint,
+        brief: "Do not retry while the old Claude process survives.",
+        briefHash: createHash("sha256")
+          .update("Do not retry while the old Claude process survives.")
+          .digest("hex"),
+        originSessionId: "hook-session",
+        currentOwnerSessionId: "hook-session",
+        modelManifest: [],
+        toolManifest: [],
+        stages: {
+          checkpoint: { status: "pending", payload: null, failureReason: null, attempts: 0 },
+        },
+        branches: {
+          codex: { status: "completed", payload: { content: { finding: "frozen" } }, attempts: 1 },
+          claude: {
+            status: "running",
+            payload: null,
+            failureReason: null,
+            attempts: 1,
+            stage: "memo",
+            startFingerprint: fingerprint,
+            startedAt: timestamp,
+          },
+        },
+        branchAttempts: [],
+        claudeSessionId: null,
+        checkpoint: null,
+        feedback: null,
+        critique: null,
+        finalResult: null,
+        failureReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      writeStateJob(testEnv, "peer-linked-cancel-failure", {
+        id: "peer-linked-cancel-failure",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot,
+        workflowId: "workflow-linked-cancel-failure",
+        workflowStage: "memo",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        pid: child.pid,
+        pidIdentity: identity,
+      });
+      const failingBin = path.join(testEnv.rootDir, "peer-failing-ps");
+      fs.mkdirSync(failingBin);
+      const fakePs = path.join(failingBin, "ps");
+      fs.writeFileSync(fakePs, `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args.at(-1) === process.env.CC_TEST_TARGET_PID) process.exit(2);
+const result = spawnSync("/bin/ps", args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`, "utf8");
+      fs.chmodSync(fakePs, 0o755);
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          PATH: `${failingBin}${path.delimiter}${testEnv.env.PATH}`,
+          CC_TEST_TARGET_PID: String(child.pid),
+        }
+      );
+
+      const job = readStateJob(testEnv, "peer-linked-cancel-failure");
+      const workflow = readPeerWorkflow(testEnv, "workflow-linked-cancel-failure");
+      assert.equal(job.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.failureReason, "SESSION_END_CANCEL_FAILED");
+      assert.deepEqual(nextPeerRetryWork(workflow), []);
+      assert.doesNotThrow(() => process.kill(child.pid, 0));
+    } finally {
+      child.kill();
       cleanupHookEnvironment(testEnv);
     }
   });

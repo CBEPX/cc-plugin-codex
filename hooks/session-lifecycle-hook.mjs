@@ -286,7 +286,31 @@ function cleanupSessionJobs(workspaceRoot, jobs, trigger, cleanupDeadlineAt) {
   return { jobs: [...updatedJobsById.values()], preparationComplete };
 }
 
-function markSessionWorkflowsRetryable(workspaceRoot, sessionId, cleanupDeadlineAt) {
+function targetLinkedJobs(workflow, target, jobs) {
+  const isPeerCodexBranch =
+    target.branchId === "codex" &&
+    workflow.branches?.codex &&
+    workflow.branches?.claude;
+  if (isPeerCodexBranch) return [];
+  return jobs.filter(
+    (job) =>
+      job.workflowId === workflow.id &&
+      job.workflowStage === target.stage
+  );
+}
+
+function linkedCancellationUnresolved(jobs) {
+  return jobs.some(
+    (job) => ACTIVE_JOB_STATUSES.has(job.status) || job.status === "cancel_failed"
+  );
+}
+
+function markSessionWorkflowsAfterCleanup(
+  workspaceRoot,
+  sessionId,
+  sessionJobs,
+  cleanupDeadlineAt
+) {
   const canonicalRoot = (() => {
     try {
       return fs.realpathSync.native(workspaceRoot);
@@ -324,6 +348,9 @@ function markSessionWorkflowsRetryable(workspaceRoot, sessionId, cleanupDeadline
         ? current?.branches?.[target.branchId]
         : current?.stages?.[target.stage];
       if (!current || state?.status !== "running") continue;
+      const cancellationFailed = linkedCancellationUnresolved(
+        targetLinkedJobs(current, target, sessionJobs)
+      );
       try {
         markWorkflowBranchFailure(workspaceRoot, current.id, {
           stage: target.stage,
@@ -331,7 +358,8 @@ function markSessionWorkflowsRetryable(workspaceRoot, sessionId, cleanupDeadline
           revision: current.revision,
           epoch: current.epoch,
           mode: current.mode,
-          reason: "SESSION_ENDED",
+          reason: cancellationFailed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
+          cancelFailed: cancellationFailed,
         });
       } catch (error) {
         reportLifecycleFailure("SessionEnd workflow", error);
@@ -431,11 +459,6 @@ function handleSessionEnd(input) {
       workspaceRoot ??= resolveLifecycleWorkspaceRoot(cwd);
       markSessionCleanupPending(workspaceRoot, sessionId);
       cleanupMarkerRecorded = true;
-      markSessionWorkflowsRetryable(
-        workspaceRoot,
-        sessionId,
-        cleanupDeadlineAt
-      );
       const sessionJobs = listStoredJobs(workspaceRoot).filter(
         (job) =>
           job.sessionId === sessionId &&
@@ -446,6 +469,12 @@ function handleSessionEnd(input) {
         workspaceRoot,
         sessionJobs,
         "the Codex session ended",
+        cleanupDeadlineAt
+      );
+      markSessionWorkflowsAfterCleanup(
+        workspaceRoot,
+        sessionId,
+        cleanup.jobs,
         cleanupDeadlineAt
       );
       if (

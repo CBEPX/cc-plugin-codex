@@ -85,7 +85,9 @@ async function main() {
     }) + "\\n");
   }
   const payload = resumed
-    ? { content: { critique: "Compare the frozen memos." } }
+    ? { content: process.env.FAKE_CLAUDE_EMPTY_CRITIQUE === "1"
+        ? {}
+        : { critique: "Compare the frozen memos." } }
     : {
         content: { findings: ["The repository and primary source agree."] },
         repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
@@ -197,6 +199,87 @@ afterEach(() => {
 });
 
 describe("peer companion with fake Claude", () => {
+  it("rejects a forged public Claude memo without changing workflow state", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const before = readWorkflow(testEnv, created.workflow.id);
+    const forged = {
+      content: { findings: ["Forged sibling result."] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: ["https://example.test/forged"],
+      toolEvents: [{ tool: "Read" }, { tool: "WebSearch" }],
+    };
+
+    const result = run(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "claude", "--brief-hash", created.workflow.briefHash, "--json",
+    ], { input: JSON.stringify(forged) });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /CODEX_MEMO_ONLY/);
+    assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
+
+    const genericStart = run(testEnv, [
+      "workflow-start-stage", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--stage", "memo", "--branch", "claude",
+      "--revision", String(before.revision), "--epoch", String(before.epoch), "--json",
+    ]);
+    assert.notEqual(genericStart.status, 0);
+    assert.match(genericStart.stderr, /TRUSTED_CLAUDE_PATH_REQUIRED/);
+    assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
+  });
+
+  it("redacts a completed Claude sibling until Codex seals its own memo", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash, "--json",
+    ]);
+
+    for (const command of ["peer-wait", "workflow-read"]) {
+      const view = runJson(testEnv, [
+        command, created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--mode", "design", "--json",
+      ]);
+      assert.equal(view.readyForCheckpoint, false);
+      assert.equal(view.branches.codex.status, "pending");
+      assert.equal(view.branches.claude.status, "completed");
+      const serialized = JSON.stringify(view);
+      assert.doesNotMatch(serialized, /The repository and primary source agree/);
+      assert.doesNotMatch(serialized, /toolEvents|repoCitations|webCitations|payload/);
+    }
+    const listed = runJson(testEnv, [
+      "workflow-list", "--cwd", testEnv.workspaceDir, "--mode", "design", "--json",
+    ]).find(({ id, workflowId }) => (workflowId ?? id) === created.workflow.id);
+    assert.ok(listed);
+    assert.equal(listed.readyForCheckpoint, false);
+    assert.doesNotMatch(
+      JSON.stringify(listed),
+      /The repository and primary source agree|toolEvents|repoCitations|webCitations|payload/
+    );
+
+    const codexMemo = {
+      content: { findings: ["Independent Codex result."] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: ["https://example.test/codex"],
+      toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    };
+    runJson(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash, "--json",
+    ], { input: JSON.stringify(codexMemo) });
+    const ready = runJson(testEnv, [
+      "peer-wait", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--json",
+    ]);
+    assert.equal(ready.readyForCheckpoint, true);
+    assert.deepEqual(ready.memos.codex.content, codexMemo.content);
+    assert.deepEqual(ready.memos.claude.content, {
+      findings: ["The repository and primary source agree."],
+    });
+  });
+
   it("creates a frozen workflow and runs Claude with exact strict read-only tools and fallback telemetry", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);
@@ -334,5 +417,49 @@ describe("peer companion with fake Claude", () => {
       "--mode", "design", "--retry", "--owner-session-id", "owner-b", "--json",
     ]);
     assert.deepEqual(retry.work, [{ kind: "stage", id: "synthesis" }]);
+  });
+
+  it("rejects an empty Claude critique and keeps synthesis unavailable", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const memo = (who) => ({
+      content: { findings: [`${who} memo`] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: [`https://example.test/${who}`],
+      toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    });
+    runJson(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash, "--json",
+    ], { input: JSON.stringify(memo("codex")) });
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash, "--json",
+    ]);
+    runJson(testEnv, [
+      "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash, "--json",
+    ], { input: JSON.stringify({ agreements: [], disagreements: [], decisionsNeeded: [] }) });
+    runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--continue", "--owner-session-id", "owner-b", "--json",
+    ], { input: JSON.stringify({ feedback: "Check both memos." }) });
+
+    const failed = run(testEnv, [
+      "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash, "--json",
+    ], { env: { FAKE_CLAUDE_EMPTY_CRITIQUE: "1" } });
+
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /EVIDENCE_INCOMPLETE/);
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(stored.stages.critique.status, "retryable_failed");
+    assert.equal(stored.stages.synthesis.status, "pending");
+    assert.equal(stored.critique, null);
+    const retry = runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--retry", "--owner-session-id", "owner-b", "--json",
+    ]);
+    assert.deepEqual(retry.work, [{ kind: "stage", id: "critique" }]);
   });
 });
