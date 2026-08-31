@@ -10,15 +10,20 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
+
+import { resolvePluginStateRoot } from "./codex-paths.mjs";
 
 import {
   getConfig,
   getCurrentSession,
   listJobs,
   readJobFile,
+  resolveJobsDir,
   resolveJobFile,
   resolveJobLogFile,
   TERMINAL_JOB_STATUSES,
+  sanitizeId,
 } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -178,6 +183,56 @@ function matchJobReference(jobs, reference, predicate = () => true) {
   throw new Error(`No job found for "${reference}". Run status to list known jobs.`);
 }
 
+function findExactJobAcrossWorkspaces(reference) {
+  const jobId = sanitizeId(reference, "job ID");
+  const stateRoot = resolvePluginStateRoot();
+  let entries = [];
+  try {
+    entries = fs.readdirSync(stateRoot, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(stateRoot, entry.name, "jobs", `${jobId}.json`);
+    try {
+      if (!fs.lstatSync(candidate).isFile()) continue;
+      const stored = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      if (
+        stored?.id !== jobId ||
+        typeof stored.workspaceRoot !== "string" ||
+        path.resolve(resolveJobsDir(stored.workspaceRoot), `${jobId}.json`) !==
+          path.resolve(candidate)
+      ) {
+        continue;
+      }
+      const job = listJobs(stored.workspaceRoot).find(
+        (knownJob) => knownJob.id === jobId
+      );
+      if (job) {
+        matches.push({ workspaceRoot: stored.workspaceRoot, job });
+      }
+    } catch {}
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `Job ${jobId} exists in multiple workspaces. Run status from the intended workspace.`
+    );
+  }
+  return matches[0] ?? null;
+}
+
+function resolveReferencedJob(workspaceRoot, jobs, reference) {
+  const exact = jobs.find((job) => job.id === reference);
+  if (exact) return { workspaceRoot, job: exact };
+  const global = findExactJobAcrossWorkspaces(reference);
+  if (global) return global;
+  return { workspaceRoot, job: matchJobReference(jobs, reference) };
+}
+
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
@@ -218,11 +273,13 @@ export function buildStatusSnapshot(cwd, options = {}) {
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const selected = matchJobReference(jobs, reference);
-  if (!selected) throw new Error(`No job found for "${reference}".`);
+  const resolved = reference
+    ? resolveReferencedJob(workspaceRoot, jobs, reference)
+    : { workspaceRoot, job: matchJobReference(jobs, reference) };
+  if (!resolved.job) throw new Error(`No job found for "${reference}".`);
   return {
-    workspaceRoot,
-    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines }),
+    workspaceRoot: resolved.workspaceRoot,
+    job: enrichJob(resolved.job, { maxProgressLines: options.maxProgressLines }),
   };
 }
 
@@ -236,13 +293,13 @@ export function resolveResultJob(cwd, reference) {
         })
   );
   if (reference) {
-    const selected = matchJobReference(jobs, reference);
-    const enriched = enrichJob(selected);
+    const resolved = resolveReferencedJob(workspaceRoot, jobs, reference);
+    const enriched = enrichJob(resolved.job);
     if (TERMINAL_JOB_STATUSES.has(enriched.status)) {
-      return { workspaceRoot, job: enriched, state: "terminal" };
+      return { workspaceRoot: resolved.workspaceRoot, job: enriched, state: "terminal" };
     }
     if (enriched.status === "queued" || ACTIVE_STATUSES.has(enriched.status)) {
-      return { workspaceRoot, job: enriched, state: "active" };
+      return { workspaceRoot: resolved.workspaceRoot, job: enriched, state: "active" };
     }
     throw new Error(
       `Job ${enriched.id} is ${enriched.status}. Check status for more details.`
@@ -263,9 +320,17 @@ export function resolveCancelableJob(cwd, reference) {
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const activeJobs = jobs.filter((job) => job.status === "running" || job.status === "queued");
   if (reference) {
-    const selected = matchJobReference(activeJobs, reference);
-    if (!selected) throw new Error(`No active job found for "${reference}".`);
-    return { workspaceRoot, job: selected };
+    const localExact = jobs.find((job) => job.id === reference);
+    const resolved = localExact
+      ? { workspaceRoot, job: localExact }
+      : findExactJobAcrossWorkspaces(reference) ?? {
+          workspaceRoot,
+          job: matchJobReference(activeJobs, reference),
+        };
+    if (resolved.job.status !== "running" && resolved.job.status !== "queued") {
+      throw new Error(`No active job found for "${reference}".`);
+    }
+    return resolved;
   }
   if (activeJobs.length === 1) return { workspaceRoot, job: activeJobs[0] };
   if (activeJobs.length > 1) throw new Error("Multiple Claude Code jobs are active. Pass a job id to $cc:cancel.");

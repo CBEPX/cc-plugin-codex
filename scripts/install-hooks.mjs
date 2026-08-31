@@ -18,6 +18,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureNativePluginHooksEnabled } from "./lib/codex-config.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
+import { installHookLauncher } from "./lib/hook-launcher-install.mjs";
+import { pluginDataNamespaceForMarketplace } from "./lib/plugin-identity.mjs";
 import {
   removeManagedHooks,
   writeTextAtomic,
@@ -27,6 +29,8 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "..");
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
+const MARKETPLACE_NAME =
+  process.env.CC_PLUGIN_CODEX_MARKETPLACE_NAME?.trim() || "cbepx";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,6 +62,10 @@ function main() {
       `Cannot safely remove legacy hooks while ${path.join(CODEX_DIR, "hooks.json")} is invalid.`
     );
   }
+  const launcher = installHookLauncher(
+    PLUGIN_ROOT,
+    pluginDataNamespaceForMarketplace(MARKETPLACE_NAME)
+  );
   const nativeHooksChanged = configureNativePluginHooks();
 
   if (nativeHooksChanged) {
@@ -65,7 +73,10 @@ function main() {
   } else {
     console.log("Native Codex plugin hooks are already enabled.");
   }
-  console.log("Codex now loads this plugin's hooks from hooks/hooks.json in the active plugin cache.");
+  if (launcher.changed) {
+    console.log(`Installed stable native hook launcher at ${launcher.destination}.`);
+  }
+  console.log("Codex now loads this plugin's hooks through the stable plugin-data launcher.");
 }
 
 main();

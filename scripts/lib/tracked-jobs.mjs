@@ -367,18 +367,10 @@ export async function runTrackedJob(job, runner, options = {}) {
     options.getProcessIdentityImpl ??
     getSpawnedProcessIdentity;
   const storedJob = readJobFile(job.workspaceRoot, job.id);
-  let workerPidIdentity =
-    [job, storedJob].find(
-      (candidate) =>
-        candidate?.workerPid === workerPid &&
-        typeof candidate.workerPidIdentity === "string" &&
-        candidate.workerPidIdentity
-    )?.workerPidIdentity ?? null;
-  if (!workerPidIdentity) {
-    try {
-      workerPidIdentity = getWorkerProcessIdentityImpl(workerPid);
-    } catch {}
-  }
+  let workerPidIdentity = null;
+  try {
+    workerPidIdentity = getWorkerProcessIdentityImpl(workerPid);
+  } catch {}
   // ponytail: without a stable worker identity, fall back to the child's
   // identity; add an alternate worker identity source only if this becomes common.
   const runningRecord = {
@@ -479,7 +471,8 @@ export async function runTrackedJob(job, runner, options = {}) {
     if (
       !transitioned.transitioned &&
       transitioned.previousStatus === "failed" &&
-      transitioned.job?.reapedUnverifiable === true
+      (transitioned.job?.reapedBy === "status-reaper" ||
+        transitioned.job?.reapedUnverifiable === true)
     ) {
       transitioned = transitionTrackedJob(
         job.workspaceRoot,
@@ -489,6 +482,8 @@ export async function runTrackedJob(job, runner, options = {}) {
         {
           ...terminalData,
           errorMessage: null,
+          reapedBy: null,
+          reapReason: null,
           reapedUnverifiable: false,
         }
       );

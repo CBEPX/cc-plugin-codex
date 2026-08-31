@@ -17,6 +17,7 @@ import {
   buildStatusSnapshot,
   buildSingleJobSnapshot,
   resolveResultJob,
+  resolveCancelableJob,
   DEFAULT_MAX_STATUS_JOBS,
   DEFAULT_MAX_PROGRESS_LINES,
 } from "../scripts/lib/job-control.mjs";
@@ -419,6 +420,73 @@ describe("enrichJob", () => {
 });
 
 describe("buildSingleJobSnapshot", () => {
+  it("resolves exact job ids across workspace state roots", () => {
+    const sourceRepo = createTempGitRepo();
+    const otherRepo = createTempGitRepo();
+    const completedId = "task-global-completed-a1b2c3";
+    const runningId = "task-global-running-d4e5f6";
+    try {
+      writeJobFile(otherRepo, completedId, {
+        id: completedId,
+        status: "completed",
+        jobClass: "task",
+        workspaceRoot: otherRepo,
+        createdAt: "2026-04-03T10:00:00Z",
+        completedAt: "2026-04-03T10:01:00Z",
+      });
+      writeJobFile(otherRepo, runningId, {
+        id: runningId,
+        status: "running",
+        jobClass: "task",
+        workspaceRoot: otherRepo,
+        createdAt: new Date().toISOString(),
+      });
+
+      const snapshot = buildSingleJobSnapshot(sourceRepo, completedId);
+      assert.equal(snapshot.workspaceRoot, otherRepo);
+      assert.equal(snapshot.job.id, completedId);
+      assert.equal(resolveResultJob(sourceRepo, completedId).workspaceRoot, otherRepo);
+      assert.equal(resolveCancelableJob(sourceRepo, runningId).workspaceRoot, otherRepo);
+      assert.throws(
+        () => resolveResultJob(sourceRepo, "task-global-completed"),
+        /No job found/
+      );
+    } finally {
+      fs.rmSync(resolveJobsDir(sourceRepo), { recursive: true, force: true });
+      fs.rmSync(resolveJobsDir(otherRepo), { recursive: true, force: true });
+      fs.rmSync(sourceRepo, { recursive: true, force: true });
+      fs.rmSync(otherRepo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects duplicate exact job ids across workspace state roots", () => {
+    const sourceRepo = createTempGitRepo();
+    const firstRepo = createTempGitRepo();
+    const secondRepo = createTempGitRepo();
+    const jobId = "task-global-duplicate-a1b2c3";
+    try {
+      for (const repoDir of [firstRepo, secondRepo]) {
+        writeJobFile(repoDir, jobId, {
+          id: jobId,
+          status: "completed",
+          jobClass: "task",
+          workspaceRoot: repoDir,
+          createdAt: "2026-04-03T10:00:00Z",
+        });
+      }
+
+      assert.throws(
+        () => buildSingleJobSnapshot(sourceRepo, jobId),
+        /exists in multiple workspaces/
+      );
+    } finally {
+      for (const repoDir of [sourceRepo, firstRepo, secondRepo]) {
+        fs.rmSync(resolveJobsDir(repoDir), { recursive: true, force: true });
+        fs.rmSync(repoDir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("resolves newest, exact, and unique-prefix references", () => {
     withTempJobRepo((repoDir) => {
       for (const [id, updatedAt] of [

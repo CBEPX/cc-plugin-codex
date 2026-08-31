@@ -17,6 +17,26 @@ const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../../", import.meta.url))
 );
 const COMPANION_SCRIPT = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
+const HOOK_LAUNCHER_SOURCE = path.join(PROJECT_ROOT, "scripts", "hook-launcher.mjs");
+
+function hookLauncherPath(testEnv) {
+  return path.join(
+    testEnv.homeDir,
+    ".codex",
+    "plugins",
+    "data",
+    "cc",
+    "runtime",
+    "hook-launcher.mjs"
+  );
+}
+
+function installHookLauncherFixture(testEnv) {
+  const destination = hookLauncherPath(testEnv);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(HOOK_LAUNCHER_SOURCE, destination);
+  return destination;
+}
 
 function createFakeClaudeBinary(binDir) {
   const claudePath = path.join(binDir, "claude");
@@ -264,6 +284,7 @@ function createTestEnvironment() {
       HOME: homeDir,
       USERPROFILE: homeDir,
       CODEX_HOME: path.join(homeDir, ".codex"),
+      CODEX_THREAD_ID: "",
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
@@ -855,6 +876,10 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(initial.reviewGateEnabled, false);
+      assert.equal(
+        fs.readFileSync(hookLauncherPath(testEnv), "utf8"),
+        fs.readFileSync(HOOK_LAUNCHER_SOURCE, "utf8")
+      );
 
       const enabled = runCompanion(
         ["setup", "--cwd", testEnv.workspaceDir, "--enable-review-gate"],
@@ -918,6 +943,7 @@ describe("claude-companion integration", () => {
       assert.equal(report.checkOnly, true);
       assert.equal(report.ready, false);
       assert.equal(report.hooks.installed, false);
+      assert.match(report.hooks.detail, /launcher/u);
       assert.equal(report.hookTrust.ready, false);
       assert.equal(report.hookTrust.pendingTrust, 1);
       assert.deepEqual(report.actionsTaken, []);
@@ -934,6 +960,29 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("setup --check reports a missing stable hook launcher without creating it", () => {
+    const testEnv = createTestEnvironment();
+    const codexDir = path.join(testEnv.homeDir, ".codex");
+    const configFile = path.join(codexDir, "config.toml");
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(configFile, "[features]\nhooks = true\n", "utf8");
+
+    try {
+      const report = runCompanionJson(
+        ["setup", "--cwd", testEnv.workspaceDir, "--check", "--json"],
+        { env: testEnv.env }
+      );
+
+      assert.equal(report.ready, false);
+      assert.equal(report.hooks.installed, false);
+      assert.match(report.hooks.detail, /launcher/u);
+      assert.deepEqual(report.actionsTaken, []);
+      assert.equal(fs.existsSync(hookLauncherPath(testEnv)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("setup --check preserves ready config and state file metadata", () => {
     const testEnv = createTestEnvironment();
     const codexDir = path.join(testEnv.homeDir, ".codex");
@@ -944,6 +993,7 @@ describe("claude-companion integration", () => {
     fs.mkdirSync(codexDir, { recursive: true });
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(configFile, configContent, { mode: 0o640 });
+    const launcherFile = installHookLauncherFixture(testEnv);
     fs.writeFileSync(
       stateFile,
       JSON.stringify({ version: 1, stopReviewGate: false }, null, 2) + "\n",
@@ -952,7 +1002,8 @@ describe("claude-companion integration", () => {
     const fixedMtime = new Date("2026-01-01T00:00:00.000Z");
     fs.utimesSync(configFile, fixedMtime, fixedMtime);
     fs.utimesSync(stateFile, fixedMtime, fixedMtime);
-    const before = [configFile, stateFile].map((filePath) => ({
+    fs.utimesSync(launcherFile, fixedMtime, fixedMtime);
+    const before = [configFile, stateFile, launcherFile].map((filePath) => ({
       content: fs.readFileSync(filePath, "utf8"),
       mode: fs.statSync(filePath).mode & 0o777,
       mtimeMs: fs.statSync(filePath).mtimeMs,
@@ -983,7 +1034,7 @@ describe("claude-companion integration", () => {
 
       assert.equal(report.ready, true);
       assert.deepEqual(report.actionsTaken, []);
-      for (const [index, filePath] of [configFile, stateFile].entries()) {
+      for (const [index, filePath] of [configFile, stateFile, launcherFile].entries()) {
         const stat = fs.statSync(filePath);
         assert.equal(fs.readFileSync(filePath, "utf8"), before[index].content);
         assert.equal(stat.mode & 0o777, before[index].mode);
@@ -1679,11 +1730,11 @@ describe("claude-companion integration", () => {
     }
   });
 
-  it("does not classify unknown exit-zero output that mentions rate limiting as a Claude limit failure", () => {
+  it("accepts terminal output with parser diagnostics for a read-only task", () => {
     const testEnv = createTestEnvironment();
 
     try {
-      const jsonResult = runCompanionExpectFailure(
+      const jsonPayload = runCompanionJson(
         [
           "task",
           "--cwd",
@@ -1694,13 +1745,13 @@ describe("claude-companion integration", () => {
         ],
         { env: testEnv.env }
       );
-      const jsonPayload = JSON.parse(jsonResult.stdout);
 
-      assert.equal(jsonPayload.status, "unknown");
+      assert.equal(jsonPayload.status, "completed");
       assert.equal(jsonPayload.failure, null);
+      assert.equal(jsonPayload.parseErrors.length, 1);
       assert.match(jsonPayload.rawOutput, /completed:malformed-line document rate limiting and 429 handling/);
 
-      const textResult = runCompanionExpectFailure(
+      const textResult = runCompanion(
         [
           "task",
           "--cwd",
@@ -1710,9 +1761,34 @@ describe("claude-companion integration", () => {
         ],
         { env: testEnv.env }
       );
-      assert.equal(textResult.status, 1);
+      assert.equal(textResult.status, 0);
       assert.match(textResult.stdout, /completed:malformed-line document rate limiting and 429 handling/);
       assert.doesNotMatch(textResult.stdout, /Claude usage limit reached/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("keeps terminal output with parser errors unknown for a workspace-write task", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const jsonResult = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--write",
+          "--json",
+          "--quiet-progress",
+          "malformed-line workspace-write delay=20",
+        ],
+        { env: testEnv.env }
+      );
+      const jsonPayload = JSON.parse(jsonResult.stdout);
+
+      assert.equal(jsonPayload.status, "unknown");
+      assert.equal(jsonPayload.parseErrors.length, 1);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -2035,6 +2111,30 @@ describe("claude-companion integration", () => {
         { env }
       );
       assert.match(task.stderr, /Perform the requested task yourself/);
+      assert.equal(listStoredJobs(testEnv).length, 0);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("refuses delegation from a Claude Code environment without a workspace marker", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      const env = {
+        ...testEnv.env,
+        CLAUDECODE: "1",
+        CLAUDE_CODE_ENTRYPOINT: "cli",
+      };
+      delete env[SESSION_ID_ENV];
+
+      const review = runCompanionExpectFailure(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree"],
+        { env }
+      );
+      assert.match(review.stderr, /driven by Claude Code/);
       assert.equal(listStoredJobs(testEnv).length, 0);
     } finally {
       cleanupTestEnvironment(testEnv);
@@ -3101,6 +3201,29 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("prefers the live CODEX_THREAD_ID over a stale workspace marker", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      writeCurrentSessionMarker(testEnv, "stale-marker-session");
+      const env = {
+        ...testEnv.env,
+        CODEX_THREAD_ID: "live-thread-session",
+      };
+      delete env[SESSION_ID_ENV];
+
+      const payload = runCompanionJson(
+        ["session-routing-context", "--cwd", testEnv.workspaceDir, "--json"],
+        { env }
+      );
+
+      assert.equal(payload.ownerSessionId, "live-thread-session");
+      assert.equal(payload.parentThreadId, "live-thread-session");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("drops invalid parent thread ids from session routing context", () => {
     const testEnv = createTestEnvironment();
 
@@ -3118,6 +3241,73 @@ describe("claude-companion integration", () => {
 
       assert.equal(payload.ownerSessionId, "env-session");
       assert.equal(payload.parentThreadId, null);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("uses CODEX_THREAD_ID as the owner when a linked worktree has no marker", () => {
+    const testEnv = createTestEnvironment();
+    const linkedWorktree = path.join(testEnv.rootDir, "linked-worktree");
+    const threadEnv = {
+      ...testEnv.env,
+      CODEX_THREAD_ID: "thread-linked-owner",
+    };
+    delete threadEnv[SESSION_ID_ENV];
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      writeCurrentSessionMarker(testEnv, "root-workspace-session");
+      runGit(testEnv.workspaceDir, [
+        "worktree",
+        "add",
+        "-b",
+        "linked-routing-test",
+        linkedWorktree,
+      ]);
+
+      const routing = runCompanionJson(
+        [
+          "background-routing-context",
+          "--kind",
+          "task",
+          "--cwd",
+          linkedWorktree,
+          "--json",
+        ],
+        { env: threadEnv }
+      );
+      assert.equal(routing.workspaceRoot, fs.realpathSync.native(linkedWorktree));
+      assert.equal(routing.ownerSessionId, "thread-linked-owner");
+      assert.equal(routing.parentThreadId, "thread-linked-owner");
+
+      runCompanion(
+        [
+          "task",
+          "--cwd",
+          linkedWorktree,
+          "--job-id",
+          routing.jobId,
+          "--owner-session-id",
+          routing.ownerSessionId,
+          "--quiet-progress",
+          "linked-owner-seed delay=20",
+        ],
+        { env: threadEnv }
+      );
+
+      const resume = runCompanion(
+        [
+          "task",
+          "--cwd",
+          linkedWorktree,
+          "--resume",
+          "--quiet-progress",
+          "linked-owner-resume delay=20",
+        ],
+        { env: threadEnv }
+      );
+      assert.match(resume.stdout, /completed:linked-owner-resume/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -3360,7 +3550,8 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(noSessionContextCandidate.available, false);
-      assert.equal(noSessionContextCandidate.sessionId, null);
+      assert.equal(noSessionContextCandidate.sessionId, "session-a");
+      assert.equal(noSessionContextCandidate.reason, "active_task");
       assert.equal(noSessionContextCandidate.candidate, null);
 
       writeCurrentSessionMarker(testEnv, "session-a");
@@ -3369,7 +3560,8 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(markerCandidateA.available, false);
-      assert.equal(markerCandidateA.sessionId, null);
+      assert.equal(markerCandidateA.sessionId, "session-a");
+      assert.equal(markerCandidateA.reason, "active_task");
       assert.equal(markerCandidateA.candidate, null);
 
       writeCurrentSessionMarker(testEnv, "session-c");
@@ -3378,7 +3570,7 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(markerCandidateC.available, false);
-      assert.equal(markerCandidateC.sessionId, null);
+      assert.equal(markerCandidateC.sessionId, "session-c");
       assert.equal(markerCandidateC.candidate, null);
 
       await waitForTerminalResult(testEnv, activeA.jobId, sessionAEnv);
@@ -3451,7 +3643,7 @@ describe("claude-companion integration", () => {
     }
   });
 
-  it("keeps an ownerless task visible without using the marker for resume", async () => {
+  it("uses the workspace marker as the owner for resume", async () => {
     const testEnv = createTestEnvironment();
     try {
       writeCurrentSessionMarker(testEnv, "stale-marker-session");
@@ -3472,11 +3664,18 @@ describe("claude-companion integration", () => {
         "stale-marker-session"
       );
 
-      const resume = runCompanionExpectFailure(
-        ["task", "--cwd", testEnv.workspaceDir, "--resume", "follow-up"],
+      const resume = runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--resume",
+          "--quiet-progress",
+          "marker-follow-up delay=20",
+        ],
         { env: testEnv.env }
       );
-      assert.match(resume.stderr, /Cannot resume without an owning Codex session/);
+      assert.match(resume.stdout, /completed:marker-follow-up/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -4014,6 +4213,37 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("accepts a read-only review terminal event with parser diagnostics", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, "notes.md"),
+        "malformed-line review output\n",
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--json",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(payload.codex.status, "completed");
+      assert.equal(payload.codex.parseErrors.length, 1);
+      assert.match(payload.codex.warning, /1 unrecovered parse error/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("accepts terminal structured_output for adversarial reviews when result text is empty", () => {
     const testEnv = createTestEnvironment();
 
@@ -4288,6 +4518,107 @@ describe("claude-companion integration", () => {
         } catch {
           // Process may have already exited.
         }
+      }
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("cancels a foreground review when its companion receives SIGTERM", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-foreground-review-signal",
+    };
+    let observer = null;
+    let stderr = "";
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, "app.js"),
+        "export function value() { return 'foreground review signal delay=900'; }\n",
+        "utf8"
+      );
+      runGit(testEnv.workspaceDir, ["add", "app.js"]);
+      runGit(testEnv.workspaceDir, ["commit", "-m", "foreground review signal delay=900"]);
+      const reserved = runCompanionJson(
+        ["review-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+
+      observer = spawn(
+        process.execPath,
+        [
+          COMPANION_SCRIPT,
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--job-id",
+          reserved.jobId,
+          "--base",
+          "HEAD~1",
+          "--json",
+        ],
+        {
+          cwd: PROJECT_ROOT,
+          env: sessionEnv,
+          stdio: ["ignore", "ignore", "pipe"],
+        }
+      );
+      observer.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const closed = new Promise((resolve) => {
+        observer.on("close", (code, signal) => resolve({ code, signal }));
+      });
+
+      let runningJob = null;
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        runningJob = listStoredJobs(testEnv).find(
+          (job) =>
+            job.id === reserved.jobId &&
+            job.status === "running" &&
+            typeof job.pid === "number"
+        );
+        if (runningJob) {
+          break;
+        }
+        await sleep(25);
+      }
+      assert.ok(runningJob, "expected the foreground review to enter running state");
+
+      process.kill(observer.pid, "SIGTERM");
+      const exit = await closed;
+      observer = null;
+
+      assert.equal(exit.code, 143, stderr);
+      assert.equal(exit.signal, null);
+      const storedJob = readStoredJobById(testEnv, reserved.jobId);
+      assert.equal(storedJob.status, "cancelled");
+      assert.equal(storedJob.pid, null);
+      assert.equal(storedJob.pidIdentity, null);
+      for (const subdir of ["sandbox", "mcp", "review-worktrees"]) {
+        const runtimeDir = path.join(
+          testEnv.homeDir,
+          ".codex",
+          "plugins",
+          "data",
+          "cc",
+          "runtime",
+          subdir
+        );
+        assert.deepEqual(
+          fs.existsSync(runtimeDir) ? fs.readdirSync(runtimeDir) : [],
+          [],
+          `${subdir} should be empty after signal cleanup`
+        );
+      }
+    } finally {
+      if (observer?.pid) {
+        try {
+          process.kill(observer.pid, "SIGKILL");
+        } catch {}
       }
       cleanupTestEnvironment(testEnv);
     }

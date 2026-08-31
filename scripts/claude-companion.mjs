@@ -75,6 +75,11 @@ import {
   ensureNativePluginHooksEnabled,
   nativePluginHooksStatus,
 } from "./lib/codex-config.mjs";
+import {
+  hookLauncherStatus,
+  installHookLauncher,
+} from "./lib/hook-launcher-install.mjs";
+import { pluginDataNamespaceForMarketplace } from "./lib/plugin-identity.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { parseStructuredOutput } from "./lib/structured-output.mjs";
 import {
@@ -252,14 +257,25 @@ function resolveParentThreadId() {
 
 function buildSessionRoutingContext(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const parentThreadId = resolveParentThreadId();
   return {
     workspaceRoot,
-    ownerSessionId:
-      resolveOwnerSessionId(
-        process.env[SESSION_ID_ENV] ?? getCurrentSession(workspaceRoot) ?? null
-      ),
-    parentThreadId: resolveParentThreadId(),
+    ownerSessionId: resolveOwnerSessionId(
+      process.env[SESSION_ID_ENV] ??
+        parentThreadId ??
+        getCurrentSession(workspaceRoot)
+    ),
+    parentThreadId,
   };
+}
+
+function resolveCommandOwnerSessionId(value, workspaceRoot) {
+  return resolveOwnerSessionId(
+    value ??
+      process.env[SESSION_ID_ENV] ??
+      resolveParentThreadId() ??
+      getCurrentSession(workspaceRoot)
+  );
 }
 
 function alignCurrentSessionToOwner(workspaceRoot, ownerSessionId) {
@@ -273,13 +289,20 @@ function alignCurrentSessionToOwner(workspaceRoot, ownerSessionId) {
 }
 
 function assertDelegationAllowed(workspaceRoot, ownerSessionId, workLabel) {
+  const claudeDrivenEnvironment = [
+    process.env.CLAUDECODE,
+    process.env.CLAUDE_CODE_ENTRYPOINT,
+  ].some((value) => String(value ?? "").trim());
   const marker = getCurrentSessionMarker(workspaceRoot);
-  if (!marker || marker.hostOrigin !== "claude-code") {
+  if (!claudeDrivenEnvironment && (!marker || marker.hostOrigin !== "claude-code")) {
     return;
   }
   const effectiveOwnerSessionId =
-    ownerSessionId ?? process.env[SESSION_ID_ENV] ?? marker.sessionId;
-  if (effectiveOwnerSessionId !== marker.sessionId) {
+    ownerSessionId ?? process.env[SESSION_ID_ENV] ?? marker?.sessionId;
+  if (
+    !claudeDrivenEnvironment &&
+    effectiveOwnerSessionId !== marker?.sessionId
+  ) {
     return;
   }
   throw new Error(
@@ -689,13 +712,27 @@ function checkHooksStatus() {
     };
   }
 
-  const status = nativePluginHooksStatus(readCodexConfig());
-  if (status.installed) {
+  const featureStatus = nativePluginHooksStatus(readCodexConfig());
+  const pluginInfo = currentPluginCacheInstallInfo();
+  const launcherStatus = hookLauncherStatus(
+    ROOT_DIR,
+    pluginInfo
+      ? pluginDataNamespaceForMarketplace(pluginInfo.marketplaceName)
+      : undefined
+  );
+  if (featureStatus.installed && launcherStatus.installed) {
     return { installed: true, detail: "native Codex plugin hooks enabled" };
+  }
+  const problems = [];
+  if (!featureStatus.installed) {
+    problems.push(`missing ${featureStatus.missing.join(", ")}`);
+  }
+  if (!launcherStatus.installed) {
+    problems.push(launcherStatus.detail);
   }
   return {
     installed: false,
-    detail: `native Codex plugin hooks disabled: missing ${status.missing.join(", ")}`,
+    detail: `native Codex plugin hooks disabled: ${problems.join("; ")}`,
   };
 }
 
@@ -809,9 +846,22 @@ async function handleSetup(argv) {
   const workspaceRoot = resolveCommandWorkspace(options);
   const actionsTaken = [];
 
+  if (!options.check) {
+    const pluginInfo = currentPluginCacheInstallInfo();
+    const launcher = installHookLauncher(
+      ROOT_DIR,
+      pluginInfo
+        ? pluginDataNamespaceForMarketplace(pluginInfo.marketplaceName)
+        : undefined
+    );
+    if (launcher.changed) {
+      actionsTaken.push(`Installed the stable native hook launcher at ${launcher.destination}.`);
+    }
+  }
+
   if (!options.check && configureNativePluginHooks()) {
     actionsTaken.push(
-      "Enabled native Codex plugin hooks via [features].hooks and [features].plugin_hooks."
+      "Enabled native Codex plugin hooks via [features].hooks."
     );
     actionsTaken.push("Restart Codex if this session started before the feature change.");
   }
@@ -1211,7 +1261,9 @@ async function executeReviewRun(request) {
         requestedModel: result.requestedModel ?? null,
         finalModel: result.finalModel ?? null,
         contextWindow: result.contextWindow ?? null,
-        modelFallbacks
+        modelFallbacks,
+        parseErrors: result.parseErrors ?? [],
+        unresolvedParseErrors: result.unresolvedParseErrors ?? 0
       }
     };
     const rendered = appendModelFallbackSummary(
@@ -1319,7 +1371,9 @@ async function executeReviewRun(request) {
       requestedModel: result.requestedModel ?? null,
       finalModel: result.finalModel ?? null,
       contextWindow: result.contextWindow ?? null,
-      modelFallbacks
+      modelFallbacks,
+      parseErrors: result.parseErrors ?? [],
+      unresolvedParseErrors: result.unresolvedParseErrors ?? 0
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
@@ -1397,6 +1451,7 @@ async function executeTaskRun(request) {
     effort: request.effort ?? undefined,
     permissionMode: request.write ? "bypassPermissions" : "dontAsk",
     settingsFile: sandboxSettingsFile,
+    allowTerminalWithParseErrors: !request.write,
   };
 
   // workspace-write: all tools (no allowedTools = everything including MCP/Skill/Agent)
@@ -1448,6 +1503,8 @@ async function executeTaskRun(request) {
     contextWindow: result.contextWindow ?? null,
     modelFallbacks,
     failure: result.failure ?? null,
+    parseErrors: result.parseErrors ?? [],
+    unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
     rawOutput,
     touchedFiles: Array.isArray(result.touchedFiles)
       ? result.touchedFiles
@@ -1863,11 +1920,52 @@ function markTerminalJobViewed(workspaceRoot, jobId, viewedAt = nowIso()) {
 // Foreground execution wrapper
 // ---------------------------------------------------------------------------
 
+function installForegroundReviewSignalHandlers(job, onSignal) {
+  const handlers = new Map();
+  let handlingSignal = false;
+  for (const { signal, exitCode } of [
+    { signal: "SIGINT", exitCode: 130 },
+    { signal: "SIGTERM", exitCode: 143 },
+  ]) {
+    const handler = () => {
+      if (handlingSignal) return;
+      handlingSignal = true;
+      onSignal(exitCode);
+      for (const [registeredSignal, registeredHandler] of handlers) {
+        process.removeListener(registeredSignal, registeredHandler);
+      }
+      void (async () => {
+        try {
+          await cancelStoredJob(job.workspaceRoot, job);
+        } catch (error) {
+          process.stderr.write(
+            `[cc] Failed to cancel foreground review after ${signal}: ${error instanceof Error ? error.message : String(error)}\n`
+          );
+        }
+      })();
+    };
+    handlers.set(signal, handler);
+    process.once(signal, handler);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) {
+      process.removeListener(signal, handler);
+    }
+  };
+}
+
 async function runForegroundCommand(job, runner, options = {}) {
   const { logFile, progress } = createTrackedProgress(job, {
     logFile: options.logFile,
     stderr: !options.json && !options.quietProgress
   });
+  let signalExitCode = null;
+  const removeSignalHandlers = installForegroundReviewSignalHandlers(
+    job,
+    (exitCode) => {
+      signalExitCode = exitCode;
+    }
+  );
   try {
     const execution = await runTrackedJob(
       job,
@@ -1883,8 +1981,12 @@ async function runForegroundCommand(job, runner, options = {}) {
     }
     return execution;
   } finally {
+    removeSignalHandlers();
     if (options.markViewedOnTerminal) {
       markTerminalJobViewed(job.workspaceRoot, job.id);
+    }
+    if (signalExitCode != null) {
+      process.exitCode = signalExitCode;
     }
   }
 }
@@ -2256,7 +2358,10 @@ async function handleReviewCommand(argv, config) {
     scope: options.scope
   });
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
-  const ownerSessionId = resolveOwnerSessionId(options["owner-session-id"]);
+  const ownerSessionId = resolveCommandOwnerSessionId(
+    options["owner-session-id"],
+    workspaceRoot
+  );
   const markViewedOnTerminal = resolveMarkViewedOnTerminal(
     options["view-state"],
     Boolean(options.background)
@@ -2420,8 +2525,9 @@ async function handleTask(argv) {
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
-  const ownerSessionId = resolveOwnerSessionId(
-    options["owner-session-id"] ?? process.env[SESSION_ID_ENV]
+  const ownerSessionId = resolveCommandOwnerSessionId(
+    options["owner-session-id"],
+    workspaceRoot
   );
   if (resumeLast && !ownerSessionId) {
     throw new Error(
@@ -2733,8 +2839,9 @@ function handleTaskResumeCandidate(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const sessionId = resolveOwnerSessionId(
-    options["owner-session-id"] ?? process.env[SESSION_ID_ENV] ?? null
+  const sessionId = resolveCommandOwnerSessionId(
+    options["owner-session-id"],
+    workspaceRoot
   );
   const state = resolveTaskResumeState(workspaceRoot, sessionId);
   const candidate = state.candidate?.job ?? null;
@@ -2833,6 +2940,18 @@ async function handleCancel(argv) {
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference);
 
+  const result = await cancelStoredJob(workspaceRoot, job);
+  outputCommandResult(
+    result.payload,
+    result.transitioned
+      ? renderCancelReport(result.job)
+      : `Job ${job.id} is already ${result.payload.status}.\n`,
+    options.json
+  );
+}
+
+async function cancelStoredJob(workspaceRoot, job) {
+
   // CAS: running/queued → cancelling
   const transition = transitionJob(
     workspaceRoot,
@@ -2842,12 +2961,11 @@ async function handleCancel(argv) {
   );
   if (!transition.transitioned) {
     const currentStatus = transition.job?.status ?? job.status;
-    outputCommandResult(
-      { jobId: job.id, status: currentStatus },
-      `Job ${job.id} is already ${currentStatus}.\n`,
-      options.json
-    );
-    return;
+    return {
+      payload: { jobId: job.id, status: currentStatus },
+      job: transition.job ?? job,
+      transitioned: false,
+    };
   }
 
   // Cancel via process group kill with PID identity verification
@@ -2912,8 +3030,7 @@ async function handleCancel(argv) {
     title: job.title,
     note: cancelResult.note,
   };
-
-  outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+  return { payload, job: nextJob, transitioned: true };
 }
 
 // ---------------------------------------------------------------------------

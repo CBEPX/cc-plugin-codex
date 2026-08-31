@@ -458,6 +458,37 @@ describe("runTrackedJob", () => {
     }
   });
 
+  it("replaces a parent-captured worker identity with the worker's own identity", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-worker-self-identity",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "worker self identity",
+      workerPid: process.pid,
+      workerPidIdentity: "parent-captured-identity",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await runTrackedJob(
+        job,
+        async () => {
+          assert.equal(
+            readJobFile(repoDir, job.id).workerPidIdentity,
+            "worker-self-identity"
+          );
+          return { exitStatus: 0, rendered: "finished" };
+        },
+        { getSpawnedProcessIdentityImpl: () => "worker-self-identity" }
+      );
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("tracks the worker separately from the cancellable Claude process", async () => {
     const repoDir = createTempGitRepo();
     const job = {
@@ -478,7 +509,7 @@ describe("runTrackedJob", () => {
         assert.equal(starting.workerPid, process.pid);
         assert.equal(
           starting.workerPidIdentity,
-          "parent-captured-worker-identity"
+          "worker-self-identity"
         );
 
         onSpawn({ pid: 43210, pidIdentity: "claude-identity" });
@@ -495,7 +526,7 @@ describe("runTrackedJob", () => {
           rendered: "finished",
           summary: "finished",
         };
-      });
+      }, { getSpawnedProcessIdentityImpl: () => "worker-self-identity" });
 
       const terminal = readJobFile(repoDir, job.id);
       assert.equal(terminal.status, "completed");
@@ -659,6 +690,49 @@ describe("runTrackedJob", () => {
       assert.equal(finalJob.errorMessage, null);
       assert.equal(finalJob.reapedUnverifiable, false);
       assert.equal(finalJob.pid, null);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists a late result after an ordinary status reaper failure", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-ordinary-reaper-result-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "late ordinary reaper result",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await runTrackedJob(job, async () => {
+        const running = readJobFile(repoDir, job.id);
+        writeJobFile(repoDir, job.id, {
+          ...running,
+          status: "failed",
+          errorMessage: "Worker died without completing. Auto-reaped.",
+          reapedBy: "status-reaper",
+          reapReason: "process-missing",
+          updatedAt: nowIso(),
+        });
+        return {
+          exitStatus: 0,
+          threadId: "thread-late-ordinary",
+          payload: { answer: 43 },
+          rendered: "finished after reap",
+          summary: "finished after reap",
+        };
+      });
+
+      const finalJob = readJobFile(repoDir, job.id);
+      assert.equal(finalJob.status, "completed");
+      assert.deepEqual(finalJob.result, { answer: 43 });
+      assert.equal(finalJob.errorMessage, null);
+      assert.equal(finalJob.reapedBy, null);
+      assert.equal(finalJob.reapReason, null);
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }

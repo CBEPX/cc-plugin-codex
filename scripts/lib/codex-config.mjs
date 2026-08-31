@@ -7,7 +7,7 @@ function normalizeTrailingNewline(text) {
   return `${String(text).replace(/\s*$/, "")}\n`;
 }
 
-const REQUIRED_NATIVE_HOOK_FEATURES = ["hooks", "plugin_hooks"];
+const REQUIRED_NATIVE_HOOK_FEATURES = ["hooks"];
 
 export function ensureNativePluginHooksEnabled(content) {
   const lines = String(content ?? "").split("\n");

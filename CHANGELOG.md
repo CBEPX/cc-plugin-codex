@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## v1.6.1
+
+### Added
+
+- Surface bounded Claude stream parse diagnostics while accepting a valid terminal result for read-only tasks and reviews; workspace-write tasks remain fail-closed on malformed output.
+- Resolve explicit full job IDs across workspace and linked-worktree state roots without broadening prefix or no-argument lookup beyond the current workspace.
+
+### Changed
+
+- Route native hooks through a minimal stable launcher in Codex's marketplace-specific `$PLUGIN_DATA` namespace, recover only from validated sibling `cc` cache versions, and require the current Codex 0.151 `hooks` feature without rewriting the removed `plugin_hooks` flag.
+- Prefer the live `CODEX_THREAD_ID` over stale workspace markers for job ownership and resume routing while blocking direct Claude-driven recursion even when no marker exists.
+
+### Fixed
+
+- Re-capture worker identity inside the worker, tag every status-reaper terminal transition, and allow a late real runner result to replace only reaper-owned failures.
+- Cancel foreground Claude reviews on `SIGINT` or `SIGTERM` while preserving sandbox, MCP-config, and review-worktree cleanup; retain accurate text output when a cancel race finds an already-terminal job.
+
 ## v1.6.0
 
 ### Added

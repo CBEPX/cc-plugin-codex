@@ -1360,6 +1360,31 @@ describe("classifyClaudeFailure", () => {
 });
 
 describe("runClaudeTurn", () => {
+  it("returns bounded parser diagnostics when read-only output has a valid terminal event", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-parse-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `process.stdout.write("not-json\\n");\nconst out = JSON.stringify({ type: "result", result: "done", session_id: "sess-parse" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "prompt", {
+        allowTerminalWithParseErrors: true,
+      });
+
+      assert.equal(result.status, "completed");
+      assert.match(result.warning, /1 unrecovered parse error/);
+      assert.equal(result.unresolvedParseErrors, 1);
+      assert.equal(result.parseErrors.length, 1);
+      assert.equal(result.parseErrors[0].line, "not-json");
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("sends a large Unicode prompt through stdin and keeps it out of argv", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-stdin-"));
     const oldPath = process.env.PATH ?? "";
@@ -2047,6 +2072,24 @@ describe("validateTurnCompletion", () => {
     const result = validateTurnCompletion(state, 0);
     assert.equal(result.status, "unknown");
     assert.ok(result.warning.includes("3 unrecovered parse errors"));
+  });
+
+  it("accepts terminal output with parse errors only when explicitly allowed", () => {
+    const state = { receivedTerminalEvent: true, unresolvedParseErrors: 1, unknownEvents: [] };
+    const result = validateTurnCompletion(state, 0, {
+      allowTerminalWithParseErrors: true,
+    });
+    assert.equal(result.status, "completed");
+    assert.match(result.warning, /1 unrecovered parse error/);
+  });
+
+  it("does not accept parse errors without a terminal event", () => {
+    const state = { receivedTerminalEvent: false, unresolvedParseErrors: 1, unknownEvents: [] };
+    const result = validateTurnCompletion(state, 0, {
+      allowTerminalWithParseErrors: true,
+    });
+    assert.equal(result.status, "unknown");
+    assert.match(result.warning, /No terminal result event/);
   });
 
   it("returns completed even when unknown events exist (protocol drift)", () => {

@@ -27,6 +27,14 @@ export function pluginIdForMarketplace(marketplaceName) {
   return `${PLUGIN_NAME}@${marketplaceName}`;
 }
 
+export function pluginDataNamespaceForMarketplace(marketplaceName) {
+  const normalized = String(marketplaceName ?? "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalized)) {
+    throw new Error(`Invalid marketplace name: ${marketplaceName}`);
+  }
+  return `${PLUGIN_NAME}-${normalized}`;
+}
+
 export function pluginConfigHeader(marketplaceName) {
   return `[plugins."${pluginIdForMarketplace(marketplaceName)}"]`;
 }

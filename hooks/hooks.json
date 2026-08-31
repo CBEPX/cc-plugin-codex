@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$PLUGIN_ROOT/hooks/session-lifecycle-hook.mjs\"",
+            "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" session-lifecycle",
             "statusMessage": "Initializing Claude Code bridge"
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$PLUGIN_ROOT/hooks/session-lifecycle-hook.mjs\" SessionEnd",
+            "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" session-lifecycle SessionEnd",
             "timeout": 3,
             "statusMessage": "Cleaning up Claude Code bridge jobs"
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$PLUGIN_ROOT/hooks/stop-review-gate-hook.mjs\"",
+            "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" stop-review-gate",
             "timeout": 900
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$PLUGIN_ROOT/hooks/unread-result-hook.mjs\"",
+            "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" unread-result",
             "statusMessage": "Checking for unread Claude Code results"
           }
         ]
