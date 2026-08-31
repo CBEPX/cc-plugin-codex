@@ -307,6 +307,26 @@ describe("collectReviewContext", () => {
     assert.notEqual(after.signature, before.signature);
   });
 
+  it("changes the staged fingerprint when staged file content changes", () => {
+    const repo = createRepo();
+    const trackedPath = path.join(repo, "tracked.txt");
+
+    fs.writeFileSync(trackedPath, "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    fs.writeFileSync(trackedPath, "staged one\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    const before = getWorkingTreeFingerprint(repo);
+
+    fs.writeFileSync(trackedPath, "staged two\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.equal(after.head, before.head);
+    assert.notEqual(after.stagedDiffHash, before.stagedDiffHash);
+    assert.notEqual(after.signature, before.signature);
+  });
+
   it("fingerprints untracked contents when a Git path contains a newline", () => {
     const repo = createRepo();
     const unusualPath = path.join(repo, "line\nbreak.txt");

@@ -52,7 +52,17 @@ const TOP_LEVEL_PAYLOAD_FIELDS = new Set([
   "critique",
   "finalResult",
 ]);
-const SENSITIVE_MANIFEST_KEY = /(?:api[-_]?key|authorization|credential|env|headers?|mcpServers|password|rawConfig|secret|token)/iu;
+const MODEL_MANIFEST_FIELDS = new Set(["role", "requestedModel", "resolvedModel"]);
+const TOOL_MANIFEST_FIELDS = new Set([
+  "toolId",
+  "source",
+  "capability",
+  "reason",
+  "safetyDecision",
+  "transport",
+  "configFingerprint",
+]);
+const SAFETY_DECISION_FIELDS = new Set(["eligible", "decision", "reason"]);
 
 function workflowError(code, message, workflow = null) {
   return Object.assign(new Error(`${code}: ${message}`), {
@@ -102,31 +112,49 @@ function assertJsonObject(value, label) {
   }
 }
 
-function assertSecretFreeManifest(value, label) {
-  const visit = (current) => {
-    if (Array.isArray(current)) {
-      current.forEach(visit);
-      return;
-    }
-    if (!current || typeof current !== "object") {
-      return;
-    }
-    for (const [key, child] of Object.entries(current)) {
-      if (SENSITIVE_MANIFEST_KEY.test(key)) {
-        throw workflowError(
-          "SECRET_BEARING_MANIFEST",
-          `${label} contains a secret-bearing field: ${key}`
-        );
-      }
-      visit(child);
-    }
-  };
-  visit(value);
+function assertPublicManifest(value, label, allowedFields) {
+  let manifest;
   try {
-    return JSON.parse(JSON.stringify(value ?? []));
+    manifest = JSON.parse(JSON.stringify(value ?? []));
   } catch {
     throw workflowError("INVALID_MANIFEST", `${label} must be JSON serializable.`);
   }
+  if (!Array.isArray(manifest)) {
+    throw workflowError("INVALID_MANIFEST", `${label} must be an array.`);
+  }
+  for (const record of manifest) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      throw workflowError("INVALID_MANIFEST", `${label} entries must be objects.`);
+    }
+    for (const [key, fieldValue] of Object.entries(record)) {
+      if (!allowedFields.has(key)) {
+        throw workflowError(
+          "SECRET_BEARING_MANIFEST",
+          `${label} contains a non-public field: ${key}`
+        );
+      }
+      if (key === "safetyDecision") {
+        if (!fieldValue || typeof fieldValue !== "object" || Array.isArray(fieldValue)) {
+          throw workflowError("INVALID_MANIFEST", `${label} safetyDecision must be an object.`);
+        }
+        for (const [safetyKey, safetyValue] of Object.entries(fieldValue)) {
+          if (!SAFETY_DECISION_FIELDS.has(safetyKey)) {
+            throw workflowError(
+              "SECRET_BEARING_MANIFEST",
+              `${label} safetyDecision contains a non-public field: ${safetyKey}`
+            );
+          }
+          const expectedType = safetyKey === "eligible" ? "boolean" : "string";
+          if (safetyValue !== null && typeof safetyValue !== expectedType) {
+            throw workflowError("INVALID_MANIFEST", `${label} safetyDecision.${safetyKey} is invalid.`);
+          }
+        }
+      } else if (fieldValue !== null && typeof fieldValue !== "string") {
+        throw workflowError("INVALID_MANIFEST", `${label} field ${key} must be a string or null.`);
+      }
+    }
+  }
+  return manifest;
 }
 
 function normalizedNames(values, label) {
@@ -240,7 +268,8 @@ function assertCas(workflow, options) {
 function mutateWorkflow(cwd, workflowId, options, reducer) {
   const workspaceRoot = canonicalWorkspaceRoot(cwd);
   const filePath = resolveWorkflowFile(workspaceRoot, workflowId);
-  return withStateFileLock(filePath, () => {
+  let enteredTerminal = false;
+  const next = withStateFileLock(filePath, () => {
     const workflow = readWorkflowAt(
       filePath,
       workspaceRoot,
@@ -263,8 +292,15 @@ function mutateWorkflow(cwd, workflowId, options, reducer) {
     };
     validateStoredWorkflow(next, workspaceRoot, workflow.mode);
     writeAtomic(filePath, next);
+    enteredTerminal =
+      !TERMINAL_WORKFLOW_STATUSES.has(workflow.status) &&
+      TERMINAL_WORKFLOW_STATUSES.has(next.status);
     return next;
   });
+  if (enteredTerminal) {
+    cleanupOldWorkflows(workspaceRoot);
+  }
+  return next;
 }
 
 function sameFingerprint(left, right) {
@@ -317,6 +353,29 @@ function updateTarget(workflow, target, state) {
   };
 }
 
+function workflowSafetyViolation(workflow, target, timestamp, fingerprint) {
+  const failedState = {
+    ...target.state,
+    status: "retryable_failed",
+    failureReason: "SAFETY_VIOLATION",
+    completedAt: timestamp,
+  };
+  return {
+    ...updateTarget(workflow, target, failedState),
+    status: "incomplete",
+    phase: target.stage,
+    failureReason: "SAFETY_VIOLATION",
+    branchAttempts: appendBranchAttempt(
+      workflow,
+      target,
+      "failed",
+      "retryable_failed",
+      timestamp,
+      { failureReason: "SAFETY_VIOLATION", fingerprint }
+    ),
+  };
+}
+
 export function resolveWorkflowsDir(cwd) {
   return path.join(resolveStateDir(cwd), WORKFLOWS_DIR_NAME);
 }
@@ -343,8 +402,16 @@ export function reserveWorkflow(cwd, input) {
     input?.currentOwnerSessionId ?? originSessionId,
     "current owner session ID"
   );
-  const modelManifest = assertSecretFreeManifest(input?.modelManifest ?? [], "model manifest");
-  const toolManifest = assertSecretFreeManifest(input?.toolManifest ?? [], "tool manifest");
+  const modelManifest = assertPublicManifest(
+    input?.modelManifest ?? [],
+    "model manifest",
+    MODEL_MANIFEST_FIELDS
+  );
+  const toolManifest = assertPublicManifest(
+    input?.toolManifest ?? [],
+    "tool manifest",
+    TOOL_MANIFEST_FIELDS
+  );
   const stages = normalizedNames(input?.stages ?? [], "workflow stage");
   const branches = normalizedNames(input?.branches ?? [], "workflow branch ID");
   const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
@@ -432,6 +499,9 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
   let drifted = false;
   const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+    }
     if (!sameFingerprint(workflow.fingerprint, currentFingerprint)) {
       drifted = true;
       return {
@@ -440,9 +510,6 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
         phase: options.stage,
         failureReason: "STALE_WORKSPACE",
       };
-    }
-    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
-      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
     }
     const target = targetState(workflow, options.stage, options.branchId);
     if (target.state.status === "completed") {
@@ -503,26 +570,7 @@ export function submitWorkflowStage(cwd, workflowId, options) {
     }
     if (!sameFingerprint(target.state.startFingerprint, currentFingerprint)) {
       violated = true;
-      const failedState = {
-        ...target.state,
-        status: "retryable_failed",
-        failureReason: "SAFETY_VIOLATION",
-        completedAt: timestamp,
-      };
-      return {
-        ...updateTarget(workflow, target, failedState),
-        status: "incomplete",
-        phase: target.stage,
-        failureReason: "SAFETY_VIOLATION",
-        branchAttempts: appendBranchAttempt(
-          workflow,
-          target,
-          "failed",
-          "retryable_failed",
-          timestamp,
-          { failureReason: "SAFETY_VIOLATION", fingerprint: currentFingerprint }
-        ),
-      };
+      return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
     }
     if (
       workflow.claudeSessionId &&
@@ -565,25 +613,28 @@ export function submitWorkflowStage(cwd, workflowId, options) {
   if (violated) {
     throw workflowError("SAFETY_VIOLATION", "Workspace changed while a worker was running.", next);
   }
-  if (TERMINAL_WORKFLOW_STATUSES.has(next.status)) {
-    cleanupOldWorkflows(cwd);
-  }
   return next;
 }
 
 export function markWorkflowBranchFailure(cwd, workflowId, options) {
+  const currentFingerprint = getWorkingTreeFingerprint(cwd);
   const status = assertBranchStatus(options.cancelFailed ? "cancel_failed" : "retryable_failed");
   const reason = String(options.reason ?? "").trim();
   if (!reason) {
     throw workflowError("INVALID_FAILURE_REASON", "A branch failure reason is required.");
   }
-  return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+  let violated = false;
+  const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
     const target = targetState(workflow, options.stage, options.branchId);
     if (target.state.status === "completed") {
       throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
     }
     if (target.state.status !== "running") {
       throw workflowError("STAGE_NOT_RUNNING", `${target.key} is not running.`);
+    }
+    if (!sameFingerprint(target.state.startFingerprint, currentFingerprint)) {
+      violated = true;
+      return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
     }
     const failedState = {
       ...target.state,
@@ -606,6 +657,10 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
       ),
     };
   });
+  if (violated) {
+    throw workflowError("SAFETY_VIOLATION", "Workspace changed while a worker was running.", next);
+  }
+  return next;
 }
 
 export function getWorkflowRetryContext(cwd, workflowId, options = {}) {
@@ -663,7 +718,7 @@ export function rebindWorkflowOwner(cwd, workflowId, options) {
 
 export function completeWorkflowCancellation(cwd, workflowId, options) {
   const failedJobIds = normalizedNames(options.failedJobIds ?? [], "linked job ID");
-  const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => ({
+  return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => ({
     ...workflow,
     status: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
     phase: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
@@ -671,8 +726,6 @@ export function completeWorkflowCancellation(cwd, workflowId, options) {
     cancelFailedJobIds: failedJobIds,
     completedAt: timestamp,
   }));
-  cleanupOldWorkflows(cwd);
-  return next;
 }
 
 export function cleanupOldWorkflows(cwd) {

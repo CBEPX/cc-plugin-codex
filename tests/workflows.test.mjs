@@ -64,7 +64,19 @@ function createWorkflow(repo, overrides = {}) {
       { role: "drafter", requestedModel: "opus", resolvedModel: "claude-opus-5" },
     ],
     toolManifest: overrides.toolManifest ?? [
-      { toolId: "mcp__docs__search", readOnlyHint: true },
+      {
+        toolId: "mcp__docs__search",
+        source: "user",
+        capability: "docs_search",
+        reason: "brief needs docs",
+        safetyDecision: {
+          eligible: true,
+          decision: "eligible",
+          reason: "read_only_annotation",
+        },
+        transport: "stdio",
+        configFingerprint: "abc123",
+      },
     ],
     stages: overrides.stages ?? ["memo", "critique", "final"],
     branches: overrides.branches ?? ["alpha", "beta"],
@@ -148,6 +160,51 @@ describe("peer workflow store", () => {
     assert.throws(() => resolveWorkflowFile(repo, "../escape"), /Invalid workflow ID/);
   });
 
+  it("accepts only the public model and tool manifest schemas", () => {
+    const repo = createRepo();
+    const modelManifest = [{
+      role: "drafter",
+      requestedModel: "opus",
+      resolvedModel: "claude-opus-5",
+    }];
+    const toolManifest = [{
+      toolId: "mcp__docs__search",
+      source: "user",
+      capability: "docs_search",
+      reason: "brief needs docs",
+      safetyDecision: {
+        eligible: true,
+        decision: "eligible",
+        reason: "read_only_annotation",
+      },
+      transport: "stdio",
+      configFingerprint: "abc123",
+    }];
+    const workflow = createWorkflow(repo, {
+      id: "workflow-public-manifests",
+      modelManifest,
+      toolManifest,
+    });
+
+    assert.deepEqual(workflow.modelManifest, modelManifest);
+    assert.deepEqual(workflow.toolManifest, toolManifest);
+
+    for (const [index, manifests] of [
+      { modelManifest: [{ privateKey: "hidden" }] },
+      { toolManifest: [{ raw_config: { command: "server" } }] },
+      { toolManifest: [{ mcp_servers: { docs: {} } }] },
+      { toolManifest: [{ config: { headers: { Authorization: "hidden" } } }] },
+    ].entries()) {
+      assert.equal(
+        errorCode(() => createWorkflow(repo, {
+          id: `workflow-rejected-manifest-${index}`,
+          ...manifests,
+        })),
+        "SECRET_BEARING_MANIFEST"
+      );
+    }
+  });
+
   it("allows only one CAS stage start for a shared revision", async () => {
     const repo = createRepo();
     const workflow = createWorkflow(repo);
@@ -215,6 +272,35 @@ describe("peer workflow store", () => {
       "COMPLETED_STAGE_IMMUTABLE"
     );
     assert.equal(fs.readFileSync(resolveWorkflowFile(repo, created.id), "utf8"), rawCompleted);
+  });
+
+  it("does not reopen a terminal workflow when its workspace drifts", () => {
+    const repo = createRepo();
+    let workflow = createWorkflow(repo);
+    workflow = casStartWorkflowStage(repo, workflow.id, {
+      stage: "memo",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+    });
+    workflow = submitWorkflowStage(repo, workflow.id, {
+      stage: "memo",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      payload: { summary: "final" },
+      field: "finalResult",
+    });
+    const before = fs.readFileSync(resolveWorkflowFile(repo, workflow.id));
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "drift after completion\n", "utf8");
+
+    assert.equal(
+      errorCode(() => casStartWorkflowStage(repo, workflow.id, {
+        stage: "critique",
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+      })),
+      "WORKFLOW_TERMINAL"
+    );
+    assert.deepEqual(fs.readFileSync(resolveWorkflowFile(repo, workflow.id)), before);
   });
 
   it("reports only failed or missing retry work without rewriting successful payloads", () => {
@@ -344,6 +430,35 @@ describe("peer workflow store", () => {
     assert.equal(stored.stages.memo.payload, null);
   });
 
+  it("classifies workspace drift on the failure path as a safety violation", () => {
+    const repo = createRepo();
+    let workflow = createWorkflow(repo);
+    workflow = casStartWorkflowStage(repo, workflow.id, {
+      stage: "memo",
+      branchId: "alpha",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+    });
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "changed before failure\n", "utf8");
+
+    assert.equal(
+      errorCode(() => markWorkflowBranchFailure(repo, workflow.id, {
+        stage: "memo",
+        branchId: "alpha",
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+        reason: "worker timeout",
+      })),
+      "SAFETY_VIOLATION"
+    );
+    const stored = readWorkflow(repo, workflow.id);
+    assert.equal(stored.status, "incomplete");
+    assert.equal(stored.failureReason, "SAFETY_VIOLATION");
+    assert.equal(stored.branches.alpha.status, "retryable_failed");
+    assert.equal(stored.branches.alpha.failureReason, "SAFETY_VIOLATION");
+    assert.equal(stored.branchAttempts.at(-1).failureReason, "SAFETY_VIOLATION");
+  });
+
   it("retains nonterminal workflows and only the newest 100 terminal workflows", () => {
     const repo = createRepo();
     const workflowsDir = resolveWorkflowsDir(repo);
@@ -396,6 +511,53 @@ describe("peer workflow store", () => {
     assert.ok(retained.some(({ id }) => id === "partial"));
     assert.equal(fs.existsSync(resolveWorkflowFile(repo, "terminal-000")), false);
     assert.equal(fs.existsSync(resolveWorkflowFile(repo, "terminal-103")), true);
+  });
+
+  it("prunes terminal retention after a cancel-failed transition", () => {
+    const repo = createRepo();
+    const workflowsDir = resolveWorkflowsDir(repo);
+    fs.mkdirSync(workflowsDir, { recursive: true });
+    const workspaceRoot = fs.realpathSync.native(repo);
+    for (let index = 0; index < 100; index += 1) {
+      const id = `existing-terminal-${String(index).padStart(3, "0")}`;
+      fs.writeFileSync(
+        resolveWorkflowFile(repo, id),
+        `${JSON.stringify({
+          version: 1,
+          id,
+          mode: "design",
+          status: "completed",
+          phase: "done",
+          revision: 1,
+          epoch: 0,
+          workspaceRoot,
+          createdAt: new Date(index * 1000).toISOString(),
+          updatedAt: new Date(index * 1000).toISOString(),
+        }, null, 2)}\n`,
+        "utf8"
+      );
+    }
+    let workflow = createWorkflow(repo, { id: "new-cancel-failed" });
+    workflow = casStartWorkflowStage(repo, workflow.id, {
+      stage: "memo",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+    });
+
+    workflow = markWorkflowBranchFailure(repo, workflow.id, {
+      stage: "memo",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      reason: "process identity unavailable",
+      cancelFailed: true,
+    });
+
+    assert.equal(workflow.status, "cancel_failed");
+    assert.equal(
+      listWorkflows(repo).filter(({ status }) => ["completed", "cancelled", "cancel_failed"].includes(status)).length,
+      100
+    );
+    assert.equal(fs.existsSync(resolveWorkflowFile(repo, "existing-terminal-000")), false);
   });
 
   it("records cancellation and preserves append-only branch attempt history", () => {
