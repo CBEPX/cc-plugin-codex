@@ -1266,6 +1266,10 @@ export function buildArgs(prompt, options = {}) {
   if (model) {
     args.push("--model", model);
   }
+  const fallbackModel = resolveModel(options.fallbackModel);
+  if (fallbackModel) {
+    args.push("--fallback-model", fallbackModel);
+  }
   const effort = resolveEffort(options.effort);
   if (effort) {
     args.push("--effort", effort);
@@ -1275,6 +1279,9 @@ export function buildArgs(prompt, options = {}) {
   }
   if (options.resumeSessionId) {
     args.push("--resume", options.resumeSessionId);
+  }
+  if (options.forkSession) {
+    args.push("--fork-session");
   }
   if (options.allowedTools) {
     for (const tool of options.allowedTools) {

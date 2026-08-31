@@ -2371,9 +2371,9 @@ describe("claude-companion integration", () => {
       assert.equal(payload.projectConfigPath, null);
       assert.equal(payload.ignoredProjectConfigPath, path.join(testEnv.workspaceDir, ".mcp.json"));
       assert.deepEqual(payload.availableServers.map((server) => server.name), ["context7"]);
-      assert.deepEqual(payload.selectedServers, ["context7"]);
+      assert.deepEqual(payload.selectedServers, []);
       assert.ok(payload.allowedTools.includes("mcp__gitReview__diff"));
-      assert.ok(payload.allowedTools.includes("mcp__context7__resolve-library-id"));
+      assert.ok(!payload.allowedTools.includes("mcp__context7__resolve-library-id"));
       assert.ok(!payload.allowedTools.includes("mcp__localdocs__search"));
       assert.deepEqual(
         payload.requestedTools.map((tool) => ({
@@ -2388,7 +2388,7 @@ describe("claude-companion integration", () => {
             tool: "mcp__context7__resolve-library-id",
             serverName: "context7",
             found: true,
-            selected: true,
+            selected: false,
             source: "user",
           },
           {
@@ -2402,6 +2402,17 @@ describe("claude-companion integration", () => {
       );
       assert.match(payload.requestedTools[1].reason, /Project \.mcp\.json is ignored/);
       assert.doesNotMatch(JSON.stringify(payload), /SECRET_TOKEN/);
+      const rendered = runCompanion(
+        [
+          "mcp-diagnose",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--user-mcp-tool",
+          "mcp__context7__resolve-library-id",
+        ],
+        { env: testEnv.env }
+      ).stdout;
+      assert.match(rendered, /configured but not selected/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -2411,11 +2422,26 @@ describe("claude-companion integration", () => {
     const testEnv = createTestEnvironment();
 
     try {
+      const serverPath = path.join(testEnv.rootDir, "project-mcp-server.mjs");
+      fs.writeFileSync(
+        serverPath,
+        [
+          'import readline from "node:readline";',
+          "const input = readline.createInterface({ input: process.stdin });",
+          "input.on('line', (line) => {",
+          "  const request = JSON.parse(line);",
+          "  if (request.id === 1) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'localdocs', version: '1' } } }) + '\\n');",
+          "  if (request.id === 2) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 2, result: { tools: [{ name: 'search', description: 'Search local documentation', annotations: { readOnlyHint: true } }] } }) + '\\n');",
+          "});",
+          "",
+        ].join("\n"),
+        "utf8"
+      );
       fs.writeFileSync(
         path.join(testEnv.workspaceDir, ".mcp.json"),
         JSON.stringify({
           mcpServers: {
-            localdocs: { command: "node", args: ["localdocs-server.mjs"] },
+            localdocs: { command: process.execPath, args: [serverPath] },
           },
         }, null, 2) + "\n",
         "utf8"
@@ -2452,6 +2478,108 @@ describe("claude-companion integration", () => {
           reason: null,
         },
       ]);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("discovers MCP servers from enabled Claude plugins", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const pluginId = "docs@example";
+      const installPath = path.join(testEnv.homeDir, ".claude", "plugins", "cache", "docs");
+      fs.mkdirSync(installPath, { recursive: true });
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude", "settings.json"),
+        JSON.stringify({ enabledPlugins: { [pluginId]: true } }),
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude", "plugins", "installed_plugins.json"),
+        JSON.stringify({
+          version: 2,
+          plugins: { [pluginId]: [{ scope: "user", installPath, version: "1.2.3" }] },
+        }),
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(installPath, ".mcp.json"),
+        JSON.stringify({
+          docs: { command: process.execPath, args: ["-e", "process.exit(0)"] },
+        }),
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        ["mcp-diagnose", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env }
+      );
+
+      assert.deepEqual(payload.availableServers, [
+        { name: "docs", source: `plugin:${pluginId}` },
+      ]);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reports secret-free discovered, eligible, selected, and diagnostic MCP records", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const serverPath = path.join(testEnv.rootDir, "diagnostic-mcp-server.mjs");
+      fs.writeFileSync(
+        serverPath,
+        [
+          'import readline from "node:readline";',
+          "const input = readline.createInterface({ input: process.stdin });",
+          "input.on('line', (line) => {",
+          "  const request = JSON.parse(line);",
+          "  if (request.id === 1) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'docs', version: '1' } } }) + '\\n');",
+          "  if (request.id === 2) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 2, result: { tools: [{ name: 'search', description: 'Search documentation ' + process.env.DOCS_TOKEN, annotations: { readOnlyHint: true } }] } }) + '\\n');",
+          "});",
+          "",
+        ].join("\n"),
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(testEnv.homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            docs: {
+              command: process.execPath,
+              args: [serverPath],
+              env: { DOCS_TOKEN: "SECRET_DIAGNOSTIC_TOKEN" },
+            },
+          },
+        }),
+        "utf8"
+      );
+
+      const payload = runCompanionJson(
+        [
+          "mcp-diagnose",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--user-mcp-tool",
+          "mcp__docs__search",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.equal(Array.isArray(payload.discoveredServers), true);
+      assert.deepEqual(payload.discoveredServers.map(({ name, source, transport }) => ({
+        name,
+        source,
+        transport,
+      })), [{ name: "docs", source: "user", transport: "stdio" }]);
+      assert.deepEqual(payload.discovered.map((tool) => tool.toolId), ["mcp__docs__search"]);
+      assert.deepEqual(payload.eligible.map((tool) => tool.toolId), ["mcp__docs__search"]);
+      assert.deepEqual(payload.selected.map((tool) => tool.toolId), ["mcp__docs__search"]);
+      assert.deepEqual(payload.diagnostics, []);
+      assert.doesNotMatch(JSON.stringify(payload), /SECRET_DIAGNOSTIC_TOKEN|DOCS_TOKEN/);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

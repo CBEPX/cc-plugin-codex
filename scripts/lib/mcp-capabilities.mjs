@@ -1,0 +1,628 @@
+/**
+ * Copyright 2026 Sendbird, Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import http from "node:http";
+import https from "node:https";
+
+const MCP_PROTOCOL_VERSION = "2024-11-05";
+const MCP_PROBE_CACHE_TTL_MS = 10 * 60 * 1000;
+const probeCache = new Map();
+export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = new Set([
+  "mcp__context7__query-docs",
+  "mcp__context7__resolve-library-id",
+]);
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableJson(value[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function secretFreeFingerprintValue(value, key = "", sensitive = false) {
+  const nextSensitive = sensitive || /^(?:env|headers|oauth|auth)$/iu.test(key) ||
+    /(?:token|secret|password|authorization|api.?key)/iu.test(key);
+  if (typeof value === "string") {
+    if (nextSensitive) return "[redacted]";
+    if (key === "url") {
+      try {
+        const url = new URL(value);
+        url.username = "";
+        url.password = "";
+        for (const name of url.searchParams.keys()) url.searchParams.set(name, "[redacted]");
+        return url.toString();
+      } catch {}
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => {
+      const previous = value[index - 1];
+      const argumentIsSecret = key === "args" &&
+        typeof previous === "string" &&
+        /(?:token|secret|password|authorization|api.?key)/iu.test(previous);
+      if (typeof item === "string" && argumentIsSecret) return "[redacted]";
+      if (typeof item === "string" && key === "args" &&
+          /(?:token|secret|password|authorization|api.?key)[^=]*=/iu.test(item)) {
+        return `${item.slice(0, item.indexOf("=") + 1)}[redacted]`;
+      }
+      return secretFreeFingerprintValue(item, key, nextSensitive);
+    });
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [
+      childKey,
+      secretFreeFingerprintValue(child, childKey, nextSensitive),
+    ]));
+  }
+  return value;
+}
+
+function serverFingerprint(name, config, sourceDetail) {
+  return createHash("sha256")
+    .update(stableJson({
+      name,
+      config: secretFreeFingerprintValue(config),
+      sourceDetail,
+    }))
+    .digest("hex");
+}
+
+function serverTransport(config) {
+  if (typeof config.command === "string" && config.command) return "stdio";
+  if (typeof config.url === "string" && config.url) {
+    return String(config.type ?? "").toLowerCase() === "sse"
+      ? "sse"
+      : "streamable-http";
+  }
+  return "unsupported";
+}
+
+function requiresOAuth(config) {
+  return Boolean(config.oauth) ||
+    String(config.auth?.type ?? config.type ?? "").toLowerCase() === "oauth";
+}
+
+function configSecretValues(config) {
+  const secrets = new Set();
+  const visit = (value, sensitive = false) => {
+    if (typeof value === "string") {
+      if (sensitive && value.length >= 3) secrets.add(value);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      visit(child, sensitive || /^(?:env|headers|oauth|auth)$/iu.test(key) ||
+        /(?:token|secret|password|authorization|api.?key)/iu.test(key));
+    }
+  };
+  visit(config);
+  if (Array.isArray(config.args)) {
+    for (const [index, argument] of config.args.entries()) {
+      if (typeof argument !== "string") continue;
+      const previous = config.args[index - 1];
+      if (typeof previous === "string" &&
+          /(?:token|secret|password|authorization|api.?key)/iu.test(previous) &&
+          argument.length >= 3) {
+        secrets.add(argument);
+      }
+      if (/(?:token|secret|password|authorization|api.?key)[^=]*=/iu.test(argument)) {
+        const value = argument.slice(argument.indexOf("=") + 1);
+        if (value.length >= 3) secrets.add(value);
+      }
+    }
+  }
+  if (typeof config.url === "string") {
+    try {
+      const url = new URL(config.url);
+      if (url.username) secrets.add(url.username);
+      if (url.password) secrets.add(url.password);
+      for (const value of url.searchParams.values()) {
+        if (value.length >= 3) secrets.add(value);
+      }
+    } catch {}
+  }
+  return [...secrets];
+}
+
+function redactSecrets(value, secrets) {
+  let redacted = value;
+  for (const secret of secrets) redacted = redacted.split(secret).join("[redacted]");
+  return redacted;
+}
+
+function hasToolsCapability(result) {
+  return result?.capabilities?.tools != null &&
+    typeof result.capabilities.tools === "object";
+}
+
+function stdioProbe(config, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawn(config.command, Array.isArray(config.args) ? config.args : [], {
+      cwd: typeof config.cwd === "string" ? config.cwd : undefined,
+      env: { ...process.env, ...(config.env ?? {}) },
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    let settled = false;
+    let buffer = "";
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      resolve(value);
+    };
+    const send = (message) => {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    };
+    const timer = setTimeout(() => finish({ code: "probe_timeout" }), timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      while (buffer.includes("\n")) {
+        const newline = buffer.indexOf("\n");
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        let response;
+        try { response = JSON.parse(line); } catch { continue; }
+        if (response.id === 1) {
+          if (!hasToolsCapability(response.result)) {
+            finish({ code: "tools_capability_missing" });
+            return;
+          }
+          send({ jsonrpc: "2.0", method: "notifications/initialized" });
+          send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+        } else if (response.id === 2) {
+          finish({ tools: Array.isArray(response.result?.tools) ? response.result.tools : [] });
+        }
+      }
+    });
+    child.on("error", () => finish({ code: "probe_failed" }));
+    child.stdin.on("error", () => finish({ code: "probe_failed" }));
+    child.on("close", () => finish({ code: "probe_failed" }));
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "cc-plugin-codex", version: "1.7.0" },
+      },
+    });
+  });
+}
+
+function postJson(config, message, sessionId, deadline) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(config.url);
+    const body = JSON.stringify(message);
+    const headers = {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+      ...(config.headers ?? {}),
+    };
+    if (sessionId) headers["mcp-session-id"] = sessionId;
+    const request = (url.protocol === "https:" ? https : http).request(url, {
+      method: "POST",
+      headers,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        statusCode: response.statusCode ?? 0,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    request.setTimeout(Math.max(1, deadline - Date.now()), () => {
+      request.destroy(new Error("timeout"));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+function parseRpcResponse(body) {
+  try {
+    return JSON.parse(body);
+  } catch {
+    for (const line of body.split(/\r?\n/u)) {
+      if (!line.startsWith("data:")) continue;
+      try { return JSON.parse(line.slice("data:".length).trim()); } catch {}
+    }
+    throw new Error("invalid_json_rpc_response");
+  }
+}
+
+async function httpProbe(config, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  try {
+    const initialized = await postJson(config, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "cc-plugin-codex", version: "1.7.0" },
+      },
+    }, null, deadline);
+    if (initialized.statusCode === 401 || initialized.statusCode === 403) {
+      return { code: "unsupported_oauth" };
+    }
+    if (initialized.statusCode < 200 || initialized.statusCode >= 300) {
+      return { code: "probe_failed" };
+    }
+    const initializeResponse = parseRpcResponse(initialized.body);
+    if (!hasToolsCapability(initializeResponse.result)) {
+      return { code: "tools_capability_missing" };
+    }
+    const sessionId = initialized.headers["mcp-session-id"];
+    await postJson(config, {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    }, sessionId, deadline);
+    const listed = await postJson(config, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    }, sessionId, deadline);
+    if (listed.statusCode < 200 || listed.statusCode >= 300) {
+      return { code: "probe_failed" };
+    }
+    const listResponse = parseRpcResponse(listed.body);
+    return { tools: Array.isArray(listResponse.result?.tools) ? listResponse.result.tools : [] };
+  } catch (error) {
+    return { code: Date.now() >= deadline || error?.message === "timeout"
+      ? "probe_timeout"
+      : "probe_failed" };
+  }
+}
+
+function safetyFor(toolId, tool, auditedTools) {
+  if (tool.annotations?.destructiveHint === true) {
+    return { eligible: false, decision: "blocked", reason: "destructive_annotation" };
+  }
+  if (tool.annotations?.readOnlyHint === true) {
+    return { eligible: true, decision: "eligible", reason: "read_only_annotation" };
+  }
+  if (auditedTools.has(toolId)) {
+    return { eligible: true, decision: "eligible", reason: "audited_read_only_registry" };
+  }
+  return { eligible: false, decision: "blocked", reason: "read_only_unverified" };
+}
+
+async function forEachConcurrent(items, limit, visit) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await visit(item);
+    }
+  }));
+}
+
+function readJson(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function serverMap(config) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    return null;
+  }
+  return config.mcpServers && typeof config.mcpServers === "object"
+    ? config.mcpServers
+    : config;
+}
+
+function expandPluginRoot(value, pluginRoot) {
+  if (typeof value === "string") {
+    return value.split("${CLAUDE_PLUGIN_ROOT}").join(pluginRoot);
+  }
+  if (Array.isArray(value)) return value.map((item) => expandPluginRoot(item, pluginRoot));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      expandPluginRoot(item, pluginRoot),
+    ]));
+  }
+  return value;
+}
+
+function mergeServers(target, source, options = {}) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return;
+  for (const [name, config] of Object.entries(source)) {
+    if (!config || typeof config !== "object" || Array.isArray(config)) continue;
+    if (!options.override && Object.prototype.hasOwnProperty.call(target, name)) continue;
+    target[name] = config;
+    options.sources[name] = options.source;
+    if (options.sourceDetail) options.sourceDetails[name] = options.sourceDetail;
+    else delete options.sourceDetails[name];
+  }
+}
+
+function collectPluginServers(homeDir, available, sources, sourceDetails) {
+  const claudeDir = path.join(homeDir, ".claude");
+  const settings = readJson(path.join(claudeDir, "settings.json"));
+  const installed = readJson(path.join(claudeDir, "plugins", "installed_plugins.json"));
+  for (const [pluginId, enabled] of Object.entries(settings?.enabledPlugins ?? {})) {
+    if (enabled !== true) continue;
+    const installs = installed?.plugins?.[pluginId];
+    if (!Array.isArray(installs)) continue;
+    const install = [...installs].reverse().find((entry) =>
+      entry && typeof entry.installPath === "string"
+    );
+    if (!install) continue;
+    const configPath = path.join(install.installPath, ".mcp.json");
+    mergeServers(available, expandPluginRoot(serverMap(readJson(configPath)), install.installPath), {
+      sources,
+      sourceDetails,
+      source: `plugin:${pluginId}`,
+      sourceDetail: {
+        pluginId,
+        pluginVersion: install.version ?? null,
+        configPath,
+      },
+    });
+  }
+}
+
+export function collectConfiguredMcpServers(cwd, options = {}) {
+  const homeDir = options.homeDir ?? os.homedir();
+  const available = {};
+  const sources = {};
+  const sourceDetails = {};
+  collectPluginServers(homeDir, available, sources, sourceDetails);
+
+  const userConfigPath = path.join(homeDir, ".claude.json");
+  const userConfig = readJson(userConfigPath);
+  if (userConfig) {
+    mergeServers(available, userConfig.mcpServers, {
+      override: true,
+      sources,
+      sourceDetails,
+      source: "user",
+    });
+
+    const resolvedCwd = path.resolve(cwd);
+    const projects = userConfig.projects && typeof userConfig.projects === "object"
+      ? userConfig.projects
+      : {};
+    for (const [projectKey, projectConfig] of Object.entries(projects)) {
+      const projectMatches =
+        path.resolve(projectKey) === resolvedCwd ||
+        (typeof projectConfig?.cwd === "string" && path.resolve(projectConfig.cwd) === resolvedCwd) ||
+        (typeof projectConfig?.path === "string" && path.resolve(projectConfig.path) === resolvedCwd);
+      if (projectMatches) {
+        mergeServers(available, projectConfig?.mcpServers, {
+          override: true,
+          sources,
+          sourceDetails,
+          source: "user-project",
+        });
+      }
+    }
+  }
+
+  const candidateProjectConfigPath = path.join(cwd, ".mcp.json");
+  const projectConfigPath = options.allowProjectMcpServers
+    ? candidateProjectConfigPath
+    : null;
+  if (projectConfigPath) {
+    mergeServers(available, serverMap(readJson(projectConfigPath)), {
+      sources,
+      sourceDetails,
+      source: "project",
+    });
+  }
+  const ignoredProjectConfigPath =
+    !options.allowProjectMcpServers && fs.existsSync(candidateProjectConfigPath)
+      ? candidateProjectConfigPath
+      : null;
+
+  return {
+    available,
+    sources,
+    sourceDetails,
+    userConfigPath,
+    projectConfigPath,
+    ignoredProjectConfigPath,
+  };
+}
+
+export function parseMcpToolId(tool, availableServerNames = []) {
+  const body = tool.slice("mcp__".length);
+  const matchingServer = [...availableServerNames]
+    .filter((serverName) => body.startsWith(`${serverName}__`))
+    .sort((left, right) => right.length - left.length)[0];
+  if (matchingServer) {
+    return {
+      serverName: matchingServer,
+      toolName: body.slice(matchingServer.length + 2),
+    };
+  }
+  const separator = body.indexOf("__");
+  return {
+    serverName: separator === -1 ? body : body.slice(0, separator),
+    toolName: separator === -1 ? "" : body.slice(separator + 2),
+  };
+}
+
+export async function probeMcpCapabilities(discovery, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const now = options.now ?? Date.now();
+  const auditedTools = options.auditedTools ?? AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS;
+  const discovered = Object.keys(discovery.available).sort().map((name) => {
+    const config = discovery.available[name];
+    return {
+      name,
+      source: discovery.sources[name] ?? null,
+      transport: serverTransport(config),
+      configFingerprint: serverFingerprint(
+        name,
+        config,
+        discovery.sourceDetails[name] ?? null
+      ),
+    };
+  });
+  const catalog = [];
+  const diagnostics = [];
+
+  await forEachConcurrent(discovered, 4, async (server) => {
+    if (requiresOAuth(discovery.available[server.name])) {
+      diagnostics.push({
+        code: "unsupported_oauth",
+        serverName: server.name,
+        source: server.source,
+        transport: server.transport,
+        configFingerprint: server.configFingerprint,
+      });
+      return;
+    }
+    if (server.transport !== "stdio" && server.transport !== "streamable-http") {
+      diagnostics.push({
+        code: server.transport === "sse" ? "unsupported_sse" : "unsupported_transport",
+        serverName: server.name,
+        source: server.source,
+        transport: server.transport,
+        configFingerprint: server.configFingerprint,
+      });
+      return;
+    }
+    const cached = probeCache.get(server.configFingerprint);
+    let result = cached?.expiresAt > now ? cached.result : null;
+    if (!result) {
+      result = server.transport === "stdio"
+        ? await stdioProbe(discovery.available[server.name], timeoutMs)
+        : await httpProbe(discovery.available[server.name], timeoutMs);
+      probeCache.set(server.configFingerprint, {
+        expiresAt: now + MCP_PROBE_CACHE_TTL_MS,
+        result,
+      });
+    }
+    if (result.code) {
+      diagnostics.push({
+        code: result.code,
+        serverName: server.name,
+        source: server.source,
+        transport: server.transport,
+        configFingerprint: server.configFingerprint,
+      });
+      return;
+    }
+    const secrets = configSecretValues(discovery.available[server.name]);
+    for (const tool of result.tools) {
+      if (!tool || typeof tool.name !== "string" ||
+          !/^[A-Za-z0-9_-]+$/u.test(tool.name)) continue;
+      const description = typeof tool.description === "string"
+        ? redactSecrets(tool.description, secrets)
+        : "";
+      const toolId = `mcp__${server.name}__${tool.name}`;
+      catalog.push({
+        toolId,
+        serverName: server.name,
+        toolName: tool.name,
+        description,
+        capability: description,
+        source: server.source,
+        transport: server.transport,
+        configFingerprint: server.configFingerprint,
+        safety: safetyFor(toolId, tool, auditedTools),
+      });
+    }
+  });
+
+  catalog.sort((left, right) => left.toolId.localeCompare(right.toolId));
+  diagnostics.sort((left, right) => left.serverName.localeCompare(right.serverName));
+  return { discovered, catalog, diagnostics };
+}
+
+function manifestRecord(tool, capability, reason) {
+  return {
+    toolId: tool.toolId,
+    source: tool.source,
+    capability: capability || tool.capability,
+    reason,
+    safetyDecision: tool.safety,
+    transport: tool.transport,
+    configFingerprint: tool.configFingerprint,
+  };
+}
+
+export function selectMcpCapabilities(probeResult, options = {}) {
+  const eligible = probeResult.catalog
+    .filter((tool) => tool.safety.eligible)
+    .map((tool) => manifestRecord(tool, tool.capability, tool.safety.reason));
+  const byId = new Map(probeResult.catalog.map((tool) => [tool.toolId, tool]));
+  const diagnostics = [...(probeResult.diagnostics ?? [])];
+  const selected = [];
+
+  for (const toolId of [...new Set(options.explicitTools ?? [])]) {
+    const tool = byId.get(toolId);
+    if (!tool || !tool.safety.eligible) {
+      diagnostics.push({
+        code: tool ? "explicit_tool_ineligible" : "explicit_tool_missing",
+        toolId,
+        safetyDecision: tool?.safety ?? null,
+      });
+      continue;
+    }
+    selected.push(manifestRecord(tool, tool.capability, "explicit_pin"));
+  }
+
+  if (!options.noAutoTools && selected.length === 0) {
+    // Relevance is decided by the active Codex controller. Node only validates
+    // its exact choices and removes duplicate provider capabilities.
+    const usedCapabilities = new Set();
+    for (const value of options.autoTools ?? []) {
+      const choice = typeof value === "string" ? { toolId: value } : value;
+      const tool = byId.get(choice?.toolId);
+      if (!tool || !tool.safety.eligible) {
+        diagnostics.push({
+          code: tool ? "auto_tool_ineligible" : "auto_tool_missing",
+          toolId: choice?.toolId ?? null,
+          safetyDecision: tool?.safety ?? null,
+        });
+        continue;
+      }
+      const capability = choice.capability || tool.capability || tool.toolId;
+      if (usedCapabilities.has(capability)) continue;
+      usedCapabilities.add(capability);
+      selected.push(manifestRecord(
+        tool,
+        capability,
+        choice.reason || "controller_selected"
+      ));
+    }
+  }
+
+  return { eligible, selected, diagnostics };
+}
+
+export function buildSelectedMcpServers(discovery, selection) {
+  const availableNames = Object.keys(discovery.available);
+  const serverNames = new Set(selection.selected.map((tool) =>
+    parseMcpToolId(tool.toolId, availableNames).serverName
+  ));
+  return Object.fromEntries([...serverNames]
+    .filter((name) => discovery.available[name])
+    .map((name) => [name, JSON.parse(JSON.stringify(discovery.available[name]))]));
+}

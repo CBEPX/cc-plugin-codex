@@ -32,6 +32,12 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
 import {
+  collectConfiguredMcpServers,
+  parseMcpToolId,
+  probeMcpCapabilities,
+  selectMcpCapabilities,
+} from "./lib/mcp-capabilities.mjs";
+import {
   getClaudeAvailability,
   getClaudeAuthStatus,
   runClaudeTurn,
@@ -158,7 +164,7 @@ function printUsage() {
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--poll-interval-ms <ms>] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
-      "  node scripts/claude-companion.mjs mcp-diagnose [--cwd <path>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [--json]",
+      "  node scripts/claude-companion.mjs mcp-diagnose [--cwd <path>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [--no-auto-tools] [--json]",
       "  node scripts/claude-companion.mjs session-routing-context [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs task-resume-candidate [--json]",
@@ -965,94 +971,8 @@ function parseWaitTimeoutMilliseconds(options) {
   return timeoutMs;
 }
 
-function readJsonConfig(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function mergeMcpServers(target, source, options = {}) {
-  if (!source || typeof source !== "object" || Array.isArray(source)) {
-    return;
-  }
-  for (const [name, value] of Object.entries(source)) {
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      if (!options.override && Object.prototype.hasOwnProperty.call(target, name)) {
-        continue;
-      }
-      target[name] = value;
-      if (options.sources && options.source) {
-        options.sources[name] = options.source;
-      }
-    }
-  }
-}
-
-function collectConfiguredMcpServers(cwd, options = {}) {
-  const available = {};
-  const sources = {};
-  const userConfigPath = path.join(os.homedir(), ".claude.json");
-  const userConfig = readJsonConfig(userConfigPath);
-  if (userConfig) {
-    mergeMcpServers(available, userConfig.mcpServers, {
-      sources,
-      source: "user",
-    });
-
-    const resolvedCwd = path.resolve(cwd);
-    const projects = userConfig.projects && typeof userConfig.projects === "object"
-      ? userConfig.projects
-      : {};
-    for (const [projectKey, projectConfig] of Object.entries(projects)) {
-      const projectMatches =
-        projectKey === resolvedCwd ||
-        projectConfig?.cwd === resolvedCwd ||
-        projectConfig?.path === resolvedCwd;
-      if (projectMatches) {
-        mergeMcpServers(available, projectConfig?.mcpServers, {
-          override: true,
-          sources,
-          source: "user-project",
-        });
-      }
-    }
-  }
-
-  const projectConfigPath = options.allowProjectMcpServers
-    ? path.join(cwd, ".mcp.json")
-    : null;
-  if (projectConfigPath) {
-    mergeMcpServers(available, readJsonConfig(projectConfigPath)?.mcpServers, {
-      sources,
-      source: "project",
-    });
-  }
-  const ignoredProjectConfigPath =
-    !options.allowProjectMcpServers && fs.existsSync(path.join(cwd, ".mcp.json"))
-      ? path.join(cwd, ".mcp.json")
-      : null;
-  return { available, sources, userConfigPath, projectConfigPath, ignoredProjectConfigPath };
-}
-
 function parseUserMcpToolName(tool, availableServerNames = []) {
-  const body = tool.slice("mcp__".length);
-  const matchingServer = [...availableServerNames]
-    .filter((serverName) => body.startsWith(`${serverName}__`))
-    .sort((left, right) => right.length - left.length)[0];
-  if (matchingServer) {
-    return {
-      serverName: matchingServer,
-      toolName: body.slice(matchingServer.length + 2),
-    };
-  }
-
-  const separator = body.indexOf("__");
-  return {
-    serverName: separator === -1 ? body : body.slice(0, separator),
-    toolName: separator === -1 ? "" : body.slice(separator + 2),
-  };
+  return parseMcpToolId(tool, availableServerNames);
 }
 
 function loadUserMcpServers(tools, cwd, options = {}) {
@@ -1100,11 +1020,12 @@ function buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile) {
   };
 }
 
-function buildMcpDiagnostic(cwd, options = {}) {
+async function buildMcpDiagnostic(cwd, options = {}) {
   const userMcpTools = normalizeUserMcpTools(options.userMcpTools);
   const {
     available,
     sources,
+    sourceDetails,
     userConfigPath,
     projectConfigPath,
     ignoredProjectConfigPath,
@@ -1113,7 +1034,7 @@ function buildMcpDiagnostic(cwd, options = {}) {
   });
   const availableServerNames = Object.keys(available).sort();
   const selectedServers = new Set();
-  const requestedTools = userMcpTools.map((tool) => {
+  let requestedTools = userMcpTools.map((tool) => {
     const { serverName, toolName } = parseUserMcpToolName(tool, availableServerNames);
     const bundled = serverName === "gitReview";
     const found = bundled || Object.prototype.hasOwnProperty.call(available, serverName);
@@ -1136,9 +1057,25 @@ function buildMcpDiagnostic(cwd, options = {}) {
       reason,
     };
   });
-  const allowedUserTools = requestedTools
-    .filter((tool) => tool.found)
-    .map((tool) => tool.tool);
+  const probeResult = await probeMcpCapabilities({
+    available,
+    sources,
+    sourceDetails,
+  });
+  const selection = selectMcpCapabilities(probeResult, {
+    explicitTools: userMcpTools,
+    noAutoTools: Boolean(options.noAutoTools),
+  });
+  const selectedToolIds = new Set(selection.selected.map((tool) => tool.toolId));
+  requestedTools = requestedTools.map((tool) => ({
+    ...tool,
+    selected: selectedToolIds.has(tool.tool),
+  }));
+  selectedServers.clear();
+  for (const tool of selection.selected) {
+    selectedServers.add(parseUserMcpToolName(tool.toolId, availableServerNames).serverName);
+  }
+  const allowedUserTools = [...selectedToolIds];
   return {
     cwd: path.resolve(cwd),
     userConfigPath,
@@ -1154,6 +1091,19 @@ function buildMcpDiagnostic(cwd, options = {}) {
     allowedTools: userMcpTools.length > 0
       ? [...SANDBOX_REVIEW_TOOLS, ...allowedUserTools]
       : SANDBOX_REVIEW_TOOLS,
+    discoveredServers: probeResult.discovered,
+    discovered: probeResult.catalog.map((tool) => ({
+      toolId: tool.toolId,
+      source: tool.source,
+      capability: tool.capability,
+      reason: tool.safety.reason,
+      safetyDecision: tool.safety,
+      transport: tool.transport,
+      configFingerprint: tool.configFingerprint,
+    })),
+    eligible: selection.eligible,
+    selected: selection.selected,
+    diagnostics: selection.diagnostics,
   };
 }
 
@@ -1185,8 +1135,10 @@ function renderMcpDiagnostic(report) {
     lines.push("- none");
   } else {
     for (const tool of report.requestedTools) {
-      const status = tool.found
+      const status = tool.selected
         ? `selected from ${tool.source}`
+        : tool.found
+          ? `configured but not selected from ${tool.source}`
         : `missing: ${tool.reason}`;
       lines.push(`- ${tool.tool}: ${status}`);
     }
@@ -2464,16 +2416,17 @@ async function handleAdversarialReview(argv) {
   });
 }
 
-function handleMcpDiagnose(argv) {
+async function handleMcpDiagnose(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "user-mcp-tool"],
     repeatableOptions: ["user-mcp-tool"],
-    booleanOptions: ["json", "allow-project-mcp-servers"],
+    booleanOptions: ["json", "allow-project-mcp-servers", "no-auto-tools"],
   });
   const cwd = resolveCommandCwd(options);
-  const payload = buildMcpDiagnostic(cwd, {
+  const payload = await buildMcpDiagnostic(cwd, {
     userMcpTools: options["user-mcp-tool"],
     allowProjectMcpServers: Boolean(options["allow-project-mcp-servers"]),
+    noAutoTools: Boolean(options["no-auto-tools"]),
   });
   outputCommandResult(payload, renderMcpDiagnostic(payload), options.json);
 }
@@ -3091,7 +3044,7 @@ async function main() {
       await handleCancel(argv);
       break;
     case "mcp-diagnose":
-      handleMcpDiagnose(argv);
+      await handleMcpDiagnose(argv);
       break;
     case "mcp-git":
       await handleMcpGit(argv);
