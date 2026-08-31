@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## v1.7.0
+
+### Added
+
+- Add `$cc:design` and `$cc:research` durable peer workflows with independent Codex and Claude evidence, frozen checkpoints, explicit cross-session continuation, and failed-only retry.
+- Discover read-only Claude MCP capabilities, freeze only selected public tool metadata/reasons, and launch Claude with a strict selected-server config and no Bash, write, or Agent tools.
+- Add deterministic acceptance coverage for dual-branch checkpointing, evidence failure and retry, SessionEnd, aggregate cancellation, continuation, model fallback/tool telemetry, and zero workspace changes.
+
+### Changed
+
+- Resolve `$cc:status [id]`, `$cc:result [id]`, and `$cc:cancel [id]` across jobs and peer workflows. Default status shows one workflow aggregate and hides linked jobs; `--all` includes them.
+- Render peer phase, independent branch/evidence state, requested/final models and fallbacks, selected secret-free tool reasons, checkpoint/final result, and exact next command.
+- Emit unread-result notices once per aggregate workflow checkpoint, incomplete state, or final completion while suppressing workflow-linked job notices.
+
+### Fixed
+
+- Preserve aggregate `cancel_failed` whenever a linked process cannot be identity-verified instead of reporting successful workflow cancellation.
+
 ## v1.6.1
 
 ### Added

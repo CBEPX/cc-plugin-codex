@@ -332,6 +332,48 @@ describe("workflow companion internals", () => {
     assert.deepEqual(cancelled.failedJobIds, ["workflow-child-failed"]);
   });
 
+  it("resolves public cancel to the aggregate workflow and preserves linked cancel_failed", () => {
+    const testEnv = createEnvironment();
+    const created = runJson(
+      testEnv,
+      ["workflow-reserve", "--cwd", testEnv.workspaceDir, "--json"],
+      {
+        input: JSON.stringify({
+          id: "workflow-public-cancel",
+          mode: "design",
+          brief: "Cancel through the public surface.",
+          originSessionId: "owner-session",
+          stages: ["memo"],
+        }),
+      }
+    );
+    const timestamp = new Date().toISOString();
+    writeJob(testEnv, {
+      id: "workflow-public-child",
+      status: "cancel_failed",
+      kind: "task",
+      jobClass: "workflow",
+      workflowId: created.id,
+      workflowStage: "memo",
+      sessionId: "owner-session",
+      workspaceRoot: fs.realpathSync.native(testEnv.workspaceDir),
+      pid: 987654321,
+      pidIdentity: "identity-unavailable",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const cancelled = runJson(testEnv, [
+      "cancel", created.id, "--cwd", testEnv.workspaceDir, "--json",
+    ]);
+
+    assert.equal(cancelled.targetType, "workflow");
+    assert.equal(cancelled.workflow.id, created.id);
+    assert.equal(cancelled.workflow.status, "cancel_failed");
+    assert.deepEqual(cancelled.failedJobIds, ["workflow-public-child"]);
+    assert.equal(readJob(testEnv, "workflow-public-child").status, "cancel_failed");
+  });
+
   it("binds tracked work to the workflow-owned Claude session without generic resume lookup", () => {
     const testEnv = createEnvironment();
     let workflow = runJson(

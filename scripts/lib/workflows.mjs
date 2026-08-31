@@ -728,6 +728,23 @@ export function completeWorkflowCancellation(cwd, workflowId, options) {
   }));
 }
 
+export function workflowNotificationEvent(workflow) {
+  if (workflow.status === "awaiting_user" && workflow.checkpoint) return "checkpoint";
+  if (workflow.status === "incomplete") return "incomplete";
+  if (workflow.status === "completed" && workflow.finalResult) return "completed";
+  return null;
+}
+
+export function markWorkflowNotification(cwd, workflowId, options) {
+  const event = String(options.event ?? "").trim();
+  if (!event) throw workflowError("INVALID_NOTIFICATION_EVENT", "Notification event is required.");
+  const field = options.viewed ? "viewedEvents" : "notifiedEvents";
+  return mutateWorkflow(cwd, workflowId, options, (workflow) => ({
+    ...workflow,
+    [field]: [...new Set([...(workflow[field] ?? []), event])],
+  }));
+}
+
 export function cleanupOldWorkflows(cwd) {
   const workflows = listWorkflows(cwd);
   const terminal = workflows.filter((workflow) => TERMINAL_WORKFLOW_STATUSES.has(workflow.status));

@@ -16,8 +16,11 @@ import {
   readJobProgressPreview,
   buildStatusSnapshot,
   buildSingleJobSnapshot,
+  buildSingleStatusSnapshot,
   resolveResultJob,
+  resolveResultTarget,
   resolveCancelableJob,
+  resolveCancelableTarget,
   DEFAULT_MAX_STATUS_JOBS,
   DEFAULT_MAX_PROGRESS_LINES,
 } from "../scripts/lib/job-control.mjs";
@@ -28,6 +31,7 @@ import {
   resolveJobsDir,
   resolveJobLogFile,
 } from "../scripts/lib/state.mjs";
+import { reserveWorkflow } from "../scripts/lib/workflows.mjs";
 
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -55,6 +59,28 @@ function withTempJobRepo(run) {
 function writeJobAt(repoDir, payload) {
   const jobFile = writeJobFile(repoDir, payload.id, payload);
   fs.writeFileSync(jobFile, JSON.stringify(payload), "utf8");
+}
+
+function writePeerWorkflow(repoDir, overrides = {}) {
+  for (const args of [
+    ["config", "user.name", "Codex Test"],
+    ["config", "user.email", "codex@example.com"],
+    ["commit", "--allow-empty", "-m", "workflow baseline"],
+  ]) {
+    const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  }
+  return reserveWorkflow(repoDir, {
+    id: overrides.id ?? "workflow-visible",
+    mode: overrides.mode ?? "design",
+    brief: overrides.brief ?? "Compare the safe options.",
+    originSessionId: overrides.originSessionId ?? "session-a",
+    currentOwnerSessionId: overrides.currentOwnerSessionId ?? "session-a",
+    modelManifest: [{ role: "claude", requestedModel: "fable", resolvedModel: null }],
+    toolManifest: [],
+    stages: ["checkpoint", "critique", "synthesis"],
+    branches: ["codex", "claude"],
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +130,46 @@ describe("DEFAULT_MAX_STATUS_JOBS", () => {
 });
 
 describe("buildStatusSnapshot", () => {
+  it("shows one aggregate workflow by default and linked jobs only with --all", () => {
+    withTempJobRepo((repoDir) => {
+      const workflow = writePeerWorkflow(repoDir);
+      for (const job of [
+        {
+          id: "peer-linked",
+          status: "running",
+          jobClass: "workflow",
+          workflowId: workflow.id,
+          sessionId: "session-a",
+        },
+        {
+          id: "ordinary-job",
+          status: "running",
+          jobClass: "task",
+          sessionId: "session-a",
+        },
+      ]) {
+        writeJobAt(repoDir, {
+          ...job,
+          workspaceRoot: repoDir,
+          createdAt: "2026-09-01T10:00:00Z",
+          updatedAt: "2026-09-01T10:00:00Z",
+        });
+      }
+      setCurrentSession(repoDir, "session-a");
+
+      const defaultView = buildStatusSnapshot(repoDir);
+      assert.deepEqual(defaultView.workflows.map(({ id }) => id), [workflow.id]);
+      assert.deepEqual(defaultView.running.map(({ id }) => id), ["ordinary-job"]);
+
+      const allView = buildStatusSnapshot(repoDir, { all: true });
+      assert.deepEqual(allView.workflows.map(({ id }) => id), [workflow.id]);
+      assert.deepEqual(
+        allView.running.map(({ id }) => id).sort(),
+        ["ordinary-job", "peer-linked"]
+      );
+    });
+  });
+
   it("filters overview jobs to the current session marker when env is absent", () => {
     const repoDir = createTempGitRepo();
     const scopedIds = ["test-status-session-a", "test-status-session-b"];
@@ -218,6 +284,61 @@ describe("buildStatusSnapshot", () => {
 
       const all = buildStatusSnapshot(repoDir, { all: true, maxJobs: 1 });
       assert.deepEqual(all.recent.map((job) => job.id), ["older", "oldest"]);
+    });
+  });
+});
+
+describe("unified workflow target resolution", () => {
+  it("resolves status and result by workflow id without shadowing exact job ids", () => {
+    withTempJobRepo((repoDir) => {
+      const workflow = writePeerWorkflow(repoDir, { id: "workflow-target" });
+      writeJobAt(repoDir, {
+        id: "ordinary-target",
+        status: "completed",
+        jobClass: "task",
+        sessionId: "session-a",
+        workspaceRoot: repoDir,
+        createdAt: "2026-09-01T10:00:00Z",
+        updatedAt: "2026-09-01T10:00:00Z",
+      });
+
+      const status = buildSingleStatusSnapshot(repoDir, workflow.id);
+      assert.equal(status.targetType, "workflow");
+      assert.equal(status.workflow.id, workflow.id);
+
+      const result = resolveResultTarget(repoDir, workflow.id);
+      assert.equal(result.targetType, "workflow");
+      assert.equal(result.workflow.id, workflow.id);
+
+      const job = buildSingleStatusSnapshot(repoDir, "ordinary-target");
+      assert.equal(job.targetType, "job");
+      assert.equal(job.job.id, "ordinary-target");
+    });
+  });
+
+  it("treats one active workflow as one cancel target and hides its linked job", () => {
+    withTempJobRepo((repoDir) => {
+      const workflow = writePeerWorkflow(repoDir, { id: "workflow-cancel-target" });
+      writeJobAt(repoDir, {
+        id: "workflow-cancel-linked",
+        status: "running",
+        jobClass: "workflow",
+        workflowId: workflow.id,
+        sessionId: "session-a",
+        workspaceRoot: repoDir,
+        createdAt: "2026-09-01T10:00:00Z",
+        updatedAt: "2026-09-01T10:00:00Z",
+      });
+
+      const resolved = resolveCancelableTarget(repoDir, "");
+      assert.equal(resolved.targetType, "workflow");
+      if (!("workflow" in resolved)) assert.fail("expected workflow target");
+      assert.equal(resolved.workflow.id, workflow.id);
+
+      const explicitLinked = resolveCancelableTarget(repoDir, "workflow-cancel-linked");
+      assert.equal(explicitLinked.targetType, "job");
+      if (!("job" in explicitLinked)) assert.fail("expected job target");
+      assert.equal(explicitLinked.job.id, "workflow-cancel-linked");
     });
   });
 });

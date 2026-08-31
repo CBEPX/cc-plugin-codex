@@ -27,6 +27,7 @@ import {
 } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
+import { listWorkflows } from "./workflows.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 15;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
@@ -168,6 +169,37 @@ export function enrichJob(job, options = {}) {
   };
 }
 
+export function enrichWorkflow(workflow) {
+  return {
+    ...workflow,
+    entityType: "workflow",
+    kindLabel: `peer ${workflow.mode}`,
+    summary: workflow.brief,
+    elapsed: formatElapsedDuration(workflow.startedAt ?? workflow.createdAt),
+    duration: workflow.completedAt
+      ? formatElapsedDuration(workflow.startedAt ?? workflow.createdAt, workflow.completedAt)
+      : null,
+  };
+}
+
+function summarizeWorkflow(workflow) {
+  const enriched = enrichWorkflow(workflow);
+  return {
+    id: enriched.id,
+    entityType: enriched.entityType,
+    kindLabel: enriched.kindLabel,
+    status: enriched.status,
+    phase: enriched.phase,
+    summary: enriched.summary,
+    createdAt: enriched.createdAt,
+    startedAt: enriched.startedAt,
+    updatedAt: enriched.updatedAt,
+    completedAt: enriched.completedAt,
+    elapsed: enriched.elapsed,
+    duration: enriched.duration,
+  };
+}
+
 export function readStoredJob(workspaceRoot, jobId) {
   return readJobFile(workspaceRoot, jobId);
 }
@@ -236,14 +268,18 @@ function resolveReferencedJob(workspaceRoot, jobs, reference) {
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
+  const sessionId = getCurrentSessionId({ ...options, cwd: workspaceRoot });
   const jobs = sortJobsNewestFirst(
     options.all
       ? listJobs(workspaceRoot)
       : filterJobsForCurrentSession(listJobs(workspaceRoot), {
           ...options,
           cwd: workspaceRoot,
-        })
+        }).filter((job) => !job.workflowId)
   );
+  const workflows = listWorkflows(workspaceRoot)
+    .filter((workflow) => options.all || !sessionId || workflow.currentOwnerSessionId === sessionId)
+    .map(summarizeWorkflow);
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
@@ -263,11 +299,62 @@ export function buildStatusSnapshot(cwd, options = {}) {
   return {
     workspaceRoot,
     config,
+    workflows,
     running,
     latestFinished,
     recent,
     needsReview: Boolean(config.stopReviewGate),
   };
+}
+
+function matchLocalTarget(workspaceRoot, reference) {
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const workflows = listWorkflows(workspaceRoot);
+  const exact = [
+    ...jobs.filter(({ id }) => id === reference).map((job) => ({ targetType: "job", job })),
+    ...workflows.filter(({ id }) => id === reference).map((workflow) => ({ targetType: "workflow", workflow })),
+  ];
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    throw new Error(`Reference "${reference}" matches both a job and workflow. Use an exact unique id.`);
+  }
+  const prefixed = [
+    ...jobs.filter(({ id }) => id.startsWith(reference)).map((job) => ({ targetType: "job", job })),
+    ...workflows.filter(({ id }) => id.startsWith(reference)).map((workflow) => ({ targetType: "workflow", workflow })),
+  ];
+  if (prefixed.length === 1) return prefixed[0];
+  if (prefixed.length > 1) {
+    throw new Error(`Reference "${reference}" is ambiguous. Use a longer id.`);
+  }
+  return null;
+}
+
+export function buildSingleStatusSnapshot(cwd, reference, options = {}) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const local = matchLocalTarget(workspaceRoot, reference);
+  if (local && "workflow" in local) {
+    return {
+      targetType: "workflow",
+      workspaceRoot,
+      workflow: enrichWorkflow(local.workflow),
+    };
+  }
+  if (local && "job" in local) {
+    return {
+      targetType: "job",
+      workspaceRoot,
+      job: enrichJob(local.job, { maxProgressLines: options.maxProgressLines }),
+    };
+  }
+  const global = findExactJobAcrossWorkspaces(reference);
+  if (global) {
+    return {
+      targetType: "job",
+      workspaceRoot: global.workspaceRoot,
+      job: enrichJob(global.job, { maxProgressLines: options.maxProgressLines }),
+    };
+  }
+  throw new Error(`No job or workflow found for "${reference}". Run status to list known work.`);
 }
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
@@ -315,6 +402,53 @@ export function resolveResultJob(cwd, reference) {
   throw new Error("No finished Claude Code jobs found for this repository yet.");
 }
 
+export function resolveResultTarget(cwd, reference) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  if (reference) {
+    const resolved = buildSingleStatusSnapshot(workspaceRoot, reference);
+    if (resolved.targetType === "job") {
+      const job = resolved.job;
+      if (TERMINAL_JOB_STATUSES.has(job.status)) return { ...resolved, state: "terminal" };
+      if (job.status === "queued" || ACTIVE_STATUSES.has(job.status)) {
+        return { ...resolved, state: "active" };
+      }
+      throw new Error(`Job ${job.id} is ${job.status}. Check status for more details.`);
+    }
+    const workflow = resolved.workflow;
+    return {
+      ...resolved,
+      state: workflow.checkpoint || workflow.finalResult || workflow.status === "incomplete"
+        ? "available"
+        : "active",
+    };
+  }
+
+  const sessionId = getCurrentSessionId({ cwd: workspaceRoot });
+  const workflowTargets = listWorkflows(workspaceRoot)
+    .filter((workflow) => !sessionId || workflow.currentOwnerSessionId === sessionId)
+    .filter((workflow) => workflow.checkpoint || workflow.finalResult || workflow.status === "incomplete")
+    .map((workflow) => ({
+      targetType: "workflow",
+      workspaceRoot,
+      workflow: enrichWorkflow(workflow),
+      updatedAt: workflow.updatedAt,
+      state: "available",
+    }));
+  const jobTargets = filterJobsForCurrentSession(listJobs(workspaceRoot), { cwd: workspaceRoot })
+    .filter((job) => !job.workflowId && TERMINAL_JOB_STATUSES.has(job.status))
+    .map((job) => ({
+      targetType: "job",
+      workspaceRoot,
+      job: enrichJob(job),
+      updatedAt: job.updatedAt,
+      state: "terminal",
+    }));
+  const selected = [...workflowTargets, ...jobTargets]
+    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))[0];
+  if (selected) return selected;
+  throw new Error("No finished Claude Code jobs or peer workflow results found for this repository yet.");
+}
+
 export function resolveCancelableJob(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
@@ -335,4 +469,32 @@ export function resolveCancelableJob(cwd, reference) {
   if (activeJobs.length === 1) return { workspaceRoot, job: activeJobs[0] };
   if (activeJobs.length > 1) throw new Error("Multiple Claude Code jobs are active. Pass a job id to $cc:cancel.");
   throw new Error("No active Claude Code jobs to cancel.");
+}
+
+export function resolveCancelableTarget(cwd, reference) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  if (reference) {
+    const resolved = buildSingleStatusSnapshot(workspaceRoot, reference);
+    if ("workflow" in resolved) {
+      if (!["queued", "running", "awaiting_user", "incomplete", "cancel_failed"].includes(resolved.workflow.status)) {
+        throw new Error(`No active workflow found for "${reference}".`);
+      }
+      return resolved;
+    }
+    if (resolved.job.status !== "running" && resolved.job.status !== "queued") {
+      throw new Error(`No active job found for "${reference}".`);
+    }
+    return resolved;
+  }
+
+  const workflows = listWorkflows(workspaceRoot)
+    .filter(({ status }) => ["queued", "running", "awaiting_user", "incomplete", "cancel_failed"].includes(status))
+    .map((workflow) => ({ targetType: "workflow", workspaceRoot, workflow: enrichWorkflow(workflow) }));
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot))
+    .filter((job) => !job.workflowId && (job.status === "running" || job.status === "queued"))
+    .map((job) => ({ targetType: "job", workspaceRoot, job: enrichJob(job) }));
+  const targets = [...workflows, ...jobs];
+  if (targets.length === 1) return targets[0];
+  if (targets.length > 1) throw new Error("Multiple Claude Code jobs or peer workflows are active. Pass an id to $cc:cancel.");
+  throw new Error("No active Claude Code jobs or peer workflows to cancel.");
 }

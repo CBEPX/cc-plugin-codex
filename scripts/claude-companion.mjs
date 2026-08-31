@@ -122,10 +122,13 @@ import {
 } from "./lib/state.mjs";
 import {
   buildSingleJobSnapshot,
+  buildSingleStatusSnapshot,
   buildStatusSnapshot,
   readStoredJob,
   resolveCancelableJob,
+  resolveCancelableTarget,
   resolveResultJob,
+  resolveResultTarget,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
 import {
@@ -145,11 +148,13 @@ import {
   completeWorkflowCancellation,
   getWorkflowRetryContext,
   listWorkflows,
+  markWorkflowNotification,
   markWorkflowBranchFailure,
   readWorkflow,
   rebindWorkflowOwner,
   reserveWorkflow,
   submitWorkflowStage,
+  workflowNotificationEvent,
 } from "./lib/workflows.mjs";
 import {
   renderReviewResult,
@@ -158,7 +163,9 @@ import {
   renderJobStatusReport,
   renderSetupReport,
   renderStatusReport,
-  renderTaskResult
+  renderTaskResult,
+  renderWorkflowResult,
+  renderWorkflowStatusReport,
 } from "./lib/render.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -1979,6 +1986,22 @@ function markTerminalJobViewed(workspaceRoot, jobId, viewedAt = nowIso()) {
   }
 }
 
+function markWorkflowViewed(workspaceRoot, workflow) {
+  const event = workflowNotificationEvent(workflow);
+  if (!event || (workflow.viewedEvents ?? []).includes(event)) return workflow;
+  try {
+    return markWorkflowNotification(workspaceRoot, workflow.id, {
+      event,
+      viewed: true,
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      mode: workflow.mode,
+    });
+  } catch {
+    return workflow;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Foreground execution wrapper
 // ---------------------------------------------------------------------------
@@ -2315,6 +2338,24 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
     waitTimedOut: isActiveJobStatus(snapshot.job.status),
     timeoutMs
   };
+}
+
+async function waitForStatusTarget(cwd, reference, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
+  const pollIntervalMs = Math.max(
+    100,
+    Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS
+  );
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = buildSingleStatusSnapshot(cwd, reference);
+  const active = () => snapshot.targetType === "job"
+    ? isActiveJobStatus(snapshot.job.status)
+    : ["queued", "running"].includes(snapshot.workflow.status);
+  while (active() && Date.now() < deadline) {
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    snapshot = buildSingleStatusSnapshot(cwd, reference);
+  }
+  return { ...snapshot, waitTimedOut: active(), timeoutMs };
 }
 
 async function waitForStoredJob(workspaceRoot, jobId, options = {}) {
@@ -2848,26 +2889,31 @@ async function handleStatus(argv) {
   const reference = positionals[0] ?? "";
   if (reference) {
     let snapshot = options.wait
-      ? await waitForSingleJobSnapshot(cwd, reference, {
+      ? await waitForStatusTarget(cwd, reference, {
           timeoutMs: waitTimeoutMs,
           pollIntervalMs: options["poll-interval-ms"]
         })
-      : buildSingleJobSnapshot(cwd, reference);
-    if (
+      : buildSingleStatusSnapshot(cwd, reference);
+    if (snapshot.targetType === "workflow") {
+      const workflow = markWorkflowViewed(snapshot.workspaceRoot, snapshot.workflow);
+      snapshot = { ...snapshot, workflow };
+    } else if (
       options.json &&
       markViewedViaStatusAccess(snapshot.workspaceRoot, [snapshot.job])
     ) {
       snapshot = options.wait
         ? {
-            ...buildSingleJobSnapshot(cwd, reference),
+            ...buildSingleStatusSnapshot(cwd, reference),
             waitTimedOut: snapshot.waitTimedOut,
             timeoutMs: snapshot.timeoutMs,
           }
-        : buildSingleJobSnapshot(cwd, reference);
+        : buildSingleStatusSnapshot(cwd, reference);
     }
     outputCommandResult(
       snapshot,
-      renderJobStatusReport(snapshot.job),
+      snapshot.targetType === "workflow"
+        ? renderWorkflowStatusReport(snapshot.workflow)
+        : renderJobStatusReport(snapshot.job),
       options.json
     );
     return;
@@ -2898,7 +2944,17 @@ function handleResult(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
-  const { workspaceRoot, job, state } = resolveResultJob(cwd, reference);
+  const resolved = resolveResultTarget(cwd, reference);
+  if ("workflow" in resolved) {
+    const workflow = markWorkflowViewed(resolved.workspaceRoot, resolved.workflow);
+    outputCommandResult(
+      { ...resolved, workflow },
+      renderWorkflowResult(workflow),
+      options.json
+    );
+    return;
+  }
+  const { workspaceRoot, job, state } = resolved;
   let storedJob = readStoredJob(workspaceRoot, job.id);
   if (state !== "active") {
     storedJob = markTerminalJobViewed(workspaceRoot, job.id) ?? storedJob;
@@ -3753,9 +3809,13 @@ async function handleWorkflowCancelLinkedJobs(argv) {
     throw new Error(`STALE_EPOCH: Expected epoch ${mutation.epoch}, found ${current.epoch}.`);
   }
 
+  const result = await cancelWorkflowLinkedJobs(workspaceRoot, current);
+  outputResult(result, options.json);
+}
+
+async function cancelWorkflowLinkedJobs(workspaceRoot, current) {
   const linkedJobs = listJobs(workspaceRoot).filter(
-    (job) =>
-      job.workflowId === workflowId &&
+    (job) => job.workflowId === current.id &&
       (ACTIVE_JOB_STATUSES.has(job.status) || job.status === "cancel_failed")
   );
   const cancelledJobIds = [];
@@ -3772,11 +3832,13 @@ async function handleWorkflowCancelLinkedJobs(argv) {
       failedJobIds.push(job.id);
     }
   }
-  const workflow = completeWorkflowCancellation(workspaceRoot, workflowId, {
-    ...mutation,
+  const workflow = completeWorkflowCancellation(workspaceRoot, current.id, {
+    revision: current.revision,
+    epoch: current.epoch,
+    mode: current.mode,
     failedJobIds,
   });
-  outputResult({ workflow, cancelledJobIds, failedJobIds }, options.json);
+  return { targetType: "workflow", workflow, cancelledJobIds, failedJobIds };
 }
 
 async function handleCancel(argv) {
@@ -3787,7 +3849,19 @@ async function handleCancel(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference);
+  const resolved = resolveCancelableTarget(cwd, reference);
+  if ("workflow" in resolved) {
+    const result = await cancelWorkflowLinkedJobs(resolved.workspaceRoot, resolved.workflow);
+    outputCommandResult(
+      result,
+      result.workflow.status === "cancel_failed"
+        ? `Workflow ${result.workflow.id} cancellation failed for linked jobs: ${result.failedJobIds.join(", ")}.\nNext command: \`$cc:status ${result.workflow.id}\`\n`
+        : `Cancelled workflow ${result.workflow.id}.\n`,
+      options.json
+    );
+    return;
+  }
+  const { workspaceRoot, job } = resolved;
 
   const result = await cancelStoredJob(workspaceRoot, job);
   outputCommandResult(

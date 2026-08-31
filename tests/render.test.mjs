@@ -16,6 +16,8 @@ import {
   renderJobStatusReport,
   renderStoredJobResult,
   renderCancelReport,
+  renderWorkflowStatusReport,
+  renderWorkflowResult,
 } from "../scripts/lib/render.mjs";
 
 // ---------------------------------------------------------------------------
@@ -450,6 +452,29 @@ describe("renderTaskResult", () => {
 // ---------------------------------------------------------------------------
 
 describe("renderStatusReport", () => {
+  it("renders aggregate workflow rows with workflow actions", () => {
+    const output = renderStatusReport({
+      workflows: [{
+        id: "workflow-design",
+        entityType: "workflow",
+        kindLabel: "peer design",
+        status: "awaiting_user",
+        phase: "checkpoint",
+        summary: "Compare options",
+        updatedAt: "2026-09-01T10:00:00Z",
+      }],
+      running: [],
+      latestFinished: null,
+      recent: [],
+    });
+
+    assert.match(output, /workflow-design/);
+    assert.match(output, /peer design/);
+    assert.match(output, /`\$cc:status workflow-design`/);
+    assert.match(output, /`\$cc:result workflow-design`/);
+    assert.doesNotMatch(output, /`\$cc:cancel workflow-design`/);
+  });
+
   it("renders empty state", () => {
     const report = {
       config: { stopReviewGate: false },
@@ -561,6 +586,102 @@ describe("renderStatusReport", () => {
     };
     const output = renderStatusReport(report);
     assert.equal(output.split("j2").length - 1, 3);
+  });
+});
+
+describe("peer workflow rendering", () => {
+  const workflow = {
+    id: "workflow-render",
+    mode: "research",
+    status: "awaiting_user",
+    phase: "checkpoint",
+    brief: "Investigate behavior.",
+    modelManifest: [
+      { role: "claude", requestedModel: "fable", resolvedModel: null },
+      { role: "claude-fallback", requestedModel: "opus", resolvedModel: null },
+      { role: "codex", requestedModel: "gpt-5.6", resolvedModel: null },
+    ],
+    toolManifest: [{
+      toolId: "mcp__docs__search",
+      source: "user",
+      capability: "docs_search",
+      reason: "Need primary docs",
+      configFingerprint: "safe-fingerprint",
+      serverConfig: { env: { TOKEN: "secret-token" } },
+    }],
+    branches: {
+      codex: {
+        status: "completed",
+        attempts: 1,
+        failureReason: null,
+        payload: {
+          repoCitations: [{ path: "README.md", line: 1 }],
+          webCitations: ["https://example.com/codex"],
+          toolEvents: [{ tool: "repo-read" }],
+        },
+      },
+      claude: {
+        status: "completed",
+        attempts: 2,
+        failureReason: null,
+        payload: {
+          repoCitations: [{ path: "scripts/main.mjs", line: 4 }],
+          webCitations: ["https://example.com/claude"],
+          toolEvents: [{ tool: "mcp__docs__search" }],
+          model: {
+            requestedModel: "fable",
+            finalModel: "claude-opus-5",
+            fallbackModel: "opus",
+            modelFallbacks: [{
+              fromModel: "claude-fable-5",
+              toModel: "claude-opus-5",
+              reason: "capacity",
+            }],
+            contextWindow: 1000000,
+          },
+        },
+      },
+    },
+    checkpoint: {
+      agreements: ["Both found the same boundary."],
+      disagreements: ["Different rollout order."],
+      decisionsNeeded: ["Choose rollout order."],
+    },
+    finalResult: null,
+    failureReason: null,
+    updatedAt: "2026-09-01T10:00:00Z",
+  };
+
+  it("renders phase, independent evidence/model/tool diagnostics, and exact next command", () => {
+    const output = renderWorkflowStatusReport(workflow);
+
+    assert.match(output, /# Peer Workflow Status/);
+    assert.match(output, /\| Phase \| checkpoint \|/);
+    assert.match(output, /\| codex \| completed \| 1 \|/);
+    assert.match(output, /\| claude \| completed \| 2 \|/);
+    assert.match(output, /claude-fable-5 -> claude-opus-5 \(capacity\)/);
+    assert.match(output, /mcp__docs__search/);
+    assert.match(output, /Need primary docs/);
+    assert.match(output, /repo=1, web=1, tools=1/);
+    assert.match(output, /`\$cc:research --continue workflow-render`/);
+    assert.doesNotMatch(output, /secret-token|serverConfig|TOKEN/);
+  });
+
+  it("renders checkpoint or final result and keeps the manifest secret-free", () => {
+    const checkpoint = renderWorkflowResult(workflow);
+    assert.match(checkpoint, /Both found the same boundary/);
+    assert.match(checkpoint, /`\$cc:research --continue workflow-render`/);
+    assert.doesNotMatch(checkpoint, /secret-token|serverConfig|TOKEN/);
+
+    const final = renderWorkflowResult({
+      ...workflow,
+      status: "completed",
+      phase: "done",
+      finalResult: { conclusion: "Ship the narrow option." },
+    });
+    assert.match(final, /Ship the narrow option/);
+    assert.doesNotMatch(final, /Both found the same boundary/);
+    assert.match(final, /Next command: none/);
   });
 });
 

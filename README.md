@@ -15,6 +15,7 @@
 <p align="center">
   <a href="#quick-start"><strong>Quick Start</strong></a> ·
   <a href="#commands"><strong>Commands</strong></a> ·
+  <a href="#peer-design-and-research"><strong>Peer Workflows</strong></a> ·
   <a href="#background-jobs"><strong>Background Jobs</strong></a> ·
   <a href="#review-gate"><strong>Review Gate</strong></a> ·
   <a href="#how-this-differs-from-upstream"><strong>vs Upstream</strong></a> ·
@@ -28,11 +29,12 @@
 `cc-plugin-codex` turns Codex into a host for Claude Code work.
 **Codex stays in charge of the thread. Claude Code does the review and rescue work.**
 
-You get nine commands (`$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:transfer`, `$cc:status`, `$cc:result`, `$cc:cancel`, `$cc:mcp-diagnose`, `$cc:setup`) that launch tracked Claude Code work, transfer Claude transcripts into Codex, manage lifecycle and ownership, and surface results back into Codex.
+You get eleven commands, including `$cc:design` and `$cc:research`, that launch tracked Claude Code work, compare independent Codex and Claude evidence, transfer transcripts, manage lifecycle and ownership, and surface results back into Codex.
 
 That includes:
 - Built-in Codex subagent orchestration for rescue and background review flows
 - Session-scoped tracked jobs with status, result, and cancel commands
+- Durable peer design/research workflows with independent evidence, failed-only retry, and cross-session continuation
 - Background completion nudges that steer you to the right `$cc:result <job-id>`
 - An optional stop-time review gate
 - GitHub CI coverage on Windows, macOS, and Linux
@@ -46,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.0
 codex plugin add cc@cbepx
 ```
 
@@ -59,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.1/cc-plugin-codex-1.6.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.0 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.0/cc-plugin-codex-1.7.0.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -106,10 +108,12 @@ When it finishes, Codex should nudge you toward the right result. If not, `$cc:s
 | `$cc:review` | Read-only Claude Code review of your changes |
 | `$cc:adversarial-review` | Design-challenging review — questions approach, tradeoffs, hidden assumptions |
 | `$cc:rescue` | Hand a task to Claude Code — bugs, fixes, investigations, follow-ups |
+| `$cc:design` | Compare technical alternatives with independent Codex and Claude evidence |
+| `$cc:research` | Investigate a repository question with independent Codex and Claude evidence |
 | `$cc:transfer` | Import the current Claude transcript into a resumable Codex thread |
-| `$cc:status` | List running and recent Claude Code jobs, or inspect one job |
-| `$cc:result` | Open the output of a finished job |
-| `$cc:cancel` | Cancel an active background job |
+| `$cc:status` | List jobs and aggregate peer workflows, or inspect one ID |
+| `$cc:result` | Open a job result or peer checkpoint/final result |
+| `$cc:cancel` | Cancel an active job or peer workflow |
 | `$cc:mcp-diagnose` | Explain which Claude MCP tools would be available to reviews |
 | `$cc:setup` | Verify installation, auth, hooks, and review gate |
 
@@ -117,6 +121,7 @@ Quick routing rule:
 - Use `$cc:review` for straightforward correctness review of the current diff.
 - Use `$cc:adversarial-review` for riskier config/template/migration/design changes, or whenever you want stronger challenge on assumptions and tradeoffs.
 - Use `$cc:rescue` when you want Claude Code to investigate, validate by changing code, or actually fix/implement something.
+- Use `$cc:design` or `$cc:research` when the decision benefits from two independent read-only evidence paths before synthesis.
 
 ### `$cc:review`
 
@@ -159,6 +164,25 @@ $cc:mcp-diagnose --allow-project-mcp-servers --user-mcp-tool mcp__localdocs__sea
 ```
 
 The diagnostic output lists server names and config sources only; it does not print raw MCP server configs or secrets.
+
+### Peer design and research
+
+`$cc:design` and `$cc:research` start a durable read-only workflow with exactly two independent branches: one Codex reasoning worker and one Claude forwarder. The initial branches receive the same frozen brief and cannot read each other's memo before sealing their own evidence.
+
+```text
+$cc:design compare the queue ownership alternatives
+$cc:research trace how cancellation state reaches the public CLI
+$cc:status <workflow-id>
+$cc:result <workflow-id>
+$cc:design --continue <workflow-id> optional feedback
+$cc:design --retry <workflow-id>
+```
+
+New workflows default to Claude `fable` with `opus` fallback and inherited Codex model at `xhigh` effort. Use `--model`, `--fallback-model`, `--effort`, `--codex-model`, or `--codex-effort` to override them. Repeat `--user-mcp-tool <mcp__server__tool>` for explicit safe tools; automatic selection is limited to the smallest relevant read-only set exposed to the active Codex turn. Project MCP servers still require `--allow-project-mcp-servers`.
+
+The stored and rendered workflow shows independent branch states, requested/final models and fallback events, source/tool evidence counts, selected public tool IDs and reasons, checkpoint or final result, and the exact continue/retry command. Raw MCP configuration, environment variables, headers, and credentials are never persisted or rendered. Claude receives no Bash, write, or Agent capability, and only selected MCP servers enter its strict runtime config.
+
+At the checkpoint, inspect the aggregate result and either continue with feedback or retry only failed/missing work. Continuation may run from a new Codex session: ownership is rebound explicitly, and Claude resumes only the workflow-owned session with a fork. SessionEnd marks unfinished work retryable after identity-checked linked-process cleanup; unresolved cancellation remains `cancel_failed`.
 
 ### `$cc:adversarial-review`
 
@@ -225,19 +249,19 @@ The SessionStart hook normally supplies the current transcript path automaticall
 ### `$cc:status`
 
 ```text
-$cc:status                          # list active and recent jobs
-$cc:status task-abc123              # detailed status for one job
-$cc:status --all                    # show all tracked jobs in this repository workspace
-$cc:status --wait task-abc123       # block until job completes
+$cc:status                          # list jobs and aggregate peer workflows
+$cc:status task-abc123              # detailed status for one job or workflow
+$cc:status --all                    # include all workspace jobs, including workflow-linked jobs
+$cc:status --wait task-abc123       # block until the job/workflow stops running
 ```
 
-By default, `$cc:status` shows jobs owned by the current Codex session. Use `--all` when you want the wider repository view across older or sibling sessions in the same workspace.
+By default, `$cc:status` shows current-session jobs plus one aggregate row per owned peer workflow; workflow-linked implementation jobs are hidden. Use `--all` for the wider repository view and linked-job diagnostics.
 
 ### `$cc:result`
 
 ```text
-$cc:result                          # open the latest finished job for this session/repo
-$cc:result task-abc123              # show finished job output
+$cc:result                          # open the latest job or workflow result for this session/repo
+$cc:result task-abc123              # show job output or a workflow checkpoint/final result
 ```
 
 When a job came from a built-in background child, the output can show both:
@@ -253,8 +277,10 @@ claude --resume <session-id>
 ### `$cc:cancel`
 
 ```text
-$cc:cancel task-abc123              # cancel a running job
+$cc:cancel task-abc123              # cancel a running job or peer workflow
 ```
+
+Workflow cancellation targets only its linked work. A missing or unverifiable process identity remains visible as `cancel_failed`; the plugin does not turn that state into a successful cancellation.
 
 ### `$cc:setup`
 
@@ -274,7 +300,7 @@ All review and rescue commands support `--background`. Background jobs are track
 
 1. **Queued → Running → Completed** — jobs progress through states automatically.
 2. **Built-in subagent background flows** — background rescue, review, and adversarial review use Codex-managed subagent turns rather than stuffing `--background` into the companion command itself.
-3. **Completion nudges** — when a background built-in flow finishes, the plugin tries to nudge the parent thread with the right `$cc:result <job-id>`. If that nudge cannot surface cleanly, unread-result hooks are the backstop.
+3. **Completion nudges** — when a background built-in flow finishes, the plugin tries to nudge the parent thread with the right `$cc:result <job-id>`. Peer workflows notify only at an aggregate checkpoint, incomplete state, or final completion; linked jobs never produce duplicate nudges. If a nudge cannot surface cleanly, unread-result hooks are the backstop.
    The nudge is intentionally just a pointer. The actual stored result still opens through `$cc:result`.
 4. **Unread-result fallback** — when you submit your next prompt after a finished unread job, Codex can remind you that a result is waiting and point you to `$cc:status` / `$cc:result`.
 5. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
@@ -341,7 +367,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.0
 codex plugin add cc@cbepx
 ```
 
@@ -362,8 +388,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.6.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.6.1/cc-plugin-codex-1.6.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.0 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.0/cc-plugin-codex-1.7.0.tgz install
 ```
 
 After install, run:
@@ -393,7 +419,7 @@ $cc:setup
 Re-run the fork marketplace install flow, pinned to the release you want:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.6.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.0
 codex plugin add cc@cbepx
 ```
 

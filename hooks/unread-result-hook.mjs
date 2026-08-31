@@ -24,6 +24,11 @@ import {
 import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
 import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
+import {
+  listWorkflows,
+  markWorkflowNotification,
+  workflowNotificationEvent,
+} from "../scripts/lib/workflows.mjs";
 
 const MAX_LISTED_JOBS = 3;
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
@@ -65,6 +70,22 @@ function buildAdditionalContext(jobs) {
   ].join("\n");
 }
 
+function buildWorkflowContext(workflows) {
+  const rows = workflows.map(({ workflow, event }) =>
+    `- ${workflow.id} | ${workflow.status} | ${event} | \`$cc:result ${workflow.id}\``
+  );
+  return [
+    workflows.length === 1
+      ? "A peer workflow from this session reached a new aggregate milestone."
+      : `${workflows.length} peer workflows from this session reached new aggregate milestones.`,
+    "",
+    "Peer workflows:",
+    ...rows,
+    "",
+    "Before handling the new request, briefly mention the workflow milestone and ask whether the user wants to inspect it first or continue. Use the exact `$cc:result <workflow-id>` command above. Do not announce linked jobs separately or repeat this milestone automatically.",
+  ].join("\n");
+}
+
 function selectUnreadTerminalJobs(workspaceRoot, sessionId) {
   if (!sessionId) {
     return [];
@@ -72,6 +93,7 @@ function selectUnreadTerminalJobs(workspaceRoot, sessionId) {
 
   return listJobs(workspaceRoot)
     .filter((job) => job.sessionId === sessionId)
+    .filter((job) => !job.workflowId)
     .filter((job) => TERMINAL_JOB_STATUSES.has(job.status))
     .filter((job) => job.status !== "cancelled")
     .filter((job) => !job.resultViewedAt)
@@ -83,6 +105,15 @@ function selectUnreadTerminalJobs(workspaceRoot, sessionId) {
     );
 }
 
+function selectUnreadWorkflows(workspaceRoot, sessionId) {
+  return listWorkflows(workspaceRoot)
+    .filter((workflow) => workflow.currentOwnerSessionId === sessionId)
+    .map((workflow) => ({ workflow, event: workflowNotificationEvent(workflow) }))
+    .filter(({ event }) => event)
+    .filter(({ workflow, event }) => !(workflow.notifiedEvents ?? []).includes(event))
+    .filter(({ workflow, event }) => !(workflow.viewedEvents ?? []).includes(event));
+}
+
 function markJobsNotified(workspaceRoot, jobs) {
   const timestamp = nowIso();
   for (const job of jobs) {
@@ -92,6 +123,21 @@ function markJobsNotified(workspaceRoot, jobs) {
       });
     } catch {
       // Notification state is best-effort; still surface the terminal result.
+    }
+  }
+}
+
+function markWorkflowsNotified(workspaceRoot, workflows) {
+  for (const { workflow, event } of workflows) {
+    try {
+      markWorkflowNotification(workspaceRoot, workflow.id, {
+        event,
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+        mode: workflow.mode,
+      });
+    } catch {
+      // Notification state is best-effort; still surface the aggregate milestone.
     }
   }
 }
@@ -160,12 +206,18 @@ async function main() {
   }
 
   const jobs = selectUnreadTerminalJobs(workspaceRoot, sessionId);
-  if (jobs.length === 0) {
+  const workflows = selectUnreadWorkflows(workspaceRoot, sessionId);
+  if (jobs.length === 0 && workflows.length === 0) {
     return;
   }
 
   markJobsNotified(workspaceRoot, jobs);
-  process.stdout.write(`${buildAdditionalContext(jobs)}\n`);
+  markWorkflowsNotified(workspaceRoot, workflows);
+  const sections = [
+    ...(workflows.length > 0 ? [buildWorkflowContext(workflows)] : []),
+    ...(jobs.length > 0 ? [buildAdditionalContext(jobs)] : []),
+  ];
+  process.stdout.write(`${sections.join("\n\n")}\n`);
 }
 
 main().catch((error) => {

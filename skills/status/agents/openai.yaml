@@ -1,5 +1,5 @@
 interface:
   display_name: "Claude Code Status"
-  short_description: "Args: [job-id], --wait, --wait-timeout-ms <ms>, --poll-interval-ms <ms>, --all. Inspect active or recent Claude Code jobs."
+  short_description: "Inspect Claude jobs or peer workflows. Args: [id], --all."
 policy:
   allow_implicit_invocation: false

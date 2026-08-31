@@ -82,6 +82,55 @@ function readJob(testEnv, jobId) {
   );
 }
 
+function writeWorkflow(testEnv, overrides = {}) {
+  const workflowsDir = path.join(stateDirFor(testEnv), "workflows");
+  fs.mkdirSync(workflowsDir, { recursive: true });
+  const workflow = {
+    version: 1,
+    id: overrides.id ?? "workflow-notify",
+    mode: overrides.mode ?? "design",
+    status: overrides.status ?? "awaiting_user",
+    phase: overrides.phase ?? "checkpoint",
+    revision: overrides.revision ?? 4,
+    epoch: 0,
+    workspaceRoot: fs.realpathSync.native(testEnv.workspaceDir),
+    fingerprint: {},
+    brief: "Compare options.",
+    briefHash: "a".repeat(64),
+    originSessionId: "session-a",
+    currentOwnerSessionId: "session-a",
+    modelManifest: [],
+    toolManifest: [],
+    stages: {},
+    branches: {
+      codex: { status: "completed", payload: {}, attempts: 1, failureReason: null },
+      claude: { status: "completed", payload: {}, attempts: 1, failureReason: null },
+    },
+    branchAttempts: [],
+    claudeSessionId: null,
+    checkpoint: overrides.checkpoint ?? { agreements: ["same boundary"] },
+    feedback: null,
+    critique: null,
+    finalResult: overrides.finalResult ?? null,
+    failureReason: overrides.failureReason ?? null,
+    ...(overrides.notifiedEvents ? { notifiedEvents: overrides.notifiedEvents } : {}),
+    createdAt: "2026-09-01T10:00:00Z",
+    updatedAt: overrides.updatedAt ?? "2026-09-01T10:01:00Z",
+  };
+  fs.writeFileSync(
+    path.join(workflowsDir, `${workflow.id}.json`),
+    `${JSON.stringify(workflow, null, 2)}\n`,
+    "utf8"
+  );
+  return workflow;
+}
+
+function readWorkflow(testEnv, workflowId) {
+  return JSON.parse(
+    fs.readFileSync(path.join(stateDirFor(testEnv), "workflows", `${workflowId}.json`), "utf8")
+  );
+}
+
 function runHook(testEnv, payload, extraEnv = {}) {
   const result = spawnSync(process.execPath, [HOOK_SCRIPT], {
     cwd: PROJECT_ROOT,
@@ -168,6 +217,67 @@ test("injects one-shot context for same-session completed unread jobs and marks 
       prompt: "another request",
     });
     assert.equal(second, "");
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("announces workflow milestones once and never announces their linked jobs", () => {
+  const testEnv = createEnv();
+  try {
+    const workflow = writeWorkflow(testEnv);
+    for (const id of ["peer-codex-linked", "peer-claude-linked"]) {
+      writeJob(testEnv, {
+        id,
+        workflowId: workflow.id,
+        jobClass: "workflow",
+        sessionId: "session-a",
+        status: "completed",
+        createdAt: "2026-09-01T10:00:00Z",
+        updatedAt: "2026-09-01T10:01:00Z",
+        completedAt: "2026-09-01T10:01:00Z",
+      });
+    }
+
+    const checkpoint = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue with something else",
+    });
+    assert.match(checkpoint, /workflow-notify.*checkpoint/);
+    assert.match(checkpoint, /\$cc:result workflow-notify/);
+    assert.doesNotMatch(checkpoint, /peer-codex-linked|peer-claude-linked/);
+    assert.deepEqual(readWorkflow(testEnv, workflow.id).notifiedEvents, ["checkpoint"]);
+    assert.equal(readJob(testEnv, "peer-codex-linked").notifiedAt, undefined);
+    assert.equal(readJob(testEnv, "peer-claude-linked").notifiedAt, undefined);
+
+    const duplicate = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "another request",
+    });
+    assert.equal(duplicate, "");
+
+    const completed = readWorkflow(testEnv, workflow.id);
+    writeWorkflow(testEnv, {
+      id: workflow.id,
+      status: "completed",
+      phase: "done",
+      revision: completed.revision,
+      notifiedEvents: completed.notifiedEvents,
+      finalResult: { conclusion: "done" },
+      updatedAt: "2026-09-01T10:02:00Z",
+    });
+    const completedOutput = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "one more request",
+    });
+    assert.match(completedOutput, /workflow-notify.*completed/);
+    assert.deepEqual(readWorkflow(testEnv, workflow.id).notifiedEvents, ["checkpoint", "completed"]);
   } finally {
     cleanupEnv(testEnv);
   }
