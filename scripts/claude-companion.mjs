@@ -184,6 +184,36 @@ const DEFAULT_FOREGROUND_TASK_WAIT_TIMEOUT_MS = 1800000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const USER_MCP_TOOL_RE = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const PEER_FAILURE_CODES = new Set([
+  "ATTEMPT_ALREADY_COMMITTED",
+  "ATTEMPT_LEASE_REFLECTION",
+  "BRIEF_HASH_MISMATCH",
+  "CLAUDE_AUTH",
+  "CLAUDE_RATE_LIMIT",
+  "CLAUDE_TURN_FAILED",
+  "COMMITMENT_MISMATCH",
+  "COMPLETED_STAGE_IMMUTABLE",
+  "CRITIQUE_INCOMPLETE",
+  "DUPLICATE_CONTINUE",
+  "EVIDENCE_INCOMPLETE",
+  "MCP_SELECTION_DRIFT",
+  "PEER_ISOLATION_UNAVAILABLE",
+  "PEER_SIBLING_TIMEOUT",
+  "PEER_TURN_FAILED",
+  "SAFETY_VIOLATION",
+  "STAGE_NOT_RUNNING",
+  "STAGE_REVEAL_REQUIRED",
+  "STALE_ATTEMPT",
+  "STALE_EPOCH",
+  "STALE_REVISION",
+  "STALE_WORKSPACE",
+  "WORKFLOW_BRANCH_NOT_FOUND",
+  "WORKFLOW_NOT_FOUND",
+  "WORKFLOW_NOT_READY",
+  "WORKFLOW_STAGE_MISMATCH",
+  "WORKFLOW_STAGE_NOT_FOUND",
+  "WORKFLOW_TERMINAL",
+]);
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
 // ---------------------------------------------------------------------------
@@ -1737,8 +1767,47 @@ function sanitizePeerProgress(event) {
     phase,
     message,
     stderrMessage: message,
-    modelFallback: event.modelFallback ?? null,
+    modelFallback: sanitizePeerModelFallback(event.modelFallback),
   };
+}
+
+function sanitizePeerModelFallback(event) {
+  const [normalized] = normalizeModelFallbacks([event]);
+  if (!normalized) return null;
+  const safeModel = (value) =>
+    typeof value === "string" && /^[a-z0-9._:-]{1,128}$/iu.test(value)
+      ? value
+      : null;
+  const fromModel = safeModel(normalized.fromModel);
+  const toModel = safeModel(normalized.toModel);
+  if (!fromModel && !toModel) return null;
+  const reason = new Set([
+    "capacity",
+    "model_unavailable",
+    "terminal_model_mismatch",
+  ]).has(normalized.reason)
+    ? normalized.reason
+    : "other";
+  const source = new Set(["model_fallback", "terminal_model_mismatch"])
+    .has(normalized.source)
+    ? normalized.source
+    : "model_fallback";
+  return {
+    fromModel,
+    toModel,
+    reason,
+    source,
+    timestamp: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u
+      .test(normalized.timestamp)
+      ? normalized.timestamp
+      : nowIso(),
+  };
+}
+
+function normalizePeerModelFallbacks(events) {
+  return Array.isArray(events)
+    ? events.map(sanitizePeerModelFallback).filter(Boolean)
+    : [];
 }
 
 function buildReviewRequest({
@@ -3217,19 +3286,10 @@ function failPeerTarget(cwd, workflowId, options) {
 
 function validatePeerSelection(discovery, workflow) {
   const expected = workflow.toolManifest ?? [];
-  const availableNames = Object.keys(discovery.available);
-  const selectedServerNames = new Set(expected.map(({ toolId }) =>
-    parseMcpToolId(toolId, availableNames).serverName
-  ));
-  const selectedDiscovery = {
-    ...discovery,
-    available: Object.fromEntries(Object.entries(discovery.available)
-      .filter(([name]) => selectedServerNames.has(name))),
-    sources: Object.fromEntries(Object.entries(discovery.sources)
-      .filter(([name]) => selectedServerNames.has(name))),
-    sourceDetails: Object.fromEntries(Object.entries(discovery.sourceDetails)
-      .filter(([name]) => selectedServerNames.has(name))),
-  };
+  const selectedDiscovery = filterMcpDiscovery(
+    discovery,
+    expected.map(({ toolId }) => toolId)
+  );
   const probeResultPromise = probeMcpCapabilities(selectedDiscovery);
   return probeResultPromise.then((probeResult) => {
     const selection = selectMcpCapabilities(probeResult, {
@@ -3255,8 +3315,36 @@ function validatePeerSelection(discovery, workflow) {
   });
 }
 
+function filterMcpDiscovery(discovery, toolIds) {
+  const availableNames = Object.keys(discovery.available);
+  const selectedServerNames = new Set(toolIds.map((toolId) =>
+    parseMcpToolId(toolId, availableNames).serverName
+  ));
+  return {
+    ...discovery,
+    available: Object.fromEntries(Object.entries(discovery.available)
+      .filter(([name]) => selectedServerNames.has(name))),
+    sources: Object.fromEntries(Object.entries(discovery.sources)
+      .filter(([name]) => selectedServerNames.has(name))),
+    sourceDetails: Object.fromEntries(Object.entries(discovery.sourceDetails)
+      .filter(([name]) => selectedServerNames.has(name))),
+  };
+}
+
+function peerFailureCode(error) {
+  for (const candidate of [
+    error?.code,
+    String(error?.message ?? error).split(":", 1)[0],
+  ]) {
+    const value = String(candidate ?? "").trim().toUpperCase();
+    if (PEER_FAILURE_CODES.has(value)) return value;
+  }
+  return "PEER_TURN_FAILED";
+}
+
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
-  if (error?.code === "ATTEMPT_LEASE_REFLECTION") return;
+  const reason = peerFailureCode(error);
+  if (reason === "ATTEMPT_LEASE_REFLECTION") return;
   try {
     if (targetStatus(readPeerWorkflow(cwd, workflowId), target.stage, target.branchId) === "running") {
       failPeerTarget(cwd, workflowId, {
@@ -3264,7 +3352,7 @@ function failPeerAttempt(cwd, workflowId, target, fence, error) {
         ...(target.branchId ? { branchId: target.branchId } : {}),
         epoch: fence.epoch,
         lease: fence.lease,
-        reason: error?.code ?? (String(error?.message ?? error).split(":", 1)[0] || "PEER_TURN_FAILED"),
+        reason,
       });
     }
   } catch {}
@@ -3413,7 +3501,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       requestedModel: result.requestedModel ?? peerModelValue(workflow, "claude"),
       finalModel: result.finalModel ?? null,
       fallbackModel: peerModelValue(workflow, "claude-fallback") ?? "opus",
-      modelFallbacks: normalizeModelFallbacks(result.modelEvents),
+      modelFallbacks: normalizePeerModelFallbacks(result.modelEvents),
       contextWindow: result.contextWindow ?? null,
     };
     const payload = critique
@@ -3463,8 +3551,10 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       workflow: submitted,
     };
   } catch (error) {
-    failPeerAttempt(cwd, workflowId, { stage, branchId }, fence, error);
-    throw error;
+    const code = peerFailureCode(error);
+    const sanitized = Object.assign(new Error(code), { code });
+    failPeerAttempt(cwd, workflowId, { stage, branchId }, fence, sanitized);
+    throw sanitized;
   } finally {
     cleanupSandboxSettings(sandboxSettingsFile);
     cleanupReviewMcpConfig(mcpConfigFile);
@@ -3495,18 +3585,19 @@ async function handlePeerCreate(argv) {
   const discovery = collectConfiguredMcpServers(cwd, {
     allowProjectMcpServers: route.allowProjectMcpServers,
   });
-  const probeResult = await probeMcpCapabilities(discovery);
   const autoTools = Array.isArray(options["auto-mcp-tool"])
     ? options["auto-mcp-tool"]
     : options["auto-mcp-tool"] ? [options["auto-mcp-tool"]] : [];
+  const expectedTools = route.userMcpTools.length > 0
+    ? route.userMcpTools
+    : route.noAutoTools ? [] : [...new Set(autoTools)];
+  const selectedDiscovery = filterMcpDiscovery(discovery, expectedTools);
+  const probeResult = await probeMcpCapabilities(selectedDiscovery);
   const selection = selectMcpCapabilities(probeResult, {
     explicitTools: route.userMcpTools,
     autoTools,
     noAutoTools: route.noAutoTools,
   });
-  const expectedTools = route.userMcpTools.length > 0
-    ? route.userMcpTools
-    : route.noAutoTools ? [] : [...new Set(autoTools)];
   const selectedIds = new Set(selection.selected.map(({ toolId }) => toolId));
   const missing = expectedTools.filter((toolId) => !selectedIds.has(toolId));
   if (missing.length > 0) {
@@ -3990,9 +4081,12 @@ function handleWorkflowRebind(argv) {
     valueOptions: ["cwd", "mode", "revision", "epoch", "owner-session-id"],
     booleanOptions: ["json"],
   });
+  const cwd = resolveCommandCwd(options);
+  const workflowId = requireWorkflowId(positionals);
+  rejectPublicPeerMutation(cwd, workflowId, options);
   const workflow = rebindWorkflowOwner(
-    resolveCommandCwd(options),
-    requireWorkflowId(positionals),
+    cwd,
+    workflowId,
     {
       ...workflowMutationOptions(options),
       currentOwnerSessionId: options["owner-session-id"],
@@ -4009,6 +4103,7 @@ async function handleWorkflowCancelLinkedJobs(argv) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const workflowId = requireWorkflowId(positionals);
+  rejectPublicPeerMutation(cwd, workflowId, options);
   const mutation = workflowMutationOptions(options);
   const current = readWorkflow(workspaceRoot, workflowId, { mode: options.mode });
   if (!current) {

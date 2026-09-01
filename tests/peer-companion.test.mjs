@@ -111,7 +111,7 @@ async function main() {
       session_id: sessionId,
       from_model: "claude-fable-5",
       to_model: "claude-opus-5",
-      reason: "capacity",
+      reason: process.env.FAKE_CLAUDE_FALLBACK_REASON || "capacity",
     }) + "\\n");
   }
   const payload = critique
@@ -345,6 +345,8 @@ describe("peer companion with fake Claude", () => {
     for (const content of [
       { findings: [{ nested: { checkpointLease } }] },
       { findings: [{ [checkpointLease]: "reflected object key" }] },
+      { findings: [{ note: `lease=${checkpointLease}` }] },
+      { findings: [{ [`checkpoint-${checkpointLease}-lease`]: "embedded object key" }] },
     ]) {
       const reflected = {
         content,
@@ -401,6 +403,10 @@ describe("peer companion with fake Claude", () => {
       ["workflow-fail-branch", [
         "--stage", "memo", "--branch", "codex", "--reason", "forged",
       ], undefined],
+      ["workflow-rebind", [
+        "--owner-session-id", "forged-owner",
+      ], undefined],
+      ["workflow-cancel-linked-jobs", [], undefined],
     ]) {
       const generic = run(testEnv, [
         command, created.workflow.id, "--cwd", testEnv.workspaceDir,
@@ -426,6 +432,8 @@ describe("peer companion with fake Claude", () => {
     ], { input: attemptInput(claudeLease), env: {
       FAKE_CLAUDE_MARKER: marker,
       FAKE_CLAUDE_DELTA_MARKER: deltaMarker,
+      FAKE_CLAUDE_FALLBACK: "1",
+      FAKE_CLAUDE_FALLBACK_REASON: "sensitive upstream diagnostic 7B91D0",
     } });
 
     await waitFor(() => readWorkflow(testEnv, created.workflow.id)
@@ -436,6 +444,7 @@ describe("peer companion with fake Claude", () => {
     assert.equal(committed.branches.claude.payload, null);
     assert.doesNotMatch(readManagedStateText(testEnv), new RegExp(marker));
     assert.doesNotMatch(readManagedStateText(testEnv), new RegExp(deltaMarker));
+    assert.doesNotMatch(readManagedStateText(testEnv), /sensitive upstream diagnostic 7B91D0/);
     assert.doesNotMatch(readManagedStateText(testEnv), /fresh-peer-session/);
 
     for (const command of ["peer-wait", "workflow-read"]) {
@@ -591,6 +600,57 @@ describe("peer companion with fake Claude", () => {
     const probes = fs.readFileSync(testEnv.mcpRequestLog, "utf8");
     assert.match(probes, /docs:initialize/);
     assert.doesNotMatch(probes, /unused:/);
+  });
+
+  it("probes only MCP servers represented by peer-create selection inputs", async () => {
+    const testEnv = createEnvironment();
+    const httpLog = path.join(testEnv.rootDir, "unused-http-requests.log");
+    const httpServer = path.join(testEnv.rootDir, "unused-http-server.mjs");
+    fs.writeFileSync(httpServer, `
+      import fs from "node:fs";
+      import http from "node:http";
+      const server = http.createServer((request, response) => {
+        fs.appendFileSync(process.env.HTTP_REQUEST_LOG, request.url + "\\n");
+        response.writeHead(500).end();
+      });
+      server.listen(0, "127.0.0.1", () => {
+        process.stdout.write(String(server.address().port) + "\\n");
+      });
+    `, "utf8");
+    const server = spawn(process.execPath, [httpServer], {
+      env: { ...process.env, HTTP_REQUEST_LOG: httpLog },
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    cleanup.push(() => server.kill());
+    const port = await new Promise((resolve, reject) => {
+      let output = "";
+      server.stdout.setEncoding("utf8");
+      server.stdout.on("data", (chunk) => {
+        output += chunk;
+        const line = output.split("\n").find(Boolean);
+        if (line) resolve(Number(line));
+      });
+      server.once("error", reject);
+    });
+    const claudeConfig = path.join(testEnv.env.HOME, ".claude.json");
+    const config = JSON.parse(fs.readFileSync(claudeConfig, "utf8"));
+    config.mcpServers.unusedHttp = { url: `http://127.0.0.1:${port}/mcp` };
+    fs.writeFileSync(claudeConfig, JSON.stringify(config), "utf8");
+    createPeer(testEnv);
+
+    const probes = fs.readFileSync(testEnv.mcpRequestLog, "utf8");
+    assert.match(probes, /docs:initialize/);
+    assert.doesNotMatch(probes, /unused:/);
+    assert.equal(fs.existsSync(httpLog), false);
+
+    fs.writeFileSync(testEnv.mcpRequestLog, "", "utf8");
+    runJson(testEnv, [
+      "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
+      "--owner-session-id", "owner-a", "--no-auto-tools", "--json",
+      "Compare", "without", "MCP.",
+    ]);
+    assert.equal(fs.readFileSync(testEnv.mcpRequestLog, "utf8"), "");
+    assert.equal(fs.existsSync(httpLog), false);
   });
 
   it("cancels before a live Claude termination callback can mutate the aggregate", async () => {

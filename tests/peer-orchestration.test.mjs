@@ -203,19 +203,20 @@ describe("peer evidence validation", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-evidence-"));
     try {
       const source = path.join(workspaceRoot, "source.mjs");
-      fs.writeFileSync(source, "export const value = 1;\n", "utf8");
+      fs.writeFileSync(source, "export const value = 1;\nexport default value;\n", "utf8");
       const workflow = { workspaceRoot: fs.realpathSync.native(workspaceRoot) };
       const base = {
         content: { finding: "validated" },
-        repoCitations: [{ path: source, line: 1 }],
+        repoCitations: [{ path: source, line: 2 }],
         webCitations: ["https://example.test/reference"],
       };
       assert.deepEqual(validatePeerMemo(workflow, base).repoCitations, [
-        { path: fs.realpathSync.native(source), line: 1 },
+        { path: "source.mjs", line: 2 },
       ]);
 
       for (const invalid of [
         { ...base, repoCitations: [{ path: source, line: 0 }] },
+        { ...base, repoCitations: [{ path: source, line: 3 }] },
         { ...base, repoCitations: [{ path: workspaceRoot, line: 1 }] },
         { ...base, webCitations: ["https://user:pass@example.test/reference"] },
         { ...base, webCitations: ["https://example.test/reference?api_key=secret"] },

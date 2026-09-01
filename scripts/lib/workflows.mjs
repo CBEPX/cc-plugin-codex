@@ -326,7 +326,7 @@ function mutateWorkflow(cwd, workflowId, options, reducer) {
       !TERMINAL_WORKFLOW_STATUSES.has(workflow.status) &&
       TERMINAL_WORKFLOW_STATUSES.has(next.status);
     return next;
-  });
+  }, options);
   if (enteredTerminal) {
     cleanupOldWorkflows(workspaceRoot);
   }
@@ -345,7 +345,16 @@ function targetState(workflow, stage, branchId) {
     if (!Object.hasOwn(workflow.branches ?? {}, safeBranchId) || !branch) {
       throw workflowError("WORKFLOW_BRANCH_NOT_FOUND", `Unknown workflow branch: ${safeBranchId}`);
     }
-    return { collection: "branches", key: safeBranchId, state: branch, stage: safeStage };
+    const storedStage = branch.stage == null
+      ? safeStage
+      : sanitizeId(branch.stage, "stored workflow branch stage");
+    if (storedStage !== safeStage) {
+      throw workflowError(
+        "WORKFLOW_STAGE_MISMATCH",
+        `Workflow branch ${safeBranchId} belongs to ${storedStage}, not ${safeStage}.`
+      );
+    }
+    return { collection: "branches", key: safeBranchId, state: branch, stage: storedStage };
   }
   const state = workflow.stages?.[safeStage];
   if (!Object.hasOwn(workflow.stages ?? {}, safeStage) || !state) {
@@ -426,11 +435,13 @@ function assertNoActiveAttemptLeaseReflection(workflow, payload) {
   while (values.length > 0) {
     const value = values.pop();
     if (typeof value === "string") {
-      if (activeDigests.has(leaseDigest(value))) {
-        throw workflowError(
-          "ATTEMPT_LEASE_REFLECTION",
-          "Peer payload contains an active attempt lease."
-        );
+      for (const match of value.matchAll(/(?=([a-f0-9]{64}))/gu)) {
+        if (activeDigests.has(leaseDigest(match[1]))) {
+          throw workflowError(
+            "ATTEMPT_LEASE_REFLECTION",
+            "Peer payload contains an active attempt lease."
+          );
+        }
       }
     } else if (value && typeof value === "object") {
       values.push(...Object.keys(value));
@@ -608,6 +619,7 @@ export function reserveWorkflowAttempts(cwd, workflowId, options, targets) {
       leases[attemptTargetKey(target)] = lease;
       next = updateTarget(next, targetState(next, target.stage, target.collection === "branches" ? target.key : null), {
         ...target.state,
+        ...(target.collection === "branches" ? { stage: target.stage } : {}),
         attemptReservation: {
           leaseDigest: leaseDigest(lease),
           epoch: current.epoch,
@@ -1095,20 +1107,28 @@ export function rebindWorkflowOwner(cwd, workflowId, options) {
 
 export function reserveWorkflowCancellation(cwd, workflowId, options) {
   const lease = newLease();
-  const workflow = mutateWorkflow(cwd, workflowId, options, (current, timestamp) => ({
-    ...current,
-    epoch: current.epoch + 1,
-    cancellation: {
-      leaseDigest: leaseDigest(lease),
-      reservedAt: timestamp,
-    },
-  }));
+  const workflow = mutateWorkflow(cwd, workflowId, options, (current, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(current.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${current.id} is ${current.status}.`);
+    }
+    return {
+      ...current,
+      epoch: current.epoch + 1,
+      cancellation: {
+        leaseDigest: leaseDigest(lease),
+        reservedAt: timestamp,
+      },
+    };
+  });
   return { workflow, lease };
 }
 
 export function completeWorkflowCancellation(cwd, workflowId, options) {
   const failedJobIds = normalizedNames(options.failedJobIds ?? [], "linked job ID");
   return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+    }
     if (
       !workflow.cancellation?.leaseDigest ||
       typeof options.lease !== "string" ||
@@ -1118,12 +1138,13 @@ export function completeWorkflowCancellation(cwd, workflowId, options) {
     }
     const invalidate = (items) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
       if (item.status === "completed") return [key, item];
-      const {
-        attemptReservation: _attemptReservation,
-        commitment: _commitment,
-        ...rest
-      } = item;
-      return [key, rest];
+      const cancellationFailed = failedJobIds.length > 0 || item.status === "cancel_failed";
+      return [key, invalidatedTargetState(
+        item,
+        cancellationFailed ? "cancel_failed" : "retryable_failed",
+        cancellationFailed ? "CANCEL_FAILED" : "CANCELLED",
+        timestamp
+      )];
     }));
     return {
       ...workflow,
@@ -1145,6 +1166,9 @@ export function completeWorkflowCancellation(cwd, workflowId, options) {
 export function completeWorkflowSessionEnd(cwd, workflowId, options) {
   const cancelFailedTargets = new Set(options.cancelFailedTargets ?? []);
   return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+    }
     if (
       !workflow.cancellation?.leaseDigest ||
       typeof options.lease !== "string" ||

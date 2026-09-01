@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 import { collectReviewContext, getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
 
@@ -285,6 +285,74 @@ describe("collectReviewContext", () => {
     assert.equal(fingerprint.signature.length > 0, true);
     assert.equal(typeof fingerprint.stagedDiffHash, "string");
     assert.equal(typeof fingerprint.unstagedDiffHash, "string");
+  });
+
+  it("fingerprints an index whose staged path list exceeds the default process buffer", () => {
+    const repo = createRepo();
+    for (let index = 0; index < 6_000; index += 1) {
+      fs.writeFileSync(
+        path.join(repo, `${String(index).padStart(5, "0")}-${"x".repeat(160)}.txt`),
+        "",
+        "utf8"
+      );
+    }
+    runGit(repo, ["add", "."]);
+    const staged = spawnSync("git", ["ls-files", "--stage", "-z"], {
+      cwd: repo,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    assert.equal(staged.status, 0, staged.stderr?.toString());
+    assert.ok(staged.stdout.length > 1024 * 1024);
+
+    const fingerprint = getWorkingTreeFingerprint(repo);
+    assert.equal(fingerprint.stagedDiffHash, runGit(repo, ["write-tree"]));
+  });
+
+  it("marks a working-tree FIFO without opening or blocking on it", async (context) => {
+    if (process.platform === "win32") {
+      context.skip("FIFOs are not available on Windows");
+      return;
+    }
+    const repo = createRepo();
+    const fifo = path.join(repo, "peer-events.fifo");
+    fs.writeFileSync(fifo, "regular before replacement\n", "utf8");
+    runGit(repo, ["add", "peer-events.fifo"]);
+    runGit(repo, ["commit", "-m", "track fifo path"]);
+    fs.unlinkSync(fifo);
+    const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+    const probe = `
+      import { getWorkingTreeFingerprint } from ${JSON.stringify(
+        new URL("../scripts/lib/git.mjs", import.meta.url).href
+      )};
+      const result = getWorkingTreeFingerprint(process.argv[1]);
+      process.stdout.write(JSON.stringify(result));
+    `;
+    const result = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", probe, repo], {
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      const timer = setTimeout(() => {
+        process.kill(-child.pid, "SIGKILL");
+      }, 1_000);
+      child.once("close", (status, signal) => {
+        clearTimeout(timer);
+        resolve({ status, signal, stdout, stderr });
+      });
+    });
+    assert.equal(result.status, 0, result.stderr || `terminated by ${result.signal}`);
+    const before = JSON.parse(result.stdout);
+    assert.equal(before.untrackedCount, 0);
+    fs.chmodSync(fifo, 0o600);
+    const after = getWorkingTreeFingerprint(repo);
+    assert.notEqual(after.unstagedDiffHash, before.unstagedDiffHash);
   });
 
   it("fingerprints HEAD and untracked file contents rather than metadata alone", () => {

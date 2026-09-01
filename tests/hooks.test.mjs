@@ -248,6 +248,50 @@ function readPeerWorkflow(testEnv, workflowId) {
   ), "utf8"));
 }
 
+function unfinishedPeerWorkflow(testEnv, id, sessionId, options = {}) {
+  const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+  const timestamp = options.timestamp ?? new Date().toISOString();
+  const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+  return {
+    version: 1,
+    id,
+    mode: "design",
+    status: options.status ?? "running",
+    phase: "memo",
+    revision: 1,
+    epoch: 0,
+    workspaceRoot,
+    fingerprint,
+    brief: `Lifecycle cleanup for ${id}.`,
+    briefHash: createHash("sha256").update(`Lifecycle cleanup for ${id}.`).digest("hex"),
+    originSessionId: sessionId,
+    currentOwnerSessionId: sessionId,
+    modelManifest: [],
+    toolManifest: [],
+    stages: {},
+    branches: {
+      codex: {
+        status: "running",
+        payload: null,
+        failureReason: null,
+        attempts: 1,
+        stage: "memo",
+        startFingerprint: fingerprint,
+        startedAt: timestamp,
+      },
+    },
+    branchAttempts: [],
+    claudeSessionId: null,
+    checkpoint: null,
+    feedback: null,
+    critique: null,
+    finalResult: options.status === "completed" ? { summary: "sealed" } : null,
+    failureReason: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
 function runHook(scriptPath, args, input, env, options = {}) {
   const result = spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: PROJECT_ROOT,
@@ -748,6 +792,174 @@ describe("hooks", () => {
         assert.equal(target.failureReason, "SESSION_ENDED");
         assert.equal(Object.hasOwn(target, "attemptReservation"), false);
       }
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("retains a cleanup marker when the workflow budget expires and SessionStart replays it", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, "workflow-deadline-replay", "old-session"
+      ));
+      const preload = path.join(testEnv.rootDir, "workflow-deadline.mjs");
+      fs.writeFileSync(preload, `
+        import { performance } from "node:perf_hooks";
+        Object.defineProperty(performance, "now", {
+          configurable: true,
+          value() {
+            return new Error().stack.includes("finalizeSessionWorkflows") ? 3_000 : 1_000;
+          },
+        });
+      `, "utf8");
+      const marker = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "session-cleanup-pending-old-session.json"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "old-session" },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preload).href}`]
+            .filter(Boolean).join(" "),
+        }
+      );
+
+      assert.equal(fs.existsSync(marker), true);
+      assert.equal(readPeerWorkflow(testEnv, "workflow-deadline-replay").branches.codex.status, "running");
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "new-session" },
+        testEnv.env
+      );
+      const recovered = readPeerWorkflow(testEnv, "workflow-deadline-replay");
+      assert.equal(recovered.branches.codex.status, "retryable_failed");
+      assert.equal(recovered.branches.codex.failureReason, "SESSION_ENDED");
+      assert.equal(fs.existsSync(marker), false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("continues workflow cleanup when one reserved record disappears", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const missingId = "workflow-a-missing";
+      const survivingId = "workflow-b-surviving";
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, missingId, "hook-session", { timestamp: "2026-04-04T02:00:00.000Z" }
+      ));
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, survivingId, "hook-session", { timestamp: "2026-04-04T01:00:00.000Z" }
+      ));
+      const preload = path.join(testEnv.rootDir, "remove-reserved-workflow.mjs");
+      fs.writeFileSync(preload, `
+        import fs from "node:fs";
+        const originalRenameSync = fs.renameSync.bind(fs);
+        let removed = false;
+        fs.renameSync = (source, destination) => {
+          originalRenameSync(source, destination);
+          if (!removed && String(destination).endsWith("/${missingId}.json")) {
+            try {
+              const stored = JSON.parse(fs.readFileSync(destination, "utf8"));
+              if (stored.cancellation?.leaseDigest) {
+                fs.unlinkSync(destination);
+                removed = true;
+              }
+            } catch {}
+          }
+        };
+      `, "utf8");
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preload).href}`]
+            .filter(Boolean).join(" "),
+        }
+      );
+
+      assert.equal(fs.existsSync(path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir), "workflows", `${missingId}.json`
+      )), false);
+      const surviving = readPeerWorkflow(testEnv, survivingId);
+      assert.equal(surviving.branches.codex.status, "retryable_failed");
+      assert.equal(surviving.branches.codex.failureReason, "SESSION_ENDED");
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("retains recovery for a locked workflow while finalizing later workflows", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const lockedId = "workflow-a-locked";
+      const laterId = "workflow-b-after-lock";
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, lockedId, "hook-session", { timestamp: "2026-04-04T02:00:00.000Z" }
+      ));
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, laterId, "hook-session", { timestamp: "2026-04-04T01:00:00.000Z" }
+      ));
+      const lockedFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "workflows", `${lockedId}.json`
+      );
+      fs.writeFileSync(`${lockedFile}.lock`, JSON.stringify({
+        pid: process.pid,
+        timestamp: Date.now(),
+        token: "held-workflow-cleanup",
+      }), "utf8");
+      const marker = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "session-cleanup-pending-hook-session.json"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      assert.equal(readPeerWorkflow(testEnv, lockedId).branches.codex.status, "running");
+      assert.equal(readPeerWorkflow(testEnv, laterId).branches.codex.status, "retryable_failed");
+      assert.equal(fs.existsSync(marker), true);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("does not reserve or mutate terminal workflows during SessionEnd", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const terminal = unfinishedPeerWorkflow(
+        testEnv, "workflow-terminal-session-end", "hook-session", { status: "completed" }
+      );
+      writePeerWorkflow(testEnv, terminal);
+      const workflowFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "workflows", `${terminal.id}.json`
+      );
+      const before = fs.readFileSync(workflowFile);
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      assert.deepEqual(fs.readFileSync(workflowFile), before);
     } finally {
       cleanupHookEnvironment(testEnv);
     }

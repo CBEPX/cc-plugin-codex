@@ -341,6 +341,26 @@ function insideWorkspace(workspaceRoot, filePath) {
     : null;
 }
 
+function repositoryCitation(workspaceRoot, filePath, line) {
+  const canonical = insideWorkspace(workspaceRoot, filePath);
+  if (!canonical || !Number.isInteger(line) || line < 1) return null;
+  let source;
+  try {
+    source = fs.readFileSync(canonical);
+  } catch {
+    return null;
+  }
+  const lineCount = source.length === 0
+    ? 0
+    : source.reduce((count, byte) => count + (byte === 0x0a ? 1 : 0), 0) +
+      (source.at(-1) === 0x0a ? 0 : 1);
+  if (line > lineCount) return null;
+  return {
+    path: path.relative(workspaceRoot, canonical).split(path.sep).join("/"),
+    line,
+  };
+}
+
 function directHttps(value) {
   try {
     const url = new URL(value);
@@ -367,13 +387,12 @@ export function validatePeerMemo(workflow, memo, options = {}) {
   const repoCitations = (Array.isArray(memo.repoCitations) ? memo.repoCitations : [])
     .flatMap((citation) => {
       if (!isPlainObject(citation)) return [];
-      const canonical = insideWorkspace(
+      const validated = repositoryCitation(
         workflow.workspaceRoot,
-        String(citation.path ?? citation.file ?? "")
+        String(citation.path ?? citation.file ?? ""),
+        Number(citation.line)
       );
-      if (!canonical) return [];
-      const line = Number(citation.line);
-      return Number.isInteger(line) && line > 0 ? [{ path: canonical, line }] : [];
+      return validated ? [validated] : [];
     });
   if (repoCitations.length === 0) {
     throw peerError(

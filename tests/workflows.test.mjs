@@ -255,6 +255,89 @@ describe("peer workflow store", () => {
     assert.equal(cancelled.status, "cancelled");
   });
 
+  it("terminalizes every unfinished target when cancellation completes", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-cancellation-targets" });
+    const started = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: created.revision, epoch: created.epoch,
+    });
+    const cancellation = reserveWorkflowCancellation(repo, created.id, {
+      revision: started.revision,
+      epoch: started.epoch,
+    });
+    const cancelled = completeWorkflowCancellation(repo, created.id, {
+      revision: cancellation.workflow.revision,
+      epoch: cancellation.workflow.epoch,
+      lease: cancellation.lease,
+      failedJobIds: [],
+    });
+
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(cancelled.branches.alpha.status, "retryable_failed");
+    assert.equal(cancelled.branches.alpha.failureReason, "CANCELLED");
+    assert.equal(Object.hasOwn(cancelled.branches.alpha, "attemptReservation"), false);
+    assert.equal(Object.hasOwn(cancelled.branches.alpha, "commitment"), false);
+  });
+
+  it("classifies unfinished targets cancel_failed when linked cancellation fails", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-cancellation-failed-targets" });
+    const started = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: created.revision, epoch: created.epoch,
+    });
+    const cancellation = reserveWorkflowCancellation(repo, created.id, {
+      revision: started.revision,
+      epoch: started.epoch,
+    });
+    const cancelled = completeWorkflowCancellation(repo, created.id, {
+      revision: cancellation.workflow.revision,
+      epoch: cancellation.workflow.epoch,
+      lease: cancellation.lease,
+      failedJobIds: ["workflow-child-a"],
+    });
+
+    assert.equal(cancelled.status, "cancel_failed");
+    assert.equal(cancelled.branches.alpha.status, "cancel_failed");
+    assert.equal(cancelled.branches.alpha.failureReason, "CANCEL_FAILED");
+    assert.deepEqual(cancelled.cancelFailedJobIds, ["workflow-child-a"]);
+  });
+
+  it("preserves completed target payloads and refuses to reserve terminal workflows", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-terminal-cancel" });
+    const started = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: created.revision, epoch: created.epoch,
+    });
+    const payload = { summary: "sealed evidence" };
+    const completed = submitWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: started.revision, epoch: started.epoch,
+      lease: started.attemptLease, payload,
+    });
+    const cancellation = reserveWorkflowCancellation(repo, created.id, {
+      revision: completed.revision,
+      epoch: completed.epoch,
+    });
+    const cancelled = completeWorkflowCancellation(repo, created.id, {
+      revision: cancellation.workflow.revision,
+      epoch: cancellation.workflow.epoch,
+      lease: cancellation.lease,
+      failedJobIds: [],
+    });
+    assert.equal(cancelled.branches.alpha.status, "completed");
+    assert.deepEqual(cancelled.branches.alpha.payload, payload);
+    const storedBefore = fs.readFileSync(resolveWorkflowFile(repo, created.id));
+
+    assert.equal(errorCode(() => reserveWorkflowCancellation(repo, created.id, {
+      revision: cancelled.revision,
+      epoch: cancelled.epoch,
+    })), "WORKFLOW_TERMINAL");
+    assert.deepEqual(fs.readFileSync(resolveWorkflowFile(repo, created.id)), storedBefore);
+  });
+
   it("allocates a persistent notification key for every incomplete generation", () => {
     const repo = createRepo();
     const created = createWorkflow(repo, { id: "workflow-incomplete-generation" });
@@ -398,6 +481,25 @@ describe("peer workflow store", () => {
     const stored = readWorkflow(repo, reservation.workflow.id);
     assert.equal(stored.revision, 2);
     assert.equal(stored.stages.memo.status, "running");
+  });
+
+  it("rejects branch activation through a stage other than the reserved stage", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-branch-stage-fence" });
+    const reservation = reserveWorkflowAttempts(repo, created.id, {
+      revision: created.revision,
+      epoch: created.epoch,
+    }, [{ stage: "memo", branchId: "alpha" }]);
+    const before = fs.readFileSync(resolveWorkflowFile(repo, created.id));
+
+    assert.equal(errorCode(() => activateWorkflowAttempt(repo, created.id, {
+      stage: "critique",
+      branchId: "alpha",
+      revision: reservation.workflow.revision,
+      epoch: reservation.workflow.epoch,
+      lease: reservation.leases["branch:alpha"],
+    })), "WORKFLOW_STAGE_MISMATCH");
+    assert.deepEqual(fs.readFileSync(resolveWorkflowFile(repo, created.id)), before);
   });
 
   it("rejects duplicate continuation and keeps a completed memo immutable", () => {
@@ -817,7 +919,7 @@ describe("peer workflow store", () => {
     assert.equal(fs.existsSync(resolveWorkflowFile(repo, "existing-terminal-000")), false);
   });
 
-  it("records cancellation and preserves append-only branch attempt history", () => {
+  it("preserves append-only branch history and refuses to recancel cancel_failed", () => {
     const repo = createRepo();
     let workflow = createWorkflow(repo);
     workflow = casStartWorkflowStage(repo, workflow.id, {
@@ -833,18 +935,11 @@ describe("peer workflow store", () => {
     assert.deepEqual(workflow.branchAttempts[0], startedAttempt);
     assert.equal(workflow.branchAttempts[1].status, "cancel_failed");
 
-    const reservation = reserveWorkflowCancellation(repo, workflow.id, {
+    const before = fs.readFileSync(resolveWorkflowFile(repo, workflow.id));
+    assert.equal(errorCode(() => reserveWorkflowCancellation(repo, workflow.id, {
       revision: workflow.revision, epoch: workflow.epoch,
-    });
-    const cancelled = completeWorkflowCancellation(repo, workflow.id, {
-      revision: reservation.workflow.revision,
-      epoch: reservation.workflow.epoch,
-      lease: reservation.lease,
-      failedJobIds: ["workflow-child-a"],
-    });
-    assert.equal(cancelled.status, "cancel_failed");
-    assert.equal(cancelled.failureReason, "CANCEL_FAILED");
-    assert.deepEqual(cancelled.cancelFailedJobIds, ["workflow-child-a"]);
+    })), "WORKFLOW_TERMINAL");
+    assert.deepEqual(fs.readFileSync(resolveWorkflowFile(repo, workflow.id)), before);
   });
 
   it("refuses to read a workflow record through a symlink outside managed state", () => {

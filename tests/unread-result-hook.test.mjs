@@ -11,6 +11,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { getProcessIdentity } from "../scripts/lib/process.mjs";
+
 const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../", import.meta.url))
 );
@@ -134,7 +136,7 @@ function readWorkflow(testEnv, workflowId) {
   );
 }
 
-function runHook(testEnv, payload, extraEnv = {}) {
+function runHook(testEnv, payload, extraEnv = {}, options = {}) {
   const result = spawnSync(process.execPath, [HOOK_SCRIPT], {
     cwd: PROJECT_ROOT,
     env: {
@@ -146,6 +148,7 @@ function runHook(testEnv, payload, extraEnv = {}) {
     },
     input: JSON.stringify(payload),
     encoding: "utf8",
+    timeout: options.timeout,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result.stdout.trim();
@@ -307,6 +310,68 @@ test("announces workflow milestones once and never announces their linked jobs",
     assert.match(completedOutput, /workflow-notify.*completed/);
     assert.deepEqual(readWorkflow(testEnv, workflow.id).notifiedEvents, ["checkpoint", "completed"]);
   } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("bounds workflow notification claims by the prompt hook deadline", async (context) => {
+  if (process.platform !== "darwin") {
+    context.skip("Darwin ps timeout behavior");
+    return;
+  }
+  const testEnv = createEnv();
+  const lockOwner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  await new Promise((resolve, reject) => {
+    lockOwner.once("spawn", resolve);
+    lockOwner.once("error", reject);
+  });
+  try {
+    const workflow = writeWorkflow(testEnv, { id: "workflow-bounded-notify" });
+    const workflowFile = path.join(
+      stateDirFor(testEnv), "workflows", `${workflow.id}.json`
+    );
+    const lockFile = `${workflowFile}.lock`;
+    fs.writeFileSync(lockFile, JSON.stringify({
+      pid: lockOwner.pid,
+      identity: getProcessIdentity(lockOwner.pid),
+      timestamp: Date.now() - 31_000,
+      token: "held-workflow-notification",
+    }), "utf8");
+    const stale = new Date(Date.now() - 31_000);
+    fs.utimesSync(lockFile, stale, stale);
+    const slowBin = path.join(testEnv.rootDir, "slow-workflow-lock-ps");
+    fs.mkdirSync(slowBin);
+    const fakePs = path.join(slowBin, "ps");
+    fs.writeFileSync(fakePs, `#!/usr/bin/env node
+      const { spawnSync } = require("node:child_process");
+      const args = process.argv.slice(2);
+      if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
+        setInterval(() => {}, 1000);
+      } else {
+        const result = spawnSync("/bin/ps", args, { stdio: "inherit" });
+        process.exit(result.status ?? 1);
+      }
+    `, "utf8");
+    fs.chmodSync(fakePs, 0o755);
+
+    const startedAt = performance.now();
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue working",
+    }, {
+      PATH: `${slowBin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CC_TEST_LOCK_OWNER_PID: String(lockOwner.pid),
+    }, { timeout: 2_500 });
+
+    assert.ok(performance.now() - startedAt < 2_200);
+    assert.equal(output, "");
+    assert.equal(readWorkflow(testEnv, workflow.id).notifiedEvents, undefined);
+  } finally {
+    lockOwner.kill();
     cleanupEnv(testEnv);
   }
 });

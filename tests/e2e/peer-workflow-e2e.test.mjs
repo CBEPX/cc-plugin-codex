@@ -520,7 +520,7 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     const cancellableResult = await cancellableClaude;
     assert.equal(cancellableResult.status, 1, cancellableResult.stderr || cancellableResult.stdout);
     assert.equal(cancellableResult.stdout, "");
-    assert.equal(cancellableResult.stderr, "STALE_EPOCH: Expected epoch 0, found 1.\n");
+    assert.equal(cancellableResult.stderr, "STALE_EPOCH\n");
     assert.deepEqual(fs.readFileSync(cancelledWorkflowPath), cancelledWorkflowBytes);
     const cancelledStored = readWorkflow(testEnv, cancellable.workflow.id);
     assert.equal(cancelledStored.status, "cancelled");

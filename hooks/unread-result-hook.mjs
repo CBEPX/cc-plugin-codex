@@ -7,6 +7,7 @@
 
 import process from "node:process";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
@@ -34,6 +35,7 @@ import {
 const MAX_LISTED_JOBS = 3;
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const PROMPT_NOTIFICATION_BUDGET_MS = 1_500;
 
 function isExplicitClaudeStatusRequest(prompt) {
   const text = String(prompt ?? "").toLowerCase();
@@ -128,7 +130,7 @@ function markJobsNotified(workspaceRoot, jobs) {
   }
 }
 
-function markWorkflowsNotified(workspaceRoot, workflows) {
+function markWorkflowsNotified(workspaceRoot, workflows, deadlineAt) {
   const claimed = [];
   for (const { workflow, event } of workflows) {
     let current = workflow;
@@ -139,6 +141,8 @@ function markWorkflowsNotified(workspaceRoot, workflows) {
           revision: current.revision,
           epoch: current.epoch,
           mode: current.mode,
+          deadlineAt,
+          skipLockOwnerIdentity: process.platform === "win32",
         });
         claimed.push({ workflow: updated, event });
         break;
@@ -199,6 +203,7 @@ async function main() {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
   const prompt = String(input.prompt ?? "");
+  const notificationDeadlineAt = performance.now() + PROMPT_NOTIFICATION_BUDGET_MS;
 
   if (
     process.env[SKIP_INTERACTIVE_HOOKS_ENV] === "1" ||
@@ -233,7 +238,11 @@ async function main() {
   }
 
   markJobsNotified(workspaceRoot, jobs);
-  const claimedWorkflows = markWorkflowsNotified(workspaceRoot, workflows);
+  const claimedWorkflows = markWorkflowsNotified(
+    workspaceRoot,
+    workflows,
+    notificationDeadlineAt
+  );
   const sections = [
     ...(claimedWorkflows.length > 0 ? [buildWorkflowContext(claimedWorkflows)] : []),
     ...(jobs.length > 0 ? [buildAdditionalContext(jobs)] : []),
