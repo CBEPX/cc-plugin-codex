@@ -161,7 +161,7 @@ describe("sandbox settings lifecycle", () => {
       const claudeProjects = path.join(homeDir, ".claude", "projects");
       fs.mkdirSync(codexHome, { recursive: true });
       fs.mkdirSync(claudeProjects, { recursive: true });
-      const f = createSandboxSettings("peer-read-only", { workspaceRoot });
+      const f = createSandboxSettings("peer-read-only", { workspaceRoot, platform: "darwin" });
       assert.ok(f);
       const content = JSON.parse(fs.readFileSync(f, "utf8"));
       const canonicalWorkspace = fs.realpathSync.native(workspaceRoot);
