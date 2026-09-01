@@ -51,6 +51,7 @@ import {
   resolveDefaultEffort,
   SANDBOX_READ_ONLY_TOOLS,
   SANDBOX_REVIEW_TOOLS,
+  buildPeerSandboxSettings,
   createSandboxSettings,
   cleanupSandboxSettings,
   createReviewMcpConfig,
@@ -1693,13 +1694,33 @@ function releaseReservedJobId(workspaceRoot, jobId) {
 
 function createTrackedProgress(job, options = {}) {
   const logFile = createJobLogFile(job.workspaceRoot, job.id, job.title);
+  const reporter = createProgressReporter({
+    stderr: Boolean(options.stderr),
+    logFile,
+    onEvent: createJobProgressUpdater(job.workspaceRoot, job.id)
+  });
   return {
     logFile,
-    progress: createProgressReporter({
-      stderr: Boolean(options.stderr),
-      logFile,
-      onEvent: createJobProgressUpdater(job.workspaceRoot, job.id)
-    })
+    progress: options.peerProgress
+      ? (event) => reporter(sanitizePeerProgress(event))
+      : reporter
+  };
+}
+
+function sanitizePeerProgress(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return {};
+  const phase = typeof event.phase === "string" && /^[a-z0-9_-]{1,64}$/iu.test(event.phase)
+    ? event.phase
+    : null;
+  const tool = typeof event.tool === "string" && /^[a-z0-9_.:-]{1,128}$/iu.test(event.tool)
+    ? event.tool
+    : null;
+  const message = tool ? `Using tool: ${tool}` : phase ? `Phase: ${phase}` : "";
+  return {
+    phase,
+    message,
+    stderrMessage: message,
+    modelFallback: event.modelFallback ?? null,
   };
 }
 
@@ -2046,7 +2067,8 @@ function installForegroundReviewSignalHandlers(job, onSignal) {
 async function runForegroundCommand(job, runner, options = {}) {
   const { logFile, progress } = createTrackedProgress(job, {
     logFile: options.logFile,
-    stderr: !options.json && !options.quietProgress
+    stderr: !options.json && !options.quietProgress,
+    peerProgress: Boolean(options.peerProgress),
   });
   let signalExitCode = null;
   const removeSignalHandlers = installForegroundReviewSignalHandlers(
@@ -3326,6 +3348,7 @@ function critiqueClaudePrompt(workflow) {
 
 async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
   let workflow = readPeerWorkflow(cwd, workflowId, options.mode, options.briefHash);
+  buildPeerSandboxSettings(workflow.workspaceRoot);
   const critique = Boolean(options.critique);
   const stage = critique ? "critique" : "memo";
   const branchId = critique ? null : "claude";
@@ -3339,7 +3362,9 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       allowProjectMcpServers: workflow.toolManifest.some(({ source }) => source === "project"),
     });
     const { selection, servers } = await validatePeerSelection(discovery, workflow);
-    sandboxSettingsFile = createSandboxSettings("read-only");
+    sandboxSettingsFile = createSandboxSettings("peer-read-only", {
+      workspaceRoot: workflow.workspaceRoot,
+    });
     mcpConfigFile = createStrictMcpConfig(servers);
     const result = await runClaudeTurn(
       workflow.workspaceRoot,
@@ -3348,8 +3373,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         model: peerModelValue(workflow, "claude") ?? "fable",
         fallbackModel: peerModelValue(workflow, "claude-fallback") ?? "opus",
         effort: peerModelValue(workflow, "claude-effort") ?? undefined,
-        resumeSessionId: critique ? workflow.claudeSessionId : undefined,
-        forkSession: critique,
+        noSessionPersistence: true,
         allowedTools: [
           ...PEER_CLAUDE_ALLOWED_BASE_TOOLS,
           ...selection.selected.map(({ toolId }) => toolId),
@@ -3364,6 +3388,17 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       }
     );
     if (result.status !== "completed") {
+      const failureText = [result.failure?.message, result.warning, result.stderr]
+        .filter(Boolean)
+        .join("\n");
+      if (
+        /sandbox/iu.test(failureText) &&
+        /unavailable|not available|not supported|unsupported|failed|failure|could not|cannot|unable/iu.test(failureText)
+      ) {
+        throw new Error(
+          "PEER_ISOLATION_UNAVAILABLE: Claude could not provide the required filesystem sandbox."
+        );
+      }
       throw new Error(result.failure?.kind ?? result.warning ?? "CLAUDE_TURN_FAILED");
     }
     const parsed = parsePeerClaudePayload(result, critique ? "Claude critique" : "Claude memo");
@@ -3387,7 +3422,6 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
           content: JSON.parse(JSON.stringify(parsed.content)),
           toolEvents: result.toolUses.map(({ tool }) => ({ tool })),
           model,
-          sessionId: result.sessionId,
         }
       : validatePeerMemo(workflow, parsed, {
           role: "claude",
@@ -3409,7 +3443,6 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         stage,
         branchId,
         payload,
-        claudeSessionId: result.sessionId,
         ...fence,
       });
       await waitForCodexMemo(cwd, workflowId, fence.epoch);
@@ -3417,7 +3450,6 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         stage,
         branchId,
         payload,
-        claudeSessionId: result.sessionId,
         ...fence,
       });
     }
@@ -3448,6 +3480,7 @@ async function handlePeerCreate(argv) {
   });
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  buildPeerSandboxSettings(workspaceRoot);
   const briefPositionals = options["brief-file"]
     ? [fs.readFileSync(path.resolve(options["brief-file"]), "utf8").trim()]
     : positionals;
@@ -3573,7 +3606,7 @@ async function handlePeerClaudeTurn(argv, critique = false) {
       });
       return {
         exitStatus: 0,
-        threadId: result.workflow.claudeSessionId,
+        threadId: null,
         turnId: null,
         payload: result,
         rendered: `${JSON.stringify(result, null, 2)}\n`,
@@ -3586,6 +3619,7 @@ async function handlePeerClaudeTurn(argv, critique = false) {
     {
       json: options.json,
       quietProgress: Boolean(options.json),
+      peerProgress: true,
       markViewedOnTerminal: true,
     }
   );
