@@ -23,7 +23,7 @@ import {
   createReviewMcpConfig,
   cleanupReviewMcpConfig,
 } from "../scripts/lib/claude-cli.mjs";
-import { resolvePluginRuntimeRoot } from "../scripts/lib/codex-paths.mjs";
+import { normalizePathSlashes, resolvePluginRuntimeRoot } from "../scripts/lib/codex-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -164,9 +164,9 @@ describe("sandbox settings lifecycle", () => {
       const f = createSandboxSettings("peer-read-only", { workspaceRoot, platform: "darwin" });
       assert.ok(f);
       const content = JSON.parse(fs.readFileSync(f, "utf8"));
-      const canonicalWorkspace = fs.realpathSync.native(workspaceRoot);
-      const canonicalCodexHome = fs.realpathSync.native(codexHome);
-      const canonicalClaudeProjects = fs.realpathSync.native(claudeProjects);
+      const canonicalWorkspace = normalizePathSlashes(fs.realpathSync.native(workspaceRoot));
+      const canonicalCodexHome = normalizePathSlashes(fs.realpathSync.native(codexHome));
+      const canonicalClaudeProjects = normalizePathSlashes(fs.realpathSync.native(claudeProjects));
       assert.equal(content.sandbox.enabled, true);
       assert.equal(content.sandbox.failIfUnavailable, true);
       assert.equal(content.sandbox.allowUnsandboxedCommands, false);
