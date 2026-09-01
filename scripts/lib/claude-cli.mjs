@@ -13,7 +13,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
+import {
+  normalizePathSlashes,
+  resolveCodexHome,
+  resolvePluginRuntimeRoot,
+} from "./codex-paths.mjs";
 import {
   getProcessIdentity,
   getSpawnedProcessIdentity,
@@ -1032,12 +1036,94 @@ export const SANDBOX_SETTINGS = {
   },
 };
 
+function peerIsolationUnavailable(message) {
+  return Object.assign(new Error(`PEER_ISOLATION_UNAVAILABLE: ${message}`), {
+    code: "PEER_ISOLATION_UNAVAILABLE",
+  });
+}
+
+function canonicalPathWithMissingTail(value) {
+  let current = path.resolve(value);
+  const tail = [];
+  while (true) {
+    try {
+      return path.join(fs.realpathSync.native(current), ...tail);
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+      const parent = path.dirname(current);
+      if (parent === current) throw error;
+      tail.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function pathContains(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === "" || (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/** @visibleForTesting */
+export function buildPeerSandboxSettings(workspaceRoot, options = {}) {
+  if ((options.platform ?? process.platform) === "win32") {
+    throw peerIsolationUnavailable("Native Windows cannot provide the required filesystem sandbox.");
+  }
+  if (!workspaceRoot) {
+    throw peerIsolationUnavailable("A canonical workspace is required.");
+  }
+
+  try {
+    const env = options.env ?? process.env;
+    const homeDir = options.homeDir ?? os.homedir();
+    const workspace = canonicalPathWithMissingTail(workspaceRoot);
+    const codexHome = canonicalPathWithMissingTail(
+      env.CODEX_HOME || resolveCodexHome()
+    );
+    const claudeProjects = canonicalPathWithMissingTail(
+      path.join(homeDir, ".claude", "projects")
+    );
+    for (const protectedPath of [codexHome, claudeProjects]) {
+      if (pathContains(workspace, protectedPath) || pathContains(protectedPath, workspace)) {
+        throw peerIsolationUnavailable("The workspace overlaps protected agent state.");
+      }
+    }
+
+    const allowedWorkspace = normalizePathSlashes(workspace);
+    const protectedReads = [codexHome, claudeProjects].map(normalizePathSlashes);
+    return {
+      permissions: {
+        deny: protectedReads.map((protectedPath) => `Read(${protectedPath}/**)`),
+      },
+      sandbox: {
+        enabled: true,
+        failIfUnavailable: true,
+        autoAllowBashIfSandboxed: false,
+        allowUnsandboxedCommands: false,
+        filesystem: {
+          allowRead: [allowedWorkspace],
+          denyRead: protectedReads,
+          allowWrite: [SANDBOX_TEMP_DIR],
+        },
+      },
+    };
+  } catch (error) {
+    if (error?.code === "PEER_ISOLATION_UNAVAILABLE") throw error;
+    throw peerIsolationUnavailable("Canonical isolation paths could not be resolved.");
+  }
+}
+
 /**
  * Write sandbox settings to a temp file. Returns the file path.
  * Caller is responsible for cleanup via cleanupSandboxSettings().
  */
-export function createSandboxSettings(mode) {
-  const settings = SANDBOX_SETTINGS[mode];
+export function createSandboxSettings(mode, options = {}) {
+  const settings = mode === "peer-read-only"
+    ? buildPeerSandboxSettings(options.workspaceRoot, options)
+    : SANDBOX_SETTINGS[mode];
   if (!settings) return null;
 
   const sandboxDir = path.join(resolvePluginRuntimeRoot(), "sandbox");
@@ -1107,6 +1193,20 @@ export function createReviewMcpConfig(gitRoot, options = {}) {
     `cc-mcp-${process.pid}-${Date.now().toString(36)}-${randomBytes(6).toString("hex")}.json`
   );
   fs.writeFileSync(tmpFile, JSON.stringify(config), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return tmpFile;
+}
+
+export function createStrictMcpConfig(mcpServers = {}) {
+  const dir = path.join(resolvePluginRuntimeRoot(), "mcp");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmpFile = path.join(
+    dir,
+    `cc-mcp-${process.pid}-${Date.now().toString(36)}-${randomBytes(6).toString("hex")}.json`
+  );
+  fs.writeFileSync(tmpFile, JSON.stringify({ mcpServers }), {
     encoding: "utf8",
     mode: 0o600,
   });
@@ -1266,6 +1366,10 @@ export function buildArgs(prompt, options = {}) {
   if (model) {
     args.push("--model", model);
   }
+  const fallbackModel = resolveModel(options.fallbackModel);
+  if (fallbackModel) {
+    args.push("--fallback-model", fallbackModel);
+  }
   const effort = resolveEffort(options.effort);
   if (effort) {
     args.push("--effort", effort);
@@ -1275,6 +1379,9 @@ export function buildArgs(prompt, options = {}) {
   }
   if (options.resumeSessionId) {
     args.push("--resume", options.resumeSessionId);
+  }
+  if (options.forkSession) {
+    args.push("--fork-session");
   }
   if (options.allowedTools) {
     for (const tool of options.allowedTools) {

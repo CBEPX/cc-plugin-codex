@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 import { collectReviewContext, getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
 
@@ -285,5 +285,176 @@ describe("collectReviewContext", () => {
     assert.equal(fingerprint.signature.length > 0, true);
     assert.equal(typeof fingerprint.stagedDiffHash, "string");
     assert.equal(typeof fingerprint.unstagedDiffHash, "string");
+  });
+
+  it("fingerprints an index whose staged path list exceeds the default process buffer", () => {
+    const repo = createRepo();
+    for (let index = 0; index < 6_000; index += 1) {
+      fs.writeFileSync(
+        path.join(repo, `${String(index).padStart(5, "0")}-${"x".repeat(160)}.txt`),
+        "",
+        "utf8"
+      );
+    }
+    runGit(repo, ["add", "."]);
+    const staged = spawnSync("git", ["ls-files", "--stage", "-z"], {
+      cwd: repo,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    assert.equal(staged.status, 0, staged.stderr?.toString());
+    assert.ok(staged.stdout.length > 1024 * 1024);
+
+    const fingerprint = getWorkingTreeFingerprint(repo);
+    assert.equal(fingerprint.stagedDiffHash, runGit(repo, ["write-tree"]));
+  });
+
+  it("marks a working-tree FIFO without opening or blocking on it", async (context) => {
+    if (process.platform === "win32") {
+      context.skip("FIFOs are not available on Windows");
+      return;
+    }
+    const repo = createRepo();
+    const fifo = path.join(repo, "peer-events.fifo");
+    fs.writeFileSync(fifo, "regular before replacement\n", "utf8");
+    runGit(repo, ["add", "peer-events.fifo"]);
+    runGit(repo, ["commit", "-m", "track fifo path"]);
+    fs.unlinkSync(fifo);
+    const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+    const probe = `
+      import { getWorkingTreeFingerprint } from ${JSON.stringify(
+        new URL("../scripts/lib/git.mjs", import.meta.url).href
+      )};
+      const result = getWorkingTreeFingerprint(process.argv[1]);
+      process.stdout.write(JSON.stringify(result));
+    `;
+    const result = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", probe, repo], {
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      const timer = setTimeout(() => {
+        process.kill(-child.pid, "SIGKILL");
+      }, 1_000);
+      child.once("close", (status, signal) => {
+        clearTimeout(timer);
+        resolve({ status, signal, stdout, stderr });
+      });
+    });
+    assert.equal(result.status, 0, result.stderr || `terminated by ${result.signal}`);
+    const before = JSON.parse(result.stdout);
+    assert.equal(before.untrackedCount, 0);
+    fs.chmodSync(fifo, 0o600);
+    const after = getWorkingTreeFingerprint(repo);
+    assert.notEqual(after.unstagedDiffHash, before.unstagedDiffHash);
+  });
+
+  it("fingerprints HEAD and untracked file contents rather than metadata alone", () => {
+    const repo = createRepo();
+    const untrackedPath = path.join(repo, "notes.txt");
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    fs.writeFileSync(untrackedPath, "alpha\n", "utf8");
+
+    const before = getWorkingTreeFingerprint(repo);
+    const originalTimes = fs.statSync(untrackedPath);
+    fs.writeFileSync(untrackedPath, "bravo\n", "utf8");
+    fs.utimesSync(untrackedPath, originalTimes.atime, originalTimes.mtime);
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.equal(before.head, runGit(repo, ["rev-parse", "HEAD"]));
+    assert.notEqual(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+    assert.notEqual(after.signature, before.signature);
+  });
+
+  it("changes the staged fingerprint when staged file content changes", () => {
+    const repo = createRepo();
+    const trackedPath = path.join(repo, "tracked.txt");
+
+    fs.writeFileSync(trackedPath, "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    fs.writeFileSync(trackedPath, "staged one\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    const before = getWorkingTreeFingerprint(repo);
+
+    fs.writeFileSync(trackedPath, "staged two\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.equal(after.head, before.head);
+    assert.notEqual(after.stagedDiffHash, before.stagedDiffHash);
+    assert.notEqual(after.signature, before.signature);
+  });
+
+  it("fingerprints untracked contents when a Git path contains a newline", () => {
+    const repo = createRepo();
+    const unusualPath = path.join(repo, "line\nbreak.txt");
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    fs.writeFileSync(unusualPath, "first\n", "utf8");
+    const before = getWorkingTreeFingerprint(repo);
+
+    fs.writeFileSync(unusualPath, "second\n", "utf8");
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.equal(before.untrackedCount, 1);
+    assert.notEqual(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+  });
+
+  it("keeps HEAD as metadata without invalidating an identical index and worktree", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    const before = getWorkingTreeFingerprint(repo);
+
+    runGit(repo, ["commit", "--allow-empty", "-m", "metadata only"]);
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.notEqual(after.head, before.head);
+    assert.equal(after.stagedDiffHash, before.stagedDiffHash);
+    assert.equal(after.unstagedDiffHash, before.unstagedDiffHash);
+    assert.equal(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+    assert.equal(after.signature, before.signature);
+  });
+
+  it("uses a stable unborn HEAD sentinel before the first commit", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "draft.txt"), "draft\n", "utf8");
+
+    const first = getWorkingTreeFingerprint(repo);
+    const second = getWorkingTreeFingerprint(repo);
+
+    assert.equal(first.head, "unborn");
+    assert.equal(second.head, "unborn");
+    assert.equal(second.signature, first.signature);
+  });
+
+  it("content-hashes a large untracked file independently of metadata", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    const large = path.join(repo, "large.bin");
+    fs.writeFileSync(large, Buffer.alloc(5 * 1024 * 1024, 0x61));
+    const before = getWorkingTreeFingerprint(repo);
+    const times = fs.statSync(large);
+    fs.writeFileSync(large, Buffer.alloc(5 * 1024 * 1024, 0x62));
+    fs.utimesSync(large, times.atime, times.mtime);
+
+    const after = getWorkingTreeFingerprint(repo);
+    assert.notEqual(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+    assert.notEqual(after.signature, before.signature);
   });
 });

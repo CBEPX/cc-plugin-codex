@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SANDBOX_STOP_REVIEW_TOOLS } from "../scripts/lib/claude-cli.mjs";
+import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
 import { getProcessIdentity } from "../scripts/lib/process.mjs";
 import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
@@ -224,6 +225,71 @@ function stateDirFor(homeDir, workspaceDir) {
     "state",
     workspaceHash
   );
+}
+
+function writePeerWorkflow(testEnv, workflow) {
+  const workflowsDir = path.join(
+    stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+    "workflows"
+  );
+  fs.mkdirSync(workflowsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workflowsDir, `${workflow.id}.json`),
+    `${JSON.stringify(workflow, null, 2)}\n`,
+    "utf8"
+  );
+}
+
+function readPeerWorkflow(testEnv, workflowId) {
+  return JSON.parse(fs.readFileSync(path.join(
+    stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+    "workflows",
+    `${workflowId}.json`
+  ), "utf8"));
+}
+
+function unfinishedPeerWorkflow(testEnv, id, sessionId, options = {}) {
+  const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+  const timestamp = options.timestamp ?? new Date().toISOString();
+  const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+  return {
+    version: 1,
+    id,
+    mode: "design",
+    status: options.status ?? "running",
+    phase: "memo",
+    revision: 1,
+    epoch: 0,
+    workspaceRoot,
+    fingerprint,
+    brief: `Lifecycle cleanup for ${id}.`,
+    briefHash: createHash("sha256").update(`Lifecycle cleanup for ${id}.`).digest("hex"),
+    originSessionId: sessionId,
+    currentOwnerSessionId: sessionId,
+    modelManifest: [],
+    toolManifest: [],
+    stages: {},
+    branches: {
+      codex: {
+        status: "running",
+        payload: null,
+        failureReason: null,
+        attempts: 1,
+        stage: "memo",
+        startFingerprint: fingerprint,
+        startedAt: timestamp,
+      },
+    },
+    branchAttempts: [],
+    claudeSessionId: null,
+    checkpoint: null,
+    feedback: null,
+    critique: null,
+    finalResult: options.status === "completed" ? { summary: "sealed" } : null,
+    failureReason: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 function runHook(scriptPath, args, input, env, options = {}) {
@@ -573,6 +639,545 @@ describe("hooks", () => {
       assert.equal(job.pid, null);
       assert.match(job.errorMessage ?? "", /session ended/i);
     } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd marks only unfinished owned peer work retryable", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+      const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+      const timestamp = new Date().toISOString();
+      writePeerWorkflow(testEnv, {
+        version: 1,
+        id: "workflow-session-end",
+        mode: "design",
+        status: "running",
+        phase: "memo",
+        revision: 1,
+        epoch: 0,
+        workspaceRoot,
+        fingerprint,
+        brief: "Keep completed peer evidence.",
+        briefHash: createHash("sha256").update("Keep completed peer evidence.").digest("hex"),
+        originSessionId: "hook-session",
+        currentOwnerSessionId: "hook-session",
+        modelManifest: [],
+        toolManifest: [],
+        stages: {
+          checkpoint: {
+            status: "running",
+            payload: null,
+            failureReason: null,
+            attempts: 1,
+            stage: "checkpoint",
+            startFingerprint: fingerprint,
+            startedAt: timestamp,
+          },
+        },
+        branches: {
+          codex: {
+            status: "running",
+            payload: null,
+            failureReason: null,
+            attempts: 1,
+            stage: "memo",
+            startFingerprint: fingerprint,
+            startedAt: timestamp,
+          },
+          claude: {
+            status: "completed",
+            payload: { content: { finding: "frozen" } },
+            failureReason: null,
+            attempts: 1,
+            completedAt: timestamp,
+          },
+        },
+        branchAttempts: [],
+        claudeSessionId: "claude-owned",
+        checkpoint: null,
+        feedback: null,
+        critique: null,
+        finalResult: null,
+        failureReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      const workflow = readPeerWorkflow(testEnv, "workflow-session-end");
+      assert.equal(workflow.status, "incomplete");
+      assert.equal(workflow.branches.codex.status, "retryable_failed");
+      assert.equal(workflow.branches.codex.failureReason, "SESSION_ENDED");
+      assert.equal(workflow.branches.claude.status, "completed");
+      assert.equal(workflow.stages.checkpoint.status, "retryable_failed");
+      assert.equal(workflow.stages.checkpoint.failureReason, "SESSION_ENDED");
+      assert.deepEqual(workflow.branches.claude.payload, {
+        content: { finding: "frozen" },
+      });
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd invalidates peer reservations whose workers never started", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+      const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+      const timestamp = new Date().toISOString();
+      const reserved = (label) => ({
+        status: "pending",
+        payload: null,
+        failureReason: null,
+        attempts: 0,
+        attemptReservation: {
+          epoch: 0,
+          leaseDigest: createHash("sha256").update(label).digest("hex"),
+          reservedAt: timestamp,
+        },
+      });
+      writePeerWorkflow(testEnv, {
+        version: 1,
+        id: "workflow-session-end-never-started",
+        mode: "design",
+        status: "queued",
+        phase: "queued",
+        revision: 1,
+        epoch: 0,
+        workspaceRoot,
+        fingerprint,
+        brief: "Invalidate never-started workers.",
+        briefHash: createHash("sha256").update("Invalidate never-started workers.").digest("hex"),
+        originSessionId: "hook-session",
+        currentOwnerSessionId: "hook-session",
+        modelManifest: [],
+        toolManifest: [],
+        stages: { checkpoint: reserved("checkpoint") },
+        branches: { codex: reserved("codex"), claude: reserved("claude") },
+        branchAttempts: [],
+        claudeSessionId: null,
+        checkpoint: null,
+        feedback: null,
+        critique: null,
+        finalResult: null,
+        failureReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      const workflow = readPeerWorkflow(testEnv, "workflow-session-end-never-started");
+      assert.equal(workflow.epoch, 1);
+      assert.equal(workflow.status, "incomplete");
+      for (const target of [
+        workflow.branches.codex,
+        workflow.branches.claude,
+        workflow.stages.checkpoint,
+      ]) {
+        assert.equal(target.status, "retryable_failed");
+        assert.equal(target.failureReason, "SESSION_ENDED");
+        assert.equal(Object.hasOwn(target, "attemptReservation"), false);
+      }
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("retains a cleanup marker when the workflow budget expires and SessionStart replays it", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, "workflow-deadline-replay", "old-session"
+      ));
+      const preload = path.join(testEnv.rootDir, "workflow-deadline.mjs");
+      fs.writeFileSync(preload, `
+        import { performance } from "node:perf_hooks";
+        Object.defineProperty(performance, "now", {
+          configurable: true,
+          value() {
+            return new Error().stack.includes("finalizeSessionWorkflows") ? 3_000 : 1_000;
+          },
+        });
+      `, "utf8");
+      const marker = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "session-cleanup-pending-old-session.json"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "old-session" },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preload).href}`]
+            .filter(Boolean).join(" "),
+        }
+      );
+
+      assert.equal(fs.existsSync(marker), true);
+      assert.equal(readPeerWorkflow(testEnv, "workflow-deadline-replay").branches.codex.status, "running");
+
+      runHook(
+        SESSION_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, session_id: "new-session" },
+        testEnv.env
+      );
+      const recovered = readPeerWorkflow(testEnv, "workflow-deadline-replay");
+      assert.equal(recovered.branches.codex.status, "retryable_failed");
+      assert.equal(recovered.branches.codex.failureReason, "SESSION_ENDED");
+      assert.equal(fs.existsSync(marker), false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("continues workflow cleanup when one reserved record disappears", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const missingId = "workflow-a-missing";
+      const survivingId = "workflow-b-surviving";
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, missingId, "hook-session", { timestamp: "2026-04-04T02:00:00.000Z" }
+      ));
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, survivingId, "hook-session", { timestamp: "2026-04-04T01:00:00.000Z" }
+      ));
+      const preload = path.join(testEnv.rootDir, "remove-reserved-workflow.mjs");
+      fs.writeFileSync(preload, `
+        import fs from "node:fs";
+        const originalRenameSync = fs.renameSync.bind(fs);
+        let removed = false;
+        fs.renameSync = (source, destination) => {
+          originalRenameSync(source, destination);
+          if (!removed && String(destination).endsWith("/${missingId}.json")) {
+            try {
+              const stored = JSON.parse(fs.readFileSync(destination, "utf8"));
+              if (stored.cancellation?.leaseDigest) {
+                fs.unlinkSync(destination);
+                removed = true;
+              }
+            } catch {}
+          }
+        };
+      `, "utf8");
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preload).href}`]
+            .filter(Boolean).join(" "),
+        }
+      );
+
+      assert.equal(fs.existsSync(path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir), "workflows", `${missingId}.json`
+      )), false);
+      const surviving = readPeerWorkflow(testEnv, survivingId);
+      assert.equal(surviving.branches.codex.status, "retryable_failed");
+      assert.equal(surviving.branches.codex.failureReason, "SESSION_ENDED");
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("retains recovery for a locked workflow while finalizing later workflows", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const lockedId = "workflow-a-locked";
+      const laterId = "workflow-b-after-lock";
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, lockedId, "hook-session", { timestamp: "2026-04-04T02:00:00.000Z" }
+      ));
+      writePeerWorkflow(testEnv, unfinishedPeerWorkflow(
+        testEnv, laterId, "hook-session", { timestamp: "2026-04-04T01:00:00.000Z" }
+      ));
+      const lockedFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "workflows", `${lockedId}.json`
+      );
+      fs.writeFileSync(`${lockedFile}.lock`, JSON.stringify({
+        pid: process.pid,
+        timestamp: Date.now(),
+        token: "held-workflow-cleanup",
+      }), "utf8");
+      const marker = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "session-cleanup-pending-hook-session.json"
+      );
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      assert.equal(readPeerWorkflow(testEnv, lockedId).branches.codex.status, "running");
+      assert.equal(readPeerWorkflow(testEnv, laterId).branches.codex.status, "retryable_failed");
+      assert.equal(fs.existsSync(marker), true);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("does not reserve or mutate terminal workflows during SessionEnd", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const terminal = unfinishedPeerWorkflow(
+        testEnv, "workflow-terminal-session-end", "hook-session", { status: "completed" }
+      );
+      writePeerWorkflow(testEnv, terminal);
+      const workflowFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+        "workflows", `${terminal.id}.json`
+      );
+      const before = fs.readFileSync(workflowFile);
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      assert.deepEqual(fs.readFileSync(workflowFile), before);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd fails closed when a pending reserved peer launch cannot be cancelled", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+      const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+      const timestamp = new Date().toISOString();
+      writePeerWorkflow(testEnv, {
+        version: 1,
+        id: "workflow-pending-linked-cancel-failure",
+        mode: "design",
+        status: "queued",
+        phase: "queued",
+        revision: 1,
+        epoch: 0,
+        workspaceRoot,
+        fingerprint,
+        brief: "Fail closed during the pending launch race.",
+        briefHash: createHash("sha256")
+          .update("Fail closed during the pending launch race.")
+          .digest("hex"),
+        originSessionId: "hook-session",
+        currentOwnerSessionId: "hook-session",
+        modelManifest: [],
+        toolManifest: [],
+        stages: {
+          checkpoint: {
+            status: "pending",
+            payload: null,
+            failureReason: null,
+            attempts: 0,
+          },
+        },
+        branches: {
+          codex: {
+            status: "completed",
+            payload: { content: { finding: "frozen" } },
+            failureReason: null,
+            attempts: 1,
+            completedAt: timestamp,
+          },
+          claude: {
+            status: "pending",
+            payload: null,
+            failureReason: null,
+            attempts: 0,
+            attemptReservation: {
+              epoch: 0,
+              leaseDigest: createHash("sha256").update("pending-claude").digest("hex"),
+              reservedAt: timestamp,
+            },
+          },
+        },
+        branchAttempts: [],
+        claudeSessionId: null,
+        checkpoint: null,
+        feedback: null,
+        critique: null,
+        finalResult: null,
+        failureReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      writeStateJob(testEnv, "pending-linked-cancel-failure", {
+        id: "pending-linked-cancel-failure",
+        status: "running",
+        phase: "running",
+        sessionId: "hook-session",
+        workspaceRoot,
+        workflowId: "workflow-pending-linked-cancel-failure",
+        workflowStage: "memo",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        pid: process.pid,
+      });
+
+      const hook = runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      const job = readStateJob(testEnv, "pending-linked-cancel-failure");
+      const workflow = readPeerWorkflow(testEnv, "workflow-pending-linked-cancel-failure");
+      assert.equal(job.status, "cancel_failed", hook.stderr);
+      assert.equal(workflow.epoch, 1);
+      assert.equal(workflow.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.failureReason, "SESSION_END_CANCEL_FAILED");
+      assert.equal(Object.hasOwn(workflow.branches.claude, "attemptReservation"), false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd keeps peer work cancel_failed when its linked process cannot be cancelled", async (t) => {
+    if (process.platform !== "darwin") {
+      t.skip("Darwin ps identity lookup behavior");
+      return;
+    }
+
+    const testEnv = createHookEnvironment();
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" }
+    );
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+
+    try {
+      const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+      const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+      const identity = getProcessIdentity(child.pid);
+      const timestamp = new Date().toISOString();
+      writePeerWorkflow(testEnv, {
+        version: 1,
+        id: "workflow-linked-cancel-failure",
+        mode: "design",
+        status: "running",
+        phase: "memo",
+        revision: 1,
+        epoch: 0,
+        workspaceRoot,
+        fingerprint,
+        brief: "Do not retry while the old Claude process survives.",
+        briefHash: createHash("sha256")
+          .update("Do not retry while the old Claude process survives.")
+          .digest("hex"),
+        originSessionId: "hook-session",
+        currentOwnerSessionId: "hook-session",
+        modelManifest: [],
+        toolManifest: [],
+        stages: {
+          checkpoint: {
+            status: "running",
+            payload: null,
+            failureReason: null,
+            attempts: 1,
+            stage: "checkpoint",
+            startFingerprint: fingerprint,
+            startedAt: timestamp,
+          },
+        },
+        branches: {
+          codex: { status: "completed", payload: { content: { finding: "frozen" } }, attempts: 1 },
+          claude: {
+            status: "running",
+            payload: null,
+            failureReason: null,
+            attempts: 1,
+            stage: "memo",
+            startFingerprint: fingerprint,
+            startedAt: timestamp,
+          },
+        },
+        branchAttempts: [],
+        claudeSessionId: null,
+        checkpoint: null,
+        feedback: null,
+        critique: null,
+        finalResult: null,
+        failureReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      writeStateJob(testEnv, "peer-linked-cancel-failure", {
+        id: "peer-linked-cancel-failure",
+        status: "running",
+        sessionId: "hook-session",
+        workspaceRoot,
+        workflowId: "workflow-linked-cancel-failure",
+        workflowStage: "memo",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        pid: child.pid,
+        pidIdentity: identity,
+      });
+      const failingBin = path.join(testEnv.rootDir, "peer-failing-ps");
+      fs.mkdirSync(failingBin);
+      const fakePs = path.join(failingBin, "ps");
+      fs.writeFileSync(fakePs, `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args.at(-1) === process.env.CC_TEST_TARGET_PID) process.exit(2);
+const result = spawnSync("/bin/ps", args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`, "utf8");
+      fs.chmodSync(fakePs, 0o755);
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        {
+          ...testEnv.env,
+          PATH: `${failingBin}${path.delimiter}${testEnv.env.PATH}`,
+          CC_TEST_TARGET_PID: String(child.pid),
+        }
+      );
+
+      const job = readStateJob(testEnv, "peer-linked-cancel-failure");
+      const workflow = readPeerWorkflow(testEnv, "workflow-linked-cancel-failure");
+      assert.equal(job.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.failureReason, "SESSION_END_CANCEL_FAILED");
+      assert.equal(workflow.stages.checkpoint.status, "retryable_failed");
+      assert.equal(workflow.stages.checkpoint.failureReason, "SESSION_ENDED");
+      assert.doesNotThrow(() => process.kill(child.pid, 0));
+    } finally {
+      child.kill();
       cleanupHookEnvironment(testEnv);
     }
   });

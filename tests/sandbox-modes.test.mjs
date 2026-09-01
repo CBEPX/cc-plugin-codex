@@ -23,7 +23,7 @@ import {
   createReviewMcpConfig,
   cleanupReviewMcpConfig,
 } from "../scripts/lib/claude-cli.mjs";
-import { resolvePluginRuntimeRoot } from "../scripts/lib/codex-paths.mjs";
+import { normalizePathSlashes, resolvePluginRuntimeRoot } from "../scripts/lib/codex-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -155,6 +155,63 @@ describe("buildArgs workspace-write mode", () => {
 // ---------------------------------------------------------------------------
 
 describe("sandbox settings lifecycle", () => {
+  it("creates fail-closed peer settings with canonical protected reads", () => {
+    withTempCodexHome(({ homeDir, codexHome }) => {
+      const workspaceRoot = fs.mkdtempSync(path.join(homeDir, "workspace-"));
+      const claudeProjects = path.join(homeDir, ".claude", "projects");
+      fs.mkdirSync(codexHome, { recursive: true });
+      fs.mkdirSync(claudeProjects, { recursive: true });
+      const f = createSandboxSettings("peer-read-only", { workspaceRoot, platform: "darwin" });
+      assert.ok(f);
+      const content = JSON.parse(fs.readFileSync(f, "utf8"));
+      const canonicalWorkspace = normalizePathSlashes(fs.realpathSync.native(workspaceRoot));
+      const canonicalCodexHome = normalizePathSlashes(fs.realpathSync.native(codexHome));
+      const canonicalClaudeProjects = normalizePathSlashes(fs.realpathSync.native(claudeProjects));
+      assert.equal(content.sandbox.enabled, true);
+      assert.equal(content.sandbox.failIfUnavailable, true);
+      assert.equal(content.sandbox.allowUnsandboxedCommands, false);
+      assert.deepEqual(content.sandbox.filesystem.allowRead, [canonicalWorkspace]);
+      assert.deepEqual(content.sandbox.filesystem.denyRead, [
+        canonicalCodexHome,
+        canonicalClaudeProjects,
+      ]);
+      assert.deepEqual(content.permissions.deny, [
+        `Read(${canonicalCodexHome}/**)`,
+        `Read(${canonicalClaudeProjects}/**)`,
+      ]);
+      cleanupSandboxSettings(f);
+    });
+  });
+
+  it("rejects native Windows for fail-closed peer isolation", () => {
+    withTempCodexHome(({ homeDir }) => {
+      const workspaceRoot = fs.mkdtempSync(path.join(homeDir, "workspace-"));
+      assert.throws(
+        () => createSandboxSettings("peer-read-only", { workspaceRoot, platform: "win32" }),
+        /PEER_ISOLATION_UNAVAILABLE/
+      );
+    });
+  });
+
+  it("rejects canonical overlap with CODEX_HOME or Claude projects", () => {
+    withTempCodexHome(({ homeDir, codexHome }) => {
+      const claudeProjects = path.join(homeDir, ".claude", "projects");
+      fs.mkdirSync(codexHome, { recursive: true });
+      fs.mkdirSync(claudeProjects, { recursive: true });
+      for (const workspaceRoot of [
+        homeDir,
+        path.join(codexHome, "workspace"),
+        path.join(claudeProjects, "workspace"),
+      ]) {
+        fs.mkdirSync(workspaceRoot, { recursive: true });
+        assert.throws(
+          () => createSandboxSettings("peer-read-only", { workspaceRoot }),
+          /PEER_ISOLATION_UNAVAILABLE/
+        );
+      }
+    });
+  });
+
   it("createSandboxSettings('read-only') creates valid JSON file", () => {
     withTempCodexHome(() => {
       const f = createSandboxSettings("read-only");

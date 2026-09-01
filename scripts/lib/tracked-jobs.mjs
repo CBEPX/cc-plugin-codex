@@ -17,7 +17,7 @@ import {
   getSpawnedProcessIdentity,
   terminateProcessTree,
 } from "./process.mjs";
-import { nowIso, ensureStateDir, getCurrentSession, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
+import { nowIso, ensureStateDir, getCurrentSession, readJobFile, resolveJobLogFile, sanitizeId, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
 
 export { nowIso };
 
@@ -276,8 +276,21 @@ export function createJobRecord(base, options = {}) {
     options.sessionId ??
     env[options.sessionIdEnv ?? SESSION_ID_ENV] ??
     (options.cwd ? getCurrentSession(options.cwd) : null);
+  const hasWorkflowId = base.workflowId != null;
+  const hasWorkflowStage = base.workflowStage != null;
+  if (hasWorkflowId !== hasWorkflowStage) {
+    throw new Error("Workflow-linked jobs require both workflowId and workflowStage.");
+  }
+  const workflowLink = hasWorkflowId
+    ? {
+        workflowId: sanitizeId(base.workflowId, "workflow ID"),
+        workflowStage: sanitizeId(base.workflowStage, "workflow stage"),
+        jobClass: "workflow",
+      }
+    : {};
   return {
     ...base,
+    ...workflowLink,
     createdAt: nowIso(),
     ...(sessionId ? { sessionId } : {})
   };

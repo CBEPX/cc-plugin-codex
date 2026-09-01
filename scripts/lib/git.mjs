@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import process from "node:process";
 
 import { isProbablyText } from "./fs.mjs";
 import { formatCommandFailure, runCommand, runCommandChecked } from "./process.mjs";
@@ -14,6 +15,10 @@ const MAX_UNTRACKED_TOTAL_BYTES = MAX_UNTRACKED_BYTES + 4 * 1024;
 const MAX_INLINE_REVIEW_DIFF_BYTES = 64 * 1024;
 const REVIEW_DIFF_READ_MAX_BUFFER = MAX_INLINE_REVIEW_DIFF_BYTES + 8 * 1024;
 const HASH_OBJECT_BATCH_SIZE = 128;
+const FINGERPRINT_GIT_TIMEOUT_MS = 30_000;
+const FINGERPRINT_SMALL_MAX_BUFFER = 64 * 1024;
+const FINGERPRINT_PATH_LIST_MAX_BUFFER = 64 * 1024 * 1024;
+const FINGERPRINT_WRITE_TREE_RETRIES = 8;
 
 function git(cwd, args, options = {}) {
   return runCommand("git", args, { cwd, ...options });
@@ -88,41 +93,29 @@ function hashText(value) {
   return createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 }
 
-function buildUntrackedMetadataFingerprint(repoRoot, relativePaths) {
-  const hash = createHash("sha256");
-  const normalizedPaths = [...relativePaths].sort();
-
-  for (const relativePath of normalizedPaths) {
-    hash.update(relativePath, "utf8");
-    hash.update("\0", "utf8");
-    const absolutePath = path.join(repoRoot, relativePath);
-    try {
-      const stat = fs.statSync(absolutePath);
-      hash.update(String(stat.size), "utf8");
-      hash.update("\0", "utf8");
-      hash.update(String(Math.trunc(stat.mtimeMs)), "utf8");
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        hash.update("ENOENT", "utf8");
-      } else {
-        throw error;
-      }
-    }
-    hash.update("\0", "utf8");
-  }
-
-  return hash.digest("hex");
-}
-
 export function getWorkingTreeFingerprint(cwd) {
-  const repoRoot = getRepoRoot(cwd);
-  const stagedDiffHash = gitChecked(repoRoot, ["write-tree"]).stdout.trim();
+  const fingerprintGitEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+  const smallGitOptions = {
+    timeout: FINGERPRINT_GIT_TIMEOUT_MS,
+    maxBuffer: FINGERPRINT_SMALL_MAX_BUFFER,
+    env: fingerprintGitEnv,
+  };
+  const pathListGitOptions = {
+    timeout: FINGERPRINT_GIT_TIMEOUT_MS,
+    maxBuffer: FINGERPRINT_PATH_LIST_MAX_BUFFER,
+    env: fingerprintGitEnv,
+  };
+  const repoRoot = gitChecked(cwd, ["rev-parse", "--show-toplevel"], smallGitOptions)
+    .stdout.trim();
+  const headResult = git(repoRoot, ["rev-parse", "--verify", "HEAD"], smallGitOptions);
+  const head = headResult.status === 0 ? headResult.stdout.trim() : "unborn";
+  const stagedDiffHash = readIndexTree(repoRoot, smallGitOptions);
   const unstaged = gitChecked(repoRoot, [
     "diff",
     "--name-only",
     "--no-ext-diff",
     "-z",
-  ]).stdout
+  ], pathListGitOptions).stdout
     .split("\0")
     .filter(Boolean)
     .sort();
@@ -130,17 +123,14 @@ export function getWorkingTreeFingerprint(cwd) {
     "ls-files",
     "--others",
     "--exclude-standard",
-  ]).stdout
-    .trim()
-    .split("\n")
+    "-z",
+  ], pathListGitOptions).stdout
+    .split("\0")
     .filter(Boolean)
     .sort();
 
-  const unstagedDiffHash = hashWorkingTreePaths(repoRoot, unstaged);
-  const untrackedFingerprintHash = buildUntrackedMetadataFingerprint(
-    repoRoot,
-    untracked
-  );
+  const unstagedDiffHash = hashWorkingTreePaths(repoRoot, unstaged, smallGitOptions);
+  const untrackedFingerprintHash = hashWorkingTreePaths(repoRoot, untracked, smallGitOptions);
   const signature = hashText(
     [
       stagedDiffHash,
@@ -152,6 +142,7 @@ export function getWorkingTreeFingerprint(cwd) {
 
   return {
     repoRoot,
+    head,
     stagedDiffHash,
     unstagedDiffHash,
     untrackedFingerprintHash,
@@ -160,7 +151,23 @@ export function getWorkingTreeFingerprint(cwd) {
   };
 }
 
-function hashWorkingTreePaths(repoRoot, relativePaths) {
+function readIndexTree(repoRoot, gitOptions) {
+  for (let attempt = 0; attempt < FINGERPRINT_WRITE_TREE_RETRIES; attempt += 1) {
+    const result = git(repoRoot, ["write-tree"], gitOptions);
+    if (result.status === 0) return result.stdout.trim();
+    const indexBusy = /index\.lock[\s\S]*File exists/iu.test(result.stderr);
+    if (!indexBusy || attempt === FINGERPRINT_WRITE_TREE_RETRIES - 1) {
+      if (result.error) throw result.error;
+      throw new Error(formatCommandFailure(result));
+    }
+    const delay = 25 * (attempt + 1);
+    const shared = new SharedArrayBuffer(4);
+    Atomics.wait(new Int32Array(shared), 0, 0, delay);
+  }
+  throw new Error("git write-tree retry budget exhausted.");
+}
+
+function hashWorkingTreePaths(repoRoot, relativePaths, gitOptions) {
   const hash = createHash("sha256");
   const regularPaths = [];
 
@@ -187,7 +194,24 @@ function hashWorkingTreePaths(repoRoot, relativePaths) {
         continue;
       }
 
-      regularPaths.push(relativePath);
+      if (stat.isFile()) {
+        regularPaths.push(relativePath);
+        continue;
+      }
+
+      const type = stat.isFIFO()
+        ? "fifo"
+        : stat.isSocket()
+          ? "socket"
+          : stat.isCharacterDevice()
+            ? "character-device"
+            : stat.isBlockDevice()
+              ? "block-device"
+              : "other";
+      const mode = (stat.mode & 0o7777).toString(8).padStart(4, "0");
+      hash.update(`special:${type}:${mode}`, "utf8");
+      hash.update("\0", "utf8");
+      continue;
     } catch (error) {
       if (error?.code === "ENOENT") {
         hash.update("deleted", "utf8");
@@ -198,7 +222,7 @@ function hashWorkingTreePaths(repoRoot, relativePaths) {
     hash.update("\0", "utf8");
   }
 
-  const blobHashes = readBlobHashes(repoRoot, regularPaths);
+  const blobHashes = readBlobHashes(repoRoot, regularPaths, gitOptions);
   for (const relativePath of regularPaths) {
     hash.update(blobHashes.get(relativePath), "utf8");
     hash.update("\0", "utf8");
@@ -207,11 +231,15 @@ function hashWorkingTreePaths(repoRoot, relativePaths) {
   return hash.digest("hex");
 }
 
-function readBlobHashes(repoRoot, relativePaths) {
+function readBlobHashes(repoRoot, relativePaths, gitOptions) {
   const hashes = new Map();
   for (let index = 0; index < relativePaths.length; index += HASH_OBJECT_BATCH_SIZE) {
     const batch = relativePaths.slice(index, index + HASH_OBJECT_BATCH_SIZE);
-    const stdout = gitChecked(repoRoot, ["hash-object", "--no-filters", "--", ...batch]).stdout;
+    const stdout = gitChecked(
+      repoRoot,
+      ["hash-object", "--no-filters", "--", ...batch],
+      gitOptions
+    ).stdout;
     const digestLines = stdout
       .trim()
       .split("\n")

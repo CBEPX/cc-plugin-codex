@@ -1,7 +1,7 @@
 {
   "name": "cc",
-  "version": "1.6.1",
-  "description": "Claude Code Plugin for Codex. Delegate code reviews, investigations, tracked tasks, and transcript transfers from inside Codex.",
+  "version": "1.7.0",
+  "description": "Claude Code Plugin for Codex. Run reviews, tracked tasks, and independent Codex-Claude design or research workflows.",
   "author": {
     "name": "CBEPX",
     "url": "https://github.com/CBEPX"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Claude Code",
     "shortDescription": "Claude Code Plugin for Codex",
-    "longDescription": "Use Claude Code from inside Codex to run read-only reviews, adversarial design reviews, tracked rescue tasks, and transcript transfers through a Claude-backed runtime with job status and result retrieval.",
+    "longDescription": "Use Claude Code from inside Codex for read-only reviews, tracked rescue tasks, transcript transfers, and independent Codex-Claude design or research workflows with aggregate status, result, and cancellation.",
     "developerName": "CBEPX",
     "category": "Coding",
     "capabilities": [
@@ -33,6 +33,8 @@
       "Use Claude Code to review my current changes through $cc:review",
       "Use Claude Code to challenge this implementation through $cc:adversarial-review",
       "Use Claude Code to investigate and fix this issue through $cc:rescue",
+      "Compare this technical decision with independent Codex and Claude evidence through $cc:design",
+      "Research this repository question with independent Codex and Claude evidence through $cc:research",
       "Transfer this Claude Code session into Codex through $cc:transfer"
     ],
     "brandColor": "#7B39FE",

@@ -258,6 +258,7 @@ function isSessionCleanupPending(job) {
 
 function collectStatusRows(report) {
   const rows = [
+    ...(Array.isArray(report.workflows) ? report.workflows : []),
     ...(Array.isArray(report.running) ? report.running : []),
     report.latestFinished,
     ...(Array.isArray(report.recent) ? report.recent : []),
@@ -291,7 +292,13 @@ function collectStatusRows(report) {
 
 function formatStatusActions(job) {
   const actions = [`\`${formatClaudeSkillCommand("status", job.id)}\``];
-  if (job.status === "queued" || job.status === "running") {
+  if (job.entityType === "workflow") {
+    if (job.status === "queued" || job.status === "running") {
+      actions.push(`\`${formatClaudeSkillCommand("cancel", job.id)}\``);
+    } else {
+      actions.push(`\`${formatClaudeSkillCommand("result", job.id)}\``);
+    }
+  } else if (job.status === "queued" || job.status === "running") {
     actions.push(`\`${formatClaudeSkillCommand("cancel", job.id)}\``);
   } else {
     actions.push(`\`${formatClaudeSkillCommand("result", job.id)}\``);
@@ -442,6 +449,117 @@ export function renderStatusReport(report) {
   const rows = collectStatusRows(report).slice(0, 15);
   if (rows.length === 0) return "No Claude Code jobs recorded yet.\n";
   return renderStatusTable(rows);
+}
+
+function workflowNextCommand(workflow) {
+  if (workflow.status === "awaiting_user") {
+    return `$cc:${workflow.mode} --continue ${workflow.id}`;
+  }
+  if (workflow.status === "incomplete") {
+    return `$cc:${workflow.mode} --retry ${workflow.id}`;
+  }
+  if (workflow.status === "queued" || workflow.status === "running" || workflow.status === "cancel_failed") {
+    return `$cc:status ${workflow.id}`;
+  }
+  return null;
+}
+
+function workflowEvidenceSummary(branch) {
+  const payload = branch?.payload ?? {};
+  return `repo=${payload.repoCitations?.length ?? 0}, web=${payload.webCitations?.length ?? 0}, tools=${payload.toolEvents?.length ?? 0}`;
+}
+
+function fencedJson(value) {
+  const json = JSON.stringify(value, null, 2);
+  const longest = Math.max(0, ...[...json.matchAll(/`+/gu)].map(([run]) => run.length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return [
+    `${fence}json`,
+    json,
+    fence,
+  ];
+}
+
+function renderWorkflowDetails(workflow, options = {}) {
+  const lines = [
+    options.result ? "# Peer Workflow Result" : "# Peer Workflow Status",
+    "",
+    "| Field | Value |",
+    "| --- | --- |",
+  ];
+  pushKeyValueTableRow(lines, "Workflow", `\`${workflow.id}\``, { raw: true });
+  pushKeyValueTableRow(lines, "Mode", workflow.mode);
+  pushKeyValueTableRow(lines, "Status", workflow.status);
+  pushKeyValueTableRow(lines, "Phase", workflow.phase);
+  pushKeyValueTableRow(lines, "Failure", workflow.failureReason ?? "");
+  pushKeyValueTableRow(lines, "Owner session", workflow.currentOwnerSessionId ?? "");
+
+  lines.push("", "Branches:", "", "| Branch | Status | Attempts | Failure | Evidence |", "| --- | --- | --- | --- | --- |");
+  for (const branchId of ["codex", "claude"]) {
+    const branch = workflow.branches?.[branchId] ?? {};
+    lines.push(
+      `| ${branchId} | ${escapeMarkdownCell(branch.status ?? "missing")} | ${escapeMarkdownCell(branch.attempts ?? 0)} | ${escapeMarkdownCell(branch.failureReason ?? "")} | ${workflowEvidenceSummary(branch)} |`
+    );
+  }
+
+  const modelRows = [];
+  for (const model of workflow.modelManifest ?? []) {
+    modelRows.push([
+      model.role ?? "unknown",
+      model.requestedModel ?? "inherited",
+      model.resolvedModel ?? "pending",
+      "",
+    ]);
+  }
+  const claudeModel = workflow.branches?.claude?.payload?.model;
+  if (claudeModel) {
+    modelRows.push([
+      "claude actual",
+      claudeModel.requestedModel ?? "unknown",
+      claudeModel.finalModel ?? "unknown",
+      formatModelFallbacks(claudeModel.modelFallbacks),
+    ]);
+  }
+  if (modelRows.length > 0) {
+    lines.push("", "Models:", "", "| Role | Requested | Resolved/final | Fallbacks |", "| --- | --- | --- | --- |");
+    for (const row of modelRows) {
+      lines.push(`| ${row.map(escapeMarkdownCell).join(" | ")} |`);
+    }
+  }
+
+  const tools = Array.isArray(workflow.toolManifest) ? workflow.toolManifest : [];
+  if (tools.length > 0) {
+    lines.push("", "Selected tools:", "", "| Tool | Source | Capability | Reason | Trust basis |", "| --- | --- | --- | --- | --- |");
+    for (const tool of tools) {
+      lines.push(`| ${[
+        tool.toolId,
+        tool.source,
+        tool.capability,
+        tool.reason,
+        tool.safetyDecision?.reason,
+      ].map(escapeMarkdownCell).join(" | ")} |`);
+    }
+  }
+
+  const payload = workflow.finalResult ?? workflow.checkpoint;
+  if (payload) {
+    lines.push("", workflow.finalResult ? "Final result:" : "Checkpoint:", "", ...fencedJson(payload));
+  }
+  const next = workflowNextCommand(workflow);
+  if (workflow.status === "incomplete" && workflow.failureReason === "STALE_WORKSPACE") {
+    lines.push("", `Next step: start a new workflow with \`$cc:${workflow.mode}\`; this snapshot cannot be retried.`);
+  } else {
+    lines.push("", next ? `Next command: \`${next}\`` : "Next command: none");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+export function renderWorkflowStatusReport(workflow) {
+  return renderWorkflowDetails(workflow);
+}
+
+export function renderWorkflowResult(workflow) {
+  return renderWorkflowDetails(workflow, { result: true });
 }
 
 function resolveManualCleanupPid(job) {

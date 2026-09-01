@@ -2339,6 +2339,13 @@ describe("buildArgs", () => {
     assert.equal(args[idx + 1], "sonnet");
   });
 
+  it("includes --fallback-model with the resolved fallback model", () => {
+    const args = buildArgs("p", { fallbackModel: "opus" });
+    const idx = args.indexOf("--fallback-model");
+    assert.ok(idx >= 0);
+    assert.equal(args[idx + 1], "opus");
+  });
+
   it("includes --effort with resolved effort", () => {
     const args = buildArgs("p", { effort: "xhigh" });
     const idx = args.indexOf("--effort");
@@ -2373,6 +2380,31 @@ describe("buildArgs", () => {
     const idx = args.indexOf("--resume");
     assert.ok(idx >= 0);
     assert.equal(args[idx + 1], "rsid-456");
+  });
+
+  it("includes --fork-session when forkSession is enabled", () => {
+    const args = buildArgs("p", { forkSession: true });
+    assert.ok(args.includes("--fork-session"));
+  });
+
+  it("builds the exact fallback resume-and-fork argv", () => {
+    assert.deepEqual(buildArgs("p", {
+      model: "fable",
+      fallbackModel: "opus",
+      resumeSessionId: "session-123",
+      forkSession: true,
+    }), [
+      "-p",
+      "--output-format",
+      "json",
+      "--model",
+      "fable",
+      "--fallback-model",
+      "opus",
+      "--resume",
+      "session-123",
+      "--fork-session",
+    ]);
   });
 
   it("includes --allowedTools as separate flags per tool", () => {

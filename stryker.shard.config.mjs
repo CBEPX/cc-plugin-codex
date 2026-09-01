@@ -26,17 +26,17 @@ const shards = {
       "scripts/lib/state.mjs:420-468",
       "scripts/lib/state.mjs:545-886",
       "scripts/lib/state.mjs:935-1107",
-      "scripts/lib/state.mjs:1173-1230",
-      "scripts/lib/state.mjs:1236-1282",
+      "scripts/lib/state.mjs:1173-1235",
+      "scripts/lib/state.mjs:1241-1287",
       "scripts/lib/tracked-jobs.mjs:30-43",
-      "scripts/lib/tracked-jobs.mjs:286-344",
-      "scripts/lib/tracked-jobs.mjs:363-517",
+      "scripts/lib/tracked-jobs.mjs:273-357",
+      "scripts/lib/tracked-jobs.mjs:376-530",
     ],
   },
   "job-control": {
     command: "npm run test:mutation:job-control:unit",
     // Public selection and cancellation paths; process mechanics are covered separately.
-    mutate: ["scripts/lib/job-control.mjs:175-338"],
+    mutate: ["scripts/lib/job-control.mjs:207-469"],
   },
   managed: {
     command: "npm run test:mutation:managed:unit",

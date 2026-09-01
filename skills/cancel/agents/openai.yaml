@@ -1,5 +1,5 @@
 interface:
   display_name: "Claude Code Cancel"
-  short_description: "Args: [job-id]. Cancel a queued or running Claude Code job."
+  short_description: "Cancel a Claude job or peer workflow. Args: [id]."
 policy:
   allow_implicit_invocation: false
