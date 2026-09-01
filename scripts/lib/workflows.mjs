@@ -392,6 +392,34 @@ function terminalTargetState(state, fields) {
   return { ...rest, ...fields };
 }
 
+function assertNoActiveAttemptLeaseReflection(workflow, payload) {
+  const activeDigests = new Set([
+    ...Object.values(workflow.branches ?? {}),
+    ...Object.values(workflow.stages ?? {}),
+  ].flatMap((target) => {
+    const reservation = target?.attemptReservation;
+    return reservation?.epoch === workflow.epoch && typeof reservation.leaseDigest === "string"
+      ? [reservation.leaseDigest]
+      : [];
+  }));
+  if (activeDigests.size === 0) return;
+  const values = [payload];
+  while (values.length > 0) {
+    const value = values.pop();
+    if (typeof value === "string") {
+      if (activeDigests.has(leaseDigest(value))) {
+        throw workflowError(
+          "ATTEMPT_LEASE_REFLECTION",
+          "Peer payload contains an active attempt lease."
+        );
+      }
+    } else if (value && typeof value === "object") {
+      values.push(...Object.keys(value));
+      values.push(...Object.values(value));
+    }
+  }
+}
+
 function workflowSafetyViolation(workflow, target, timestamp, fingerprint) {
   const failedState = terminalTargetState(target.state, {
     status: "retryable_failed",
@@ -644,6 +672,7 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
     if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
       throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
     }
+    assertNoActiveAttemptLeaseReflection(workflow, payload);
     const target = targetState(workflow, options.stage, options.branchId);
     if (target.state.status === "completed") {
       throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
@@ -735,6 +764,7 @@ export function commitWorkflowStage(cwd, workflowId, options) {
     if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
       throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
     }
+    assertNoActiveAttemptLeaseReflection(workflow, payload);
     const target = targetState(workflow, options.stage, options.branchId);
     if (target.state.status !== "running") {
       throw workflowError("STAGE_NOT_RUNNING", `${target.key} is not running.`);

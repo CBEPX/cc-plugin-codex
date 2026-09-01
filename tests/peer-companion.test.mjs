@@ -322,6 +322,46 @@ afterEach(() => {
 });
 
 describe("peer companion with fake Claude", () => {
+  it("rejects a memo that reflects its live checkpoint lease without mutation or exposure", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const memoLease = planLease(created, "_codex_", "memo");
+    const checkpointLease = planLease(created, "_codex_", "checkpoint");
+    activate(testEnv, created, "memo", "codex", memoLease);
+    const workflowFile = path.join(
+      peerStateDir(testEnv), "workflows", `${created.workflow.id}.json`
+    );
+    const before = fs.readFileSync(workflowFile);
+    for (const content of [
+      { findings: [{ nested: { checkpointLease } }] },
+      { findings: [{ [checkpointLease]: "reflected object key" }] },
+    ]) {
+      const reflected = {
+        content,
+        repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+        webCitations: ["https://example.test/reflection"],
+        toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+      };
+      const result = run(testEnv, [
+        "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], { input: attemptInput(memoLease, reflected) });
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /ATTEMPT_LEASE_REFLECTION/u);
+      assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(checkpointLease));
+      assert.deepEqual(fs.readFileSync(workflowFile), before);
+    }
+    const publicView = run(testEnv, [
+      "peer-wait", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--json",
+    ]);
+    assert.equal(publicView.status, 0, publicView.stderr || publicView.stdout);
+    assert.doesNotMatch(publicView.stdout, new RegExp(checkpointLease));
+    assert.doesNotMatch(readManagedStateText(testEnv), new RegExp(checkpointLease));
+  });
+
   it("rejects a forged public Claude memo without changing workflow state", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);

@@ -484,32 +484,6 @@ export function buildPeerWaitView(workflow) {
   };
 }
 
-export function nextPeerRetryWork(workflow) {
-  const retryable = new Set(["pending", "retryable_failed"]);
-  const cancellationUnresolved = [
-    ...Object.values(workflow.branches ?? {}),
-    ...Object.values(workflow.stages ?? {}),
-  ].some((target) => target?.status === "cancel_failed");
-  if (cancellationUnresolved) return [];
-  const branchWork = ["codex", "claude"]
-    .filter((id) => retryable.has(workflow.branches?.[id]?.status))
-    .map((id) => ({ kind: "branch", id }));
-  if (branchWork.length > 0) return branchWork;
-  if (retryable.has(workflow.stages?.checkpoint?.status)) {
-    return [{ kind: "stage", id: "checkpoint" }];
-  }
-  const critique = workflow.stages?.critique;
-  const feedbackCompleted = workflow.stages?.feedback?.status === "completed";
-  if (feedbackCompleted && retryable.has(critique?.status)) {
-    return [{ kind: "stage", id: "critique" }];
-  }
-  if (critique?.status === "completed" &&
-      retryable.has(workflow.stages?.synthesis?.status)) {
-    return [{ kind: "stage", id: "synthesis" }];
-  }
-  return [];
-}
-
 export const PEER_CLAUDE_ALLOWED_BASE_TOOLS = [
   "Read",
   "Glob",

@@ -3268,6 +3268,7 @@ async function waitForCodexMemo(cwd, workflowId, expectedEpoch) {
 }
 
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
+  if (error?.code === "ATTEMPT_LEASE_REFLECTION") return;
   try {
     if (targetStatus(readPeerWorkflow(cwd, workflowId), target.stage, target.branchId) === "running") {
       failPeerTarget(cwd, workflowId, {

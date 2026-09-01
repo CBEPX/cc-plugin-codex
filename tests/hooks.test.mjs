@@ -13,7 +13,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SANDBOX_STOP_REVIEW_TOOLS } from "../scripts/lib/claude-cli.mjs";
 import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
-import { nextPeerRetryWork } from "../scripts/lib/peer-orchestration.mjs";
 import { getProcessIdentity } from "../scripts/lib/process.mjs";
 import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
@@ -799,7 +798,6 @@ process.exit(result.status ?? 1);
       assert.equal(workflow.branches.claude.failureReason, "SESSION_END_CANCEL_FAILED");
       assert.equal(workflow.stages.checkpoint.status, "retryable_failed");
       assert.equal(workflow.stages.checkpoint.failureReason, "SESSION_ENDED");
-      assert.deepEqual(nextPeerRetryWork(workflow), []);
       assert.doesNotThrow(() => process.kill(child.pid, 0));
     } finally {
       child.kill();
