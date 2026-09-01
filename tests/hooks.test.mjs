@@ -753,6 +753,101 @@ describe("hooks", () => {
     }
   });
 
+  it("SessionEnd fails closed when a pending reserved peer launch cannot be cancelled", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+      const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+      const timestamp = new Date().toISOString();
+      writePeerWorkflow(testEnv, {
+        version: 1,
+        id: "workflow-pending-linked-cancel-failure",
+        mode: "design",
+        status: "queued",
+        phase: "queued",
+        revision: 1,
+        epoch: 0,
+        workspaceRoot,
+        fingerprint,
+        brief: "Fail closed during the pending launch race.",
+        briefHash: createHash("sha256")
+          .update("Fail closed during the pending launch race.")
+          .digest("hex"),
+        originSessionId: "hook-session",
+        currentOwnerSessionId: "hook-session",
+        modelManifest: [],
+        toolManifest: [],
+        stages: {
+          checkpoint: {
+            status: "pending",
+            payload: null,
+            failureReason: null,
+            attempts: 0,
+          },
+        },
+        branches: {
+          codex: {
+            status: "completed",
+            payload: { content: { finding: "frozen" } },
+            failureReason: null,
+            attempts: 1,
+            completedAt: timestamp,
+          },
+          claude: {
+            status: "pending",
+            payload: null,
+            failureReason: null,
+            attempts: 0,
+            attemptReservation: {
+              epoch: 0,
+              leaseDigest: createHash("sha256").update("pending-claude").digest("hex"),
+              reservedAt: timestamp,
+            },
+          },
+        },
+        branchAttempts: [],
+        claudeSessionId: null,
+        checkpoint: null,
+        feedback: null,
+        critique: null,
+        finalResult: null,
+        failureReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      writeStateJob(testEnv, "pending-linked-cancel-failure", {
+        id: "pending-linked-cancel-failure",
+        status: "running",
+        phase: "running",
+        sessionId: "hook-session",
+        workspaceRoot,
+        workflowId: "workflow-pending-linked-cancel-failure",
+        workflowStage: "memo",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        pid: process.pid,
+      });
+
+      const hook = runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      const job = readStateJob(testEnv, "pending-linked-cancel-failure");
+      const workflow = readPeerWorkflow(testEnv, "workflow-pending-linked-cancel-failure");
+      assert.equal(job.status, "cancel_failed", hook.stderr);
+      assert.equal(workflow.epoch, 1);
+      assert.equal(workflow.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.status, "cancel_failed");
+      assert.equal(workflow.branches.claude.failureReason, "SESSION_END_CANCEL_FAILED");
+      assert.equal(Object.hasOwn(workflow.branches.claude, "attemptReservation"), false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
   it("SessionEnd keeps peer work cancel_failed when its linked process cannot be cancelled", async (t) => {
     if (process.platform !== "darwin") {
       t.skip("Darwin ps identity lookup behavior");

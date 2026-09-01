@@ -313,6 +313,58 @@ describe("bounded peer recovery", () => {
     assert.ok(reconciled.retryTargets.some(({ branchId }) => branchId === "claude"));
   });
 
+  it("terminalizes the current linked cancel_failed job from every retryable Claude state", () => {
+    for (const initialStatus of ["pending", "retryable_failed"]) {
+      const repo = createRepo();
+      const reservation = createPeer(repo, `workflow-current-cancel-failed-${initialStatus}`);
+      let workflow = reservation.workflow;
+      if (initialStatus === "retryable_failed") {
+        const lease = reservation.leases["branch:claude"];
+        workflow = activate(repo, workflow, "memo", "claude", lease);
+        workflow = workflows.markWorkflowBranchFailure(repo, workflow.id, {
+          revision: workflow.revision,
+          epoch: workflow.epoch,
+          stage: "memo",
+          branchId: "claude",
+          lease,
+          reason: "CLAUDE_WORKER_FAILED",
+        });
+      }
+
+      const reconciled = workflows.reconcilePeerRetry(repo, workflow.id, {
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+      }, [
+        {
+          id: `older-active-${initialStatus}`,
+          workflowId: workflow.id,
+          workflowStage: "memo",
+          status: "running",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          id: `current-cancel-failed-${initialStatus}`,
+          workflowId: workflow.id,
+          workflowStage: "memo",
+          status: "cancel_failed",
+          createdAt: "2026-01-01T00:01:00.000Z",
+        },
+      ]);
+      const context = workflows.getWorkflowRetryContext(repo, workflow.id);
+
+      assert.equal(reconciled.workflow.status, "cancel_failed", initialStatus);
+      assert.equal(reconciled.workflow.branches.claude.status, "cancel_failed", initialStatus);
+      assert.equal(reconciled.workflow.branches.claude.failureReason, "CANCEL_FAILED", initialStatus);
+      assert.equal(
+        Object.hasOwn(reconciled.workflow.branches.claude, "attemptReservation"),
+        false,
+        initialStatus
+      );
+      assert.deepEqual(reconciled.retryTargets, [], initialStatus);
+      assert.equal(context.hasRetryWork, false, initialStatus);
+    }
+  });
+
   it("keeps cancel_failed terminal and exposes no retry targets", () => {
     const repo = createRepo();
     const reservation = createPeer(repo, "workflow-cancel-failed-terminal");

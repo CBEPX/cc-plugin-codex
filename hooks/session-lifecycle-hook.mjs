@@ -305,6 +305,10 @@ function linkedCancellationUnresolved(jobs) {
   );
 }
 
+function hasUnfinishedAttempt(target) {
+  return target?.status === "running" || Boolean(target?.attemptReservation);
+}
+
 function reserveSessionWorkflows(
   workspaceRoot,
   sessionId,
@@ -315,19 +319,19 @@ function reserveSessionWorkflows(
   const reservations = [];
   for (const listed of listWorkflows(workspaceRoot)) {
     if (listed.currentOwnerSessionId !== sessionId) continue;
-    const hasUnfinishedAttempt = [
+    const hasUnfinishedWorkflowAttempt = [
       ...Object.entries(listed.branches ?? {}).flatMap(([branchId, branch]) =>
-        (branch.status === "running" || branch.attemptReservation)
+        hasUnfinishedAttempt(branch)
           ? [{ stage: branch.stage ?? "memo", branchId }]
           : []
       ),
       ...Object.entries(listed.stages ?? {}).flatMap(([stage, state]) =>
-        (state.status === "running" || state.attemptReservation)
+        hasUnfinishedAttempt(state)
           ? [{ stage, branchId: null }]
           : []
       ),
     ].length > 0;
-    if (!hasUnfinishedAttempt || remainingCleanupMs(cleanupDeadlineAt) < 1) continue;
+    if (!hasUnfinishedWorkflowAttempt || remainingCleanupMs(cleanupDeadlineAt) < 1) continue;
     try {
       reservations.push(reserveWorkflowCancellation(workspaceRoot, listed.id, {
         revision: listed.revision,
@@ -354,12 +358,12 @@ function finalizeSessionWorkflows(
     });
     const cancelFailedTargets = [
       ...Object.entries(current.branches ?? {}).flatMap(([branchId, branch]) =>
-        branch.status === "running" && linkedCancellationUnresolved(
+        hasUnfinishedAttempt(branch) && linkedCancellationUnresolved(
           targetLinkedJobs(current, { stage: branch.stage ?? "memo", branchId }, sessionJobs)
         ) ? [`branch:${branchId}`] : []
       ),
       ...Object.entries(current.stages ?? {}).flatMap(([stage, state]) =>
-        state.status === "running" && linkedCancellationUnresolved(
+        hasUnfinishedAttempt(state) && linkedCancellationUnresolved(
           targetLinkedJobs(current, { stage, branchId: null }, sessionJobs)
         ) ? [`stage:${stage}`] : []
       ),

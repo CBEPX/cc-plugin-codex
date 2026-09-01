@@ -919,15 +919,14 @@ export function reconcilePeerRetry(cwd, workflowId, options, linkedJobs = []) {
     !latestClaudeJob.reapedBy &&
     latestClaudeJob.reapedUnverifiable !== true
   );
-  const claudeCancellationFailed =
-    !activeClaudeWaiter && latestClaudeJob?.status === "cancel_failed";
+  const claudeCancellationFailed = latestClaudeJob?.status === "cancel_failed";
   const preserveClaudeWaiter = Boolean(
     workflow.branches?.claude?.status === "running" &&
     workflow.branches.claude.commitment &&
     activeClaudeWaiter
   );
   /** @type {Array<{stage: string, branchId?: string}>} */
-  const runningTargets = [
+  const invalidatedTargets = [
     ...Object.entries(workflow.branches ?? {}).flatMap(([branchId, state]) =>
       state.status === "running" && !(branchId === "claude" && preserveClaudeWaiter)
         ? [{ stage: state.stage ?? "memo", branchId }]
@@ -937,40 +936,51 @@ export function reconcilePeerRetry(cwd, workflowId, options, linkedJobs = []) {
       state.status === "running" ? [{ stage }] : []
     ),
   ];
-  if (runningTargets.length > 0) {
+  if (
+    claudeCancellationFailed &&
+    workflow.branches?.claude &&
+    !["running", "completed", "cancel_failed"].includes(workflow.branches.claude.status)
+  ) {
+    invalidatedTargets.push({ stage: workflow.branches.claude.stage ?? "memo", branchId: "claude" });
+  }
+  if (invalidatedTargets.length > 0 || claudeCancellationFailed) {
     workflow = mutateWorkflow(cwd, workflowId, options, (current, timestamp) => {
       let next = current;
-      let cancellationFailed = false;
-      for (const { stage, branchId } of runningTargets) {
+      for (const { stage, branchId } of invalidatedTargets) {
         const target = targetState(next, stage, branchId);
         const cancelFailed = branchId === "claude" && claudeCancellationFailed;
-        cancellationFailed ||= cancelFailed;
         const status = cancelFailed ? "cancel_failed" : "retryable_failed";
         const failureReason = cancelFailed ? "CANCEL_FAILED" : "EXPLICIT_RETRY";
+        const branchAttempts = target.state.status === "running"
+          ? appendBranchAttempt(
+              next,
+              target,
+              "failed",
+              status,
+              timestamp,
+              { failureReason }
+            )
+          : next.branchAttempts;
         next = {
           ...updateTarget(
             next,
             target,
             invalidatedTargetState(target.state, status, failureReason, timestamp)
           ),
-          branchAttempts: appendBranchAttempt(
-            next,
-            target,
-            "failed",
-            status,
-            timestamp,
-            { failureReason }
-          ),
+          branchAttempts,
         };
       }
       return {
         ...next,
-        status: cancellationFailed ? "cancel_failed" : "incomplete",
-        phase: cancellationFailed ? "cancel_failed" : current.phase,
-        failureReason: cancellationFailed ? "CANCEL_FAILED" : "EXPLICIT_RETRY",
-        ...(cancellationFailed ? {} : enterIncomplete(current)),
+        status: claudeCancellationFailed ? "cancel_failed" : "incomplete",
+        phase: claudeCancellationFailed ? "cancel_failed" : current.phase,
+        failureReason: claudeCancellationFailed ? "CANCEL_FAILED" : "EXPLICIT_RETRY",
+        ...(claudeCancellationFailed ? {} : enterIncomplete(current)),
       };
     });
+  }
+  if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+    return { workflow, retryTargets: [] };
   }
   const retryable = (target) => ["pending", "retryable_failed"].includes(target?.status);
   /** @type {Array<{stage: string, branchId?: string}>} */

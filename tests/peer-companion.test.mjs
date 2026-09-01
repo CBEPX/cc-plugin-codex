@@ -280,6 +280,16 @@ function readPeerJobs(testEnv, workflowId) {
     .filter((job) => job.workflowId === workflowId);
 }
 
+function writePeerJob(testEnv, job) {
+  const jobsDir = path.join(peerStateDir(testEnv), "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(jobsDir, `${job.id}.json`),
+    `${JSON.stringify(job, null, 2)}\n`,
+    "utf8"
+  );
+}
+
 function createPeer(testEnv, extra = []) {
   return runJson(testEnv, [
     "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
@@ -525,6 +535,33 @@ describe("peer companion with fake Claude", () => {
     const stored = readWorkflow(testEnv, created.workflow.id);
     assert.equal(stored.branches.codex.status, "completed");
     assert.equal(stored.branches.claude.status, "completed");
+  });
+
+  it("returns no retry plan when the current linked Claude job is cancel_failed", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const timestamp = new Date().toISOString();
+    writePeerJob(testEnv, {
+      id: "current-peer-cancel-failed",
+      status: "cancel_failed",
+      phase: "cancel_failed",
+      sessionId: "owner-a",
+      workspaceRoot: fs.realpathSync.native(testEnv.workspaceDir),
+      workflowId: created.workflow.id,
+      workflowStage: "memo",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const retry = runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--retry", "--owner-session-id", "owner-a", "--json",
+    ]);
+
+    assert.equal(retry.workflow.status, "cancel_failed");
+    assert.deepEqual(retry.work, []);
+    assert.deepEqual(retry.spawnPlan, []);
+    assert.equal(readWorkflow(testEnv, created.workflow.id).status, "cancel_failed");
   });
 
   it("revalidates only MCP servers represented in the frozen selection", () => {
