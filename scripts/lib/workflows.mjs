@@ -265,6 +265,43 @@ function assertCas(workflow, options) {
   }
 }
 
+function leaseDigest(lease) {
+  return createHash("sha256").update(String(lease ?? ""), "utf8").digest("hex");
+}
+
+function newLease() {
+  return randomBytes(32).toString("hex");
+}
+
+function withAttemptLease(workflow, lease) {
+  Object.defineProperty(workflow, "attemptLease", {
+    value: lease,
+    enumerable: false,
+  });
+  return workflow;
+}
+
+function assertAttemptFence(workflow, target, options) {
+  if (
+    target.state.attemptEpoch !== workflow.epoch ||
+    typeof options.lease !== "string" ||
+    target.state.leaseDigest !== leaseDigest(options.lease)
+  ) {
+    throw workflowError("STALE_ATTEMPT", `${target.key} attempt lease is stale.`);
+  }
+}
+
+function payloadCommitment(payload) {
+  return createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+}
+
+function enterIncomplete(workflow) {
+  return {
+    incompleteGeneration:
+      (workflow.incompleteGeneration ?? 0) + (workflow.status === "incomplete" ? 0 : 1),
+  };
+}
+
 function mutateWorkflow(cwd, workflowId, options, reducer) {
   const workspaceRoot = canonicalWorkspaceRoot(cwd);
   const filePath = resolveWorkflowFile(workspaceRoot, workflowId);
@@ -365,6 +402,7 @@ function workflowSafetyViolation(workflow, target, timestamp, fingerprint) {
     status: "incomplete",
     phase: target.stage,
     failureReason: "SAFETY_VIOLATION",
+    ...enterIncomplete(workflow),
     branchAttempts: appendBranchAttempt(
       workflow,
       target,
@@ -497,6 +535,7 @@ export function listWorkflows(cwd, options = {}) {
 
 export function casStartWorkflowStage(cwd, workflowId, options) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
+  const lease = newLease();
   let drifted = false;
   const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
     if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
@@ -509,6 +548,7 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
         status: "incomplete",
         phase: options.stage,
         failureReason: "STALE_WORKSPACE",
+        ...enterIncomplete(workflow),
       };
     }
     const target = targetState(workflow, options.stage, options.branchId);
@@ -527,6 +567,9 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
       failureReason: null,
       startedAt: timestamp,
       startFingerprint: currentFingerprint,
+      attemptEpoch: workflow.epoch,
+      leaseDigest: leaseDigest(lease),
+      commitment: null,
     };
     return {
       ...updateTarget(workflow, target, startedState),
@@ -547,10 +590,10 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
   if (drifted) {
     throw workflowError("STALE_WORKSPACE", "Workspace changed before continuation.", next);
   }
-  return next;
+  return withAttemptLease(next, lease);
 }
 
-export function submitWorkflowStage(cwd, workflowId, options) {
+function completeWorkflowStage(cwd, workflowId, options, reveal) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
   const payload = assertJsonObject(options.payload, "Stage payload");
   if (options.field && !TOP_LEVEL_PAYLOAD_FIELDS.has(options.field)) {
@@ -570,6 +613,14 @@ export function submitWorkflowStage(cwd, workflowId, options) {
     }
     if (target.state.status !== "running") {
       throw workflowError("STAGE_NOT_RUNNING", `${target.key} is not running.`);
+    }
+    assertAttemptFence(workflow, target, options);
+    if (reveal) {
+      if (!target.state.commitment || target.state.commitment !== payloadCommitment(payload)) {
+        throw workflowError("COMMITMENT_MISMATCH", `${target.key} payload does not match its commitment.`);
+      }
+    } else if (target.state.commitment) {
+      throw workflowError("STAGE_REVEAL_REQUIRED", `${target.key} requires the trusted reveal path.`);
     }
     if (!sameFingerprint(target.state.startFingerprint, currentFingerprint)) {
       violated = true;
@@ -619,6 +670,59 @@ export function submitWorkflowStage(cwd, workflowId, options) {
   return next;
 }
 
+export function submitWorkflowStage(cwd, workflowId, options) {
+  return completeWorkflowStage(cwd, workflowId, options, false);
+}
+
+export function commitWorkflowStage(cwd, workflowId, options) {
+  const payload = assertJsonObject(options.payload, "Stage payload");
+  const currentFingerprint = getWorkingTreeFingerprint(cwd);
+  let violated = false;
+  const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+    }
+    const target = targetState(workflow, options.stage, options.branchId);
+    if (target.state.status !== "running") {
+      throw workflowError("STAGE_NOT_RUNNING", `${target.key} is not running.`);
+    }
+    assertAttemptFence(workflow, target, options);
+    if (target.state.commitment) {
+      throw workflowError("ATTEMPT_ALREADY_COMMITTED", `${target.key} is already committed.`);
+    }
+    if (
+      workflow.claudeSessionId &&
+      options.claudeSessionId &&
+      workflow.claudeSessionId !== options.claudeSessionId
+    ) {
+      throw workflowError(
+        "CLAUDE_SESSION_MISMATCH",
+        `Workflow ${workflow.id} already owns another Claude session.`
+      );
+    }
+    if (!sameFingerprint(target.state.startFingerprint, currentFingerprint)) {
+      violated = true;
+      return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
+    }
+    return {
+      ...updateTarget(workflow, target, {
+        ...target.state,
+        commitment: payloadCommitment(payload),
+        committedAt: timestamp,
+      }),
+      ...(options.claudeSessionId ? { claudeSessionId: options.claudeSessionId } : {}),
+    };
+  });
+  if (violated) {
+    throw workflowError("SAFETY_VIOLATION", "Workspace changed while a worker was running.", next);
+  }
+  return next;
+}
+
+export function revealWorkflowStage(cwd, workflowId, options) {
+  return completeWorkflowStage(cwd, workflowId, options, true);
+}
+
 export function markWorkflowBranchFailure(cwd, workflowId, options) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
   const status = assertBranchStatus(options.cancelFailed ? "cancel_failed" : "retryable_failed");
@@ -638,6 +742,7 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
     if (target.state.status !== "running") {
       throw workflowError("STAGE_NOT_RUNNING", `${target.key} is not running.`);
     }
+    assertAttemptFence(workflow, target, options);
     if (!sameFingerprint(target.state.startFingerprint, currentFingerprint)) {
       violated = true;
       return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
@@ -653,6 +758,7 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
       status: options.cancelFailed ? "cancel_failed" : "incomplete",
       phase: target.stage,
       failureReason: reason,
+      ...enterIncomplete(workflow),
       branchAttempts: appendBranchAttempt(
         workflow,
         target,
@@ -715,28 +821,116 @@ export function rebindWorkflowOwner(cwd, workflowId, options) {
     options.currentOwnerSessionId,
     "current owner session ID"
   );
-  return mutateWorkflow(cwd, workflowId, options, (workflow) => ({
-    ...workflow,
-    currentOwnerSessionId,
-    epoch: workflow.epoch + 1,
+  return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    let invalidated = false;
+    const invalidate = (items) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
+      if (item.status !== "running") return [key, item];
+      invalidated = true;
+      return [key, {
+        ...item,
+        status: "retryable_failed",
+        failureReason: "OWNER_REBOUND",
+        completedAt: timestamp,
+      }];
+    }));
+    return {
+      ...workflow,
+      currentOwnerSessionId,
+      epoch: workflow.epoch + 1,
+      branches: invalidate(workflow.branches),
+      stages: invalidate(workflow.stages),
+      ...(invalidated ? {
+        status: "incomplete",
+        failureReason: "OWNER_REBOUND",
+        ...enterIncomplete(workflow),
+      } : {}),
+    };
+  });
+}
+
+export function reserveWorkflowCancellation(cwd, workflowId, options) {
+  const lease = newLease();
+  const workflow = mutateWorkflow(cwd, workflowId, options, (current, timestamp) => ({
+    ...current,
+    epoch: current.epoch + 1,
+    cancellation: {
+      leaseDigest: leaseDigest(lease),
+      reservedAt: timestamp,
+    },
   }));
+  return { workflow, lease };
 }
 
 export function completeWorkflowCancellation(cwd, workflowId, options) {
   const failedJobIds = normalizedNames(options.failedJobIds ?? [], "linked job ID");
-  return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => ({
-    ...workflow,
-    status: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
-    phase: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
-    failureReason: failedJobIds.length > 0 ? "CANCEL_FAILED" : null,
-    cancelFailedJobIds: failedJobIds,
-    completedAt: timestamp,
-  }));
+  return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (
+      !workflow.cancellation?.leaseDigest ||
+      typeof options.lease !== "string" ||
+      workflow.cancellation.leaseDigest !== leaseDigest(options.lease)
+    ) {
+      throw workflowError("STALE_CANCELLATION", "Cancellation lease is stale.");
+    }
+    return {
+      ...workflow,
+      status: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
+      phase: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
+      failureReason: failedJobIds.length > 0 ? "CANCEL_FAILED" : null,
+      cancelFailedJobIds: failedJobIds,
+      cancellation: {
+        ...workflow.cancellation,
+        completedAt: timestamp,
+      },
+      completedAt: timestamp,
+    };
+  });
+}
+
+export function completeWorkflowSessionEnd(cwd, workflowId, options) {
+  const cancelFailedTargets = new Set(options.cancelFailedTargets ?? []);
+  return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (
+      !workflow.cancellation?.leaseDigest ||
+      typeof options.lease !== "string" ||
+      workflow.cancellation.leaseDigest !== leaseDigest(options.lease)
+    ) {
+      throw workflowError("STALE_CANCELLATION", "SessionEnd lease is stale.");
+    }
+    let changed = false;
+    let cancellationFailed = false;
+    const finalize = (items, kind) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
+      if (item.status !== "running") return [key, item];
+      changed = true;
+      const failed = cancelFailedTargets.has(`${kind}:${key}`);
+      cancellationFailed ||= failed;
+      return [key, {
+        ...item,
+        status: failed ? "cancel_failed" : "retryable_failed",
+        failureReason: failed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
+        completedAt: timestamp,
+      }];
+    }));
+    return {
+      ...workflow,
+      branches: finalize(workflow.branches, "branch"),
+      stages: finalize(workflow.stages, "stage"),
+      ...(changed ? {
+        status: cancellationFailed ? "cancel_failed" : "incomplete",
+        phase: cancellationFailed ? "cancel_failed" : workflow.phase,
+        failureReason: cancellationFailed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
+        ...(cancellationFailed ? {} : enterIncomplete(workflow)),
+      } : {}),
+      cancellation: {
+        ...workflow.cancellation,
+        completedAt: timestamp,
+      },
+    };
+  });
 }
 
 export function workflowNotificationEvent(workflow) {
   if (workflow.status === "awaiting_user" && workflow.checkpoint) return "checkpoint";
-  if (workflow.status === "incomplete") return "incomplete";
+  if (workflow.status === "incomplete") return `incomplete:${workflow.incompleteGeneration ?? 1}`;
   if (workflow.status === "completed" && workflow.finalResult) return "completed";
   return null;
 }
@@ -745,10 +939,15 @@ export function markWorkflowNotification(cwd, workflowId, options) {
   const event = String(options.event ?? "").trim();
   if (!event) throw workflowError("INVALID_NOTIFICATION_EVENT", "Notification event is required.");
   const field = options.viewed ? "viewedEvents" : "notifiedEvents";
-  return mutateWorkflow(cwd, workflowId, options, (workflow) => ({
-    ...workflow,
-    [field]: [...new Set([...(workflow[field] ?? []), event])],
-  }));
+  return mutateWorkflow(cwd, workflowId, options, (workflow) => {
+    if (workflowNotificationEvent(workflow) !== event) {
+      throw workflowError("STALE_MILESTONE", `Workflow milestone ${event} is no longer current.`);
+    }
+    return {
+      ...workflow,
+      [field]: [...new Set([...(workflow[field] ?? []), event])],
+    };
+  });
 }
 
 export function cleanupOldWorkflows(cwd) {

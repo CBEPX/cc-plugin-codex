@@ -16,7 +16,6 @@
  */
 
 import fs from "node:fs";
-import { createHash } from "node:crypto";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
@@ -43,12 +42,13 @@ import {
 } from "../scripts/lib/session-cleanup.mjs";
 import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 import { TRANSCRIPT_PATH_ENV } from "../scripts/lib/claude-session-transfer.mjs";
-import { resolvePluginStateRoot } from "../scripts/lib/codex-paths.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 import {
+  completeWorkflowSessionEnd,
   listWorkflows,
-  markWorkflowBranchFailure,
   readWorkflow,
+  reserveWorkflowCancellation,
+  resolveWorkflowsDir,
 } from "../scripts/lib/workflows.mjs";
 
 export { SESSION_ID_ENV };
@@ -305,33 +305,17 @@ function linkedCancellationUnresolved(jobs) {
   );
 }
 
-function markSessionWorkflowsAfterCleanup(
+function reserveSessionWorkflows(
   workspaceRoot,
   sessionId,
-  sessionJobs,
   cleanupDeadlineAt
 ) {
-  const canonicalRoot = (() => {
-    try {
-      return fs.realpathSync.native(workspaceRoot);
-    } catch {
-      return path.resolve(workspaceRoot);
-    }
-  })();
-  const workspaceHash = createHash("sha256")
-    .update(canonicalRoot)
-    .digest("hex")
-    .slice(0, 12);
-  const workflowsDir = path.join(
-    resolvePluginStateRoot(),
-    workspaceHash,
-    "workflows"
-  );
-  if (!fs.existsSync(workflowsDir)) return;
-
+  const workflowsDir = resolveWorkflowsDir(workspaceRoot);
+  if (!fs.existsSync(workflowsDir)) return [];
+  const reservations = [];
   for (const listed of listWorkflows(workspaceRoot)) {
     if (listed.currentOwnerSessionId !== sessionId) continue;
-    const targets = [
+    const hasRunningTarget = [
       ...Object.entries(listed.branches ?? {}).flatMap(([branchId, branch]) =>
         branch.status === "running"
           ? [{ stage: branch.stage ?? "memo", branchId }]
@@ -340,29 +324,60 @@ function markSessionWorkflowsAfterCleanup(
       ...Object.entries(listed.stages ?? {}).flatMap(([stage, state]) =>
         state.status === "running" ? [{ stage, branchId: null }] : []
       ),
+    ].length > 0;
+    if (!hasRunningTarget || remainingCleanupMs(cleanupDeadlineAt) < 1) continue;
+    try {
+      reservations.push(reserveWorkflowCancellation(workspaceRoot, listed.id, {
+        revision: listed.revision,
+        epoch: listed.epoch,
+        mode: listed.mode,
+      }));
+    } catch (error) {
+      reportLifecycleFailure("SessionEnd workflow reservation", error);
+    }
+  }
+  return reservations;
+}
+
+function finalizeSessionWorkflows(
+  workspaceRoot,
+  reservations,
+  sessionJobs,
+  cleanupDeadlineAt
+) {
+  for (const reservation of reservations) {
+    if (remainingCleanupMs(cleanupDeadlineAt) < 1) return;
+    let current = readWorkflow(workspaceRoot, reservation.workflow.id, {
+      mode: reservation.workflow.mode,
+    });
+    const cancelFailedTargets = [
+      ...Object.entries(current.branches ?? {}).flatMap(([branchId, branch]) =>
+        branch.status === "running" && linkedCancellationUnresolved(
+          targetLinkedJobs(current, { stage: branch.stage ?? "memo", branchId }, sessionJobs)
+        ) ? [`branch:${branchId}`] : []
+      ),
+      ...Object.entries(current.stages ?? {}).flatMap(([stage, state]) =>
+        state.status === "running" && linkedCancellationUnresolved(
+          targetLinkedJobs(current, { stage, branchId: null }, sessionJobs)
+        ) ? [`stage:${stage}`] : []
+      ),
     ];
-    for (const target of targets) {
-      if (remainingCleanupMs(cleanupDeadlineAt) < 1) return;
-      const current = readWorkflow(workspaceRoot, listed.id, { mode: listed.mode });
-      const state = target.branchId
-        ? current?.branches?.[target.branchId]
-        : current?.stages?.[target.stage];
-      if (!current || state?.status !== "running") continue;
-      const cancellationFailed = linkedCancellationUnresolved(
-        targetLinkedJobs(current, target, sessionJobs)
-      );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        markWorkflowBranchFailure(workspaceRoot, current.id, {
-          stage: target.stage,
-          ...(target.branchId ? { branchId: target.branchId } : {}),
+        completeWorkflowSessionEnd(workspaceRoot, current.id, {
           revision: current.revision,
-          epoch: current.epoch,
+          epoch: reservation.workflow.epoch,
+          lease: reservation.lease,
           mode: current.mode,
-          reason: cancellationFailed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
-          cancelFailed: cancellationFailed,
+          cancelFailedTargets,
         });
+        break;
       } catch (error) {
-        reportLifecycleFailure("SessionEnd workflow", error);
+        if (error?.code !== "STALE_REVISION") {
+          reportLifecycleFailure("SessionEnd workflow", error);
+          break;
+        }
+        current = readWorkflow(workspaceRoot, current.id, { mode: current.mode });
       }
     }
   }
@@ -465,15 +480,20 @@ function handleSessionEnd(input) {
           (ACTIVE_JOB_STATUSES.has(job.status) ||
             isRetryableCancelFailure(job))
       );
+      const workflowReservations = reserveSessionWorkflows(
+        workspaceRoot,
+        sessionId,
+        cleanupDeadlineAt
+      );
       const cleanup = cleanupSessionJobs(
         workspaceRoot,
         sessionJobs,
         "the Codex session ended",
         cleanupDeadlineAt
       );
-      markSessionWorkflowsAfterCleanup(
+      finalizeSessionWorkflows(
         workspaceRoot,
-        sessionId,
+        workflowReservations,
         cleanup.jobs,
         cleanupDeadlineAt
       );

@@ -12,6 +12,8 @@ Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the 
 
 Supported arguments: `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
+The diagnostic actively starts/probes every configured MCP server in scope (or sends HTTP initialize and tool-list requests). Treat discovery as potentially side-effecting even though the plugin applies an absolute per-server deadline and never persists raw configuration.
+
 Output:
 - Present the companion stdout exactly as returned.
 - Do not print raw MCP server configs or secrets.

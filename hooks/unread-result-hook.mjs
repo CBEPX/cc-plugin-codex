@@ -143,7 +143,7 @@ function markWorkflowsNotified(workspaceRoot, workflows) {
         claimed.push({ workflow: updated, event });
         break;
       } catch (error) {
-        if (error?.code !== "STALE_REVISION" && error?.code !== "STALE_EPOCH") break;
+        if (error?.code !== "STALE_REVISION") break;
         try {
           current = readWorkflow(workspaceRoot, current.id);
         } catch {

@@ -145,6 +145,7 @@ import {
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
   casStartWorkflowStage,
+  commitWorkflowStage,
   completeWorkflowCancellation,
   getWorkflowRetryContext,
   listWorkflows,
@@ -152,7 +153,9 @@ import {
   markWorkflowBranchFailure,
   readWorkflow,
   rebindWorkflowOwner,
+  reserveWorkflowCancellation,
   reserveWorkflow,
+  revealWorkflowStage,
   submitWorkflowStage,
   workflowNotificationEvent,
 } from "./lib/workflows.mjs";
@@ -210,13 +213,13 @@ function printUsage() {
       "  node scripts/claude-companion.mjs workflow-rebind <workflow-id> --revision <n> --epoch <n> --owner-session-id <id> [--json]",
       "  node scripts/claude-companion.mjs workflow-cancel-linked-jobs <workflow-id> --revision <n> --epoch <n> [--json]",
       "  node scripts/claude-companion.mjs peer-create --mode <design|research> [peer options] <brief>",
-      "  node scripts/claude-companion.mjs peer-submit-memo <workflow-id> --branch codex --brief-hash <hash> < memo.json",
-      "  node scripts/claude-companion.mjs peer-claude-turn <workflow-id> --brief-hash <hash>",
+      "  node scripts/claude-companion.mjs peer-submit-memo <workflow-id> --branch codex --brief-hash <hash> --epoch <n> < memo.json",
+      "  node scripts/claude-companion.mjs peer-claude-turn <workflow-id> --brief-hash <hash> --epoch <n>",
       "  node scripts/claude-companion.mjs peer-wait <workflow-id> [--mode <design|research>] [--json]",
-      "  node scripts/claude-companion.mjs peer-checkpoint <workflow-id> --brief-hash <hash> < comparison.json",
+      "  node scripts/claude-companion.mjs peer-checkpoint <workflow-id> --brief-hash <hash> --epoch <n> < comparison.json",
       "  node scripts/claude-companion.mjs peer-resume-plan <workflow-id> --continue|--retry --owner-session-id <id>",
-      "  node scripts/claude-companion.mjs peer-claude-critique <workflow-id> --brief-hash <hash>",
-      "  node scripts/claude-companion.mjs peer-final <workflow-id> --brief-hash <hash> < result.json"
+      "  node scripts/claude-companion.mjs peer-claude-critique <workflow-id> --brief-hash <hash> --epoch <n>",
+      "  node scripts/claude-companion.mjs peer-final <workflow-id> --brief-hash <hash> --epoch <n> < result.json"
     ].join("\n")
   );
 }
@@ -3099,23 +3102,33 @@ function withLatestWorkflow(cwd, workflowId, run) {
     try {
       return run(workflow);
     } catch (error) {
-      if (error?.code !== "STALE_REVISION" && error?.code !== "STALE_EPOCH") throw error;
+      if (error?.code !== "STALE_REVISION") throw error;
       lastError = error;
     }
   }
   throw lastError ?? new Error("STALE_REVISION: Peer workflow remained busy.");
 }
 
-function startPeerTarget(cwd, workflowId, stage, branchId = null) {
-  return withLatestWorkflow(cwd, workflowId, (workflow) =>
-    casStartWorkflowStage(cwd, workflowId, {
+function assertPeerEpoch(workflow, expectedEpoch) {
+  if (workflow.epoch !== expectedEpoch) {
+    throw Object.assign(
+      new Error(`STALE_EPOCH: Expected epoch ${expectedEpoch}, found ${workflow.epoch}.`),
+      { code: "STALE_EPOCH" }
+    );
+  }
+}
+
+function startPeerTarget(cwd, workflowId, stage, branchId = null, expectedEpoch) {
+  return withLatestWorkflow(cwd, workflowId, (workflow) => {
+    assertPeerEpoch(workflow, expectedEpoch);
+    return casStartWorkflowStage(cwd, workflowId, {
       stage,
       ...(branchId ? { branchId } : {}),
       revision: workflow.revision,
-      epoch: workflow.epoch,
+      epoch: expectedEpoch,
       mode: workflow.mode,
-    })
-  );
+    });
+  });
 }
 
 function submitPeerTarget(cwd, workflowId, options) {
@@ -3123,7 +3136,29 @@ function submitPeerTarget(cwd, workflowId, options) {
     submitWorkflowStage(cwd, workflowId, {
       ...options,
       revision: workflow.revision,
-      epoch: workflow.epoch,
+      epoch: options.epoch,
+      mode: workflow.mode,
+    })
+  );
+}
+
+function commitPeerTarget(cwd, workflowId, options) {
+  return withLatestWorkflow(cwd, workflowId, (workflow) =>
+    commitWorkflowStage(cwd, workflowId, {
+      ...options,
+      revision: workflow.revision,
+      epoch: options.epoch,
+      mode: workflow.mode,
+    })
+  );
+}
+
+function revealPeerTarget(cwd, workflowId, options) {
+  return withLatestWorkflow(cwd, workflowId, (workflow) =>
+    revealWorkflowStage(cwd, workflowId, {
+      ...options,
+      revision: workflow.revision,
+      epoch: options.epoch,
       mode: workflow.mode,
     })
   );
@@ -3134,7 +3169,7 @@ function failPeerTarget(cwd, workflowId, options) {
     markWorkflowBranchFailure(cwd, workflowId, {
       ...options,
       revision: workflow.revision,
-      epoch: workflow.epoch,
+      epoch: options.epoch,
       mode: workflow.mode,
     })
   );
@@ -3142,7 +3177,20 @@ function failPeerTarget(cwd, workflowId, options) {
 
 function validatePeerSelection(discovery, workflow) {
   const expected = workflow.toolManifest ?? [];
-  const probeResultPromise = probeMcpCapabilities(discovery);
+  const availableNames = Object.keys(discovery.available);
+  const selectedServerNames = new Set(expected.map(({ toolId }) =>
+    parseMcpToolId(toolId, availableNames).serverName
+  ));
+  const selectedDiscovery = {
+    ...discovery,
+    available: Object.fromEntries(Object.entries(discovery.available)
+      .filter(([name]) => selectedServerNames.has(name))),
+    sources: Object.fromEntries(Object.entries(discovery.sources)
+      .filter(([name]) => selectedServerNames.has(name))),
+    sourceDetails: Object.fromEntries(Object.entries(discovery.sourceDetails)
+      .filter(([name]) => selectedServerNames.has(name))),
+  };
+  const probeResultPromise = probeMcpCapabilities(selectedDiscovery);
   return probeResultPromise.then((probeResult) => {
     const selection = selectMcpCapabilities(probeResult, {
       explicitTools: expected.map(({ toolId }) => toolId),
@@ -3162,9 +3210,53 @@ function validatePeerSelection(discovery, workflow) {
     }
     return {
       selection,
-      servers: buildSelectedMcpServers(discovery, selection),
+      servers: buildSelectedMcpServers(selectedDiscovery, selection),
     };
   });
+}
+
+async function waitForCodexMemo(cwd, workflowId, expectedEpoch) {
+  while (true) {
+    const workflow = readPeerWorkflow(cwd, workflowId);
+    assertPeerEpoch(workflow, expectedEpoch);
+    const view = buildPeerWaitView(workflow);
+    if (view.branches.codex.status === "completed") return;
+    if (["retryable_failed", "cancel_failed"].includes(view.branches.codex.status)) {
+      throw new Error("PEER_SIBLING_FAILED: Codex memo did not seal.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function failPeerAttempt(cwd, workflowId, target, fence, error) {
+  try {
+    if (targetStatus(readPeerWorkflow(cwd, workflowId), target.stage, target.branchId) === "running") {
+      failPeerTarget(cwd, workflowId, {
+        stage: target.stage,
+        ...(target.branchId ? { branchId: target.branchId } : {}),
+        epoch: fence.epoch,
+        lease: fence.lease,
+        reason: error?.code ?? (String(error?.message ?? error).split(":", 1)[0] || "PEER_TURN_FAILED"),
+      });
+    }
+  } catch {}
+}
+
+function startAndSubmitPeerTarget(cwd, workflowId, options) {
+  const started = startPeerTarget(
+    cwd,
+    workflowId,
+    options.stage,
+    options.branchId,
+    options.expectedEpoch
+  );
+  const fence = { epoch: started.epoch, lease: started.attemptLease };
+  try {
+    return submitPeerTarget(cwd, workflowId, { ...options, ...fence });
+  } catch (error) {
+    failPeerAttempt(cwd, workflowId, options, fence, error);
+    throw error;
+  }
 }
 
 function parsePeerClaudePayload(result, label) {
@@ -3237,7 +3329,8 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
   const critique = Boolean(options.critique);
   const stage = critique ? "critique" : "memo";
   const branchId = critique ? null : "claude";
-  workflow = startPeerTarget(cwd, workflowId, stage, branchId);
+  workflow = startPeerTarget(cwd, workflowId, stage, branchId, options.expectedEpoch);
+  const fence = { epoch: workflow.epoch, lease: workflow.attemptLease };
   let sandboxSettingsFile = null;
   let mcpConfigFile = null;
   try {
@@ -3301,14 +3394,33 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
           toolEvents: result.toolUses,
           model,
         });
-    const submitted = submitPeerTarget(cwd, workflowId, {
-      stage,
-      ...(branchId ? { branchId } : {}),
-      payload,
-      ...(critique ? { field: "critique", status: "running", phase: "synthesis" } : {
+    let submitted;
+    if (critique) {
+      submitted = submitPeerTarget(cwd, workflowId, {
+        stage,
+        payload,
+        field: "critique",
+        status: "running",
+        phase: "synthesis",
+        ...fence,
+      });
+    } else {
+      commitPeerTarget(cwd, workflowId, {
+        stage,
+        branchId,
+        payload,
         claudeSessionId: result.sessionId,
-      }),
-    });
+        ...fence,
+      });
+      await waitForCodexMemo(cwd, workflowId, fence.epoch);
+      submitted = revealPeerTarget(cwd, workflowId, {
+        stage,
+        branchId,
+        payload,
+        claudeSessionId: result.sessionId,
+        ...fence,
+      });
+    }
     return {
       status: "completed",
       branch: branchId,
@@ -3317,15 +3429,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       workflow: submitted,
     };
   } catch (error) {
-    try {
-      if (targetStatus(readPeerWorkflow(cwd, workflowId), stage, branchId) === "running") {
-        failPeerTarget(cwd, workflowId, {
-          stage,
-          ...(branchId ? { branchId } : {}),
-          reason: error?.code ?? (String(error?.message ?? error).split(":", 1)[0] || "PEER_TURN_FAILED"),
-        });
-      }
-    } catch {}
+    failPeerAttempt(cwd, workflowId, { stage, branchId }, fence, error);
     throw error;
   } finally {
     cleanupSandboxSettings(sandboxSettingsFile);
@@ -3401,7 +3505,7 @@ async function handlePeerCreate(argv) {
 
 function handlePeerSubmitMemo(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "branch", "brief-hash"],
+    valueOptions: ["cwd", "branch", "brief-hash", "epoch"],
     booleanOptions: ["json"],
   });
   const cwd = resolveCommandCwd(options);
@@ -3413,34 +3517,36 @@ function handlePeerSubmitMemo(argv) {
       "CODEX_MEMO_ONLY: peer-submit-memo accepts only the Codex worker memo; Claude submission is internal."
     );
   }
+  const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
+  assertPeerEpoch(workflow, expectedEpoch);
   const rawMemo = readJsonStdin("Peer memo");
-  startPeerTarget(cwd, workflowId, "memo", branch);
+  const started = startPeerTarget(cwd, workflowId, "memo", branch, expectedEpoch);
+  const fence = { epoch: started.epoch, lease: started.attemptLease };
   try {
     const memo = validatePeerMemo(workflow, rawMemo, { role: branch });
     const submitted = submitPeerTarget(cwd, workflowId, {
       stage: "memo",
       branchId: branch,
       payload: memo,
+      ...fence,
     });
     outputResult({ branch, memo, workflow: submitted }, options.json);
   } catch (error) {
-    failPeerTarget(cwd, workflowId, {
-      stage: "memo",
-      branchId: branch,
-      reason: error?.code ?? "EVIDENCE_INCOMPLETE",
-    });
+    failPeerAttempt(cwd, workflowId, { stage: "memo", branchId: branch }, fence, error);
     throw error;
   }
 }
 
 async function handlePeerClaudeTurn(argv, critique = false) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode", "brief-hash"],
+    valueOptions: ["cwd", "mode", "brief-hash", "epoch"],
     booleanOptions: ["json"],
   });
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
   const workflow = readPeerWorkflow(cwd, workflowId, options.mode, options["brief-hash"]);
+  const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
+  assertPeerEpoch(workflow, expectedEpoch);
   const workflowStage = critique ? "critique" : "memo";
   const job = createCompanionJob({
     prefix: "peer",
@@ -3460,6 +3566,7 @@ async function handlePeerClaudeTurn(argv, critique = false) {
       const result = await executePeerClaudeTurn(cwd, workflowId, {
         mode: options.mode,
         briefHash: options["brief-hash"],
+        expectedEpoch,
         critique,
         onProgress: progress,
         onSpawn,
@@ -3486,20 +3593,22 @@ async function handlePeerClaudeTurn(argv, critique = false) {
 
 function handlePeerCheckpoint(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode", "brief-hash"],
+    valueOptions: ["cwd", "mode", "brief-hash", "epoch"],
     booleanOptions: ["json"],
   });
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
   const workflow = readPeerWorkflow(cwd, workflowId, options.mode, options["brief-hash"]);
+  const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
+  assertPeerEpoch(workflow, expectedEpoch);
   const checkpoint = buildPeerCheckpoint(workflow, readJsonStdin("Checkpoint comparison"));
-  startPeerTarget(cwd, workflowId, "checkpoint");
-  const submitted = submitPeerTarget(cwd, workflowId, {
+  const submitted = startAndSubmitPeerTarget(cwd, workflowId, {
     stage: "checkpoint",
     payload: checkpoint,
     field: "checkpoint",
     status: "awaiting_user",
     phase: "checkpoint",
+    expectedEpoch,
   });
   outputResult({ checkpoint, workflow: submitted }, options.json);
 }
@@ -3537,13 +3646,13 @@ function handlePeerResumePlan(argv) {
     throw new Error("WORKFLOW_NOT_READY: Complete or retry the initial checkpoint first.");
   }
   const feedback = readJsonStdin("Continuation feedback");
-  startPeerTarget(cwd, workflowId, "feedback");
-  workflow = submitPeerTarget(cwd, workflowId, {
+  workflow = startAndSubmitPeerTarget(cwd, workflowId, {
     stage: "feedback",
     payload: feedback,
     field: "feedback",
     status: "running",
     phase: "critique",
+    expectedEpoch: workflow.epoch,
   });
   outputResult({
     workflow,
@@ -3553,12 +3662,14 @@ function handlePeerResumePlan(argv) {
 
 function handlePeerFinal(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode", "brief-hash"],
+    valueOptions: ["cwd", "mode", "brief-hash", "epoch"],
     booleanOptions: ["json"],
   });
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
   const workflow = readPeerWorkflow(cwd, workflowId, options.mode, options["brief-hash"]);
+  const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
+  assertPeerEpoch(workflow, expectedEpoch);
   if (workflow.stages.critique.status !== "completed") {
     throw new Error("CRITIQUE_INCOMPLETE: Claude critique must be frozen before synthesis.");
   }
@@ -3566,13 +3677,13 @@ function handlePeerFinal(argv) {
   if (Object.keys(result).length === 0) {
     throw new Error("INVALID_STAGE_PAYLOAD: Final synthesis cannot be empty.");
   }
-  startPeerTarget(cwd, workflowId, "synthesis");
-  const submitted = submitPeerTarget(cwd, workflowId, {
+  const submitted = startAndSubmitPeerTarget(cwd, workflowId, {
     stage: "synthesis",
     payload: result,
     field: "finalResult",
     status: "completed",
     phase: "done",
+    expectedEpoch,
   });
   outputResult({ result, workflow: submitted }, options.json);
 }
@@ -3646,16 +3757,13 @@ function workflowMutationOptions(options) {
   };
 }
 
-function rejectPublicPeerClaudeMutation(cwd, workflowId, options) {
+function rejectPublicPeerMutation(cwd, workflowId, options) {
   const workflow = readWorkflow(cwd, workflowId, {
     ...(options.mode ? { mode: options.mode } : {}),
   });
-  if (
-    isPeerWorkflow(workflow) &&
-    (options.branch === "claude" || options.stage === "critique")
-  ) {
+  if (isPeerWorkflow(workflow)) {
     throw new Error(
-      "TRUSTED_CLAUDE_PATH_REQUIRED: Claude peer state is mutable only by the trusted Claude turn."
+      "TRUSTED_PEER_PATH_REQUIRED: Peer workflow state is mutable only by specialized peer commands."
     );
   }
 }
@@ -3667,7 +3775,7 @@ function handleWorkflowStartStage(argv) {
   });
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
-  rejectPublicPeerClaudeMutation(cwd, workflowId, options);
+  rejectPublicPeerMutation(cwd, workflowId, options);
   const workflow = casStartWorkflowStage(
     cwd,
     workflowId,
@@ -3698,12 +3806,21 @@ function handleWorkflowSubmitStage(argv) {
   });
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
-  rejectPublicPeerClaudeMutation(cwd, workflowId, options);
+  rejectPublicPeerMutation(cwd, workflowId, options);
+  const mutation = workflowMutationOptions(options);
+  const started = casStartWorkflowStage(cwd, workflowId, {
+    ...mutation,
+    stage: options.stage,
+    branchId: options.branch,
+  });
   const workflow = submitWorkflowStage(
     cwd,
     workflowId,
     {
-      ...workflowMutationOptions(options),
+      ...mutation,
+      revision: started.revision,
+      epoch: started.epoch,
+      lease: started.attemptLease,
       stage: options.stage,
       branchId: options.branch,
       field: options.field,
@@ -3731,12 +3848,21 @@ function handleWorkflowBranchFailure(argv) {
   });
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
-  rejectPublicPeerClaudeMutation(cwd, workflowId, options);
+  rejectPublicPeerMutation(cwd, workflowId, options);
+  const mutation = workflowMutationOptions(options);
+  const started = casStartWorkflowStage(cwd, workflowId, {
+    ...mutation,
+    stage: options.stage,
+    branchId: options.branch,
+  });
   const workflow = markWorkflowBranchFailure(
     cwd,
     workflowId,
     {
-      ...workflowMutationOptions(options),
+      ...mutation,
+      revision: started.revision,
+      epoch: started.epoch,
+      lease: started.attemptLease,
       stage: options.stage,
       branchId: options.branch,
       reason: options.reason,
@@ -3814,8 +3940,14 @@ async function handleWorkflowCancelLinkedJobs(argv) {
 }
 
 async function cancelWorkflowLinkedJobs(workspaceRoot, current) {
+  const reservation = reserveWorkflowCancellation(workspaceRoot, current.id, {
+    revision: current.revision,
+    epoch: current.epoch,
+    mode: current.mode,
+  });
+  const cancellationEpoch = reservation.workflow.epoch;
   const linkedJobs = listJobs(workspaceRoot).filter(
-    (job) => job.workflowId === current.id &&
+    (job) => job.workflowId === reservation.workflow.id &&
       (ACTIVE_JOB_STATUSES.has(job.status) || job.status === "cancel_failed")
   );
   const cancelledJobIds = [];
@@ -3832,12 +3964,15 @@ async function cancelWorkflowLinkedJobs(workspaceRoot, current) {
       failedJobIds.push(job.id);
     }
   }
-  const workflow = completeWorkflowCancellation(workspaceRoot, current.id, {
-    revision: current.revision,
-    epoch: current.epoch,
-    mode: current.mode,
-    failedJobIds,
-  });
+  const workflow = withLatestWorkflow(workspaceRoot, current.id, (latest) =>
+    completeWorkflowCancellation(workspaceRoot, current.id, {
+      revision: latest.revision,
+      epoch: cancellationEpoch,
+      lease: reservation.lease,
+      mode: current.mode,
+      failedJobIds,
+    })
+  );
   return { targetType: "workflow", workflow, cancelledJobIds, failedJobIds };
 }
 

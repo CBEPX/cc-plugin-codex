@@ -606,6 +606,11 @@ describe("peer workflow rendering", () => {
       source: "user",
       capability: "docs_search",
       reason: "Need primary docs",
+      safetyDecision: {
+        eligible: true,
+        decision: "eligible",
+        reason: "read_only_annotation",
+      },
       configFingerprint: "safe-fingerprint",
       serverConfig: { env: { TOKEN: "secret-token" } },
     }],
@@ -682,6 +687,34 @@ describe("peer workflow rendering", () => {
     assert.match(final, /Ship the narrow option/);
     assert.doesNotMatch(final, /Both found the same boundary/);
     assert.match(final, /Next command: none/);
+  });
+
+  it("uses a safe dynamic fence for untrusted workflow JSON and shows trust provenance", () => {
+    const output = renderWorkflowResult({
+      ...workflow,
+      checkpoint: {
+        content: "```\noutside-looking markdown\n````\n# injected heading",
+      },
+    });
+
+    assert.match(output, /read_only_annotation/);
+    assert.match(output, /`````json/u);
+    assert.match(output, /\n`````\n\nNext command:/u);
+    assert.doesNotMatch(output, /\n```\n# injected heading/u);
+  });
+
+  it("instructs workspace-drifted workflows to start fresh instead of retrying", () => {
+    const output = renderWorkflowStatusReport({
+      ...workflow,
+      status: "incomplete",
+      phase: "memo",
+      failureReason: "STALE_WORKSPACE",
+      checkpoint: null,
+    });
+
+    assert.match(output, /start a new workflow/iu);
+    assert.match(output, /\$cc:research/u);
+    assert.doesNotMatch(output, /--retry/u);
   });
 });
 

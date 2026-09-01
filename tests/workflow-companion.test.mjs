@@ -168,16 +168,12 @@ describe("workflow companion internals", () => {
       "--mode", "design", "--json",
     ]).brief, "Design through stdin.");
 
-    const started = runJson(testEnv, [
-      "workflow-start-stage", "workflow-cli", "--cwd", testEnv.workspaceDir,
-      "--stage", "memo", "--revision", "0", "--epoch", "0", "--mode", "design", "--json",
-    ]);
     const submitted = runJson(
       testEnv,
       [
         "workflow-submit-stage", "workflow-cli", "--cwd", testEnv.workspaceDir,
-        "--stage", "memo", "--revision", String(started.revision),
-        "--epoch", String(started.epoch), "--mode", "design",
+        "--stage", "memo", "--revision", String(created.revision),
+        "--epoch", String(created.epoch), "--mode", "design",
         "--field", "checkpoint", "--claude-session-id", "claude-owned",
         "--status", "awaiting_user", "--json",
       ],
@@ -186,15 +182,10 @@ describe("workflow companion internals", () => {
     assert.deepEqual(submitted.checkpoint, { text: "--cwd is payload, not argv" });
     assert.equal(submitted.claudeSessionId, "claude-owned");
 
-    const critiqueStarted = runJson(testEnv, [
-      "workflow-start-stage", "workflow-cli", "--cwd", testEnv.workspaceDir,
-      "--stage", "critique", "--revision", String(submitted.revision),
-      "--epoch", String(submitted.epoch), "--mode", "design", "--json",
-    ]);
     const critiqueFailed = runJson(testEnv, [
       "workflow-fail-branch", "workflow-cli", "--cwd", testEnv.workspaceDir,
-      "--stage", "critique", "--revision", String(critiqueStarted.revision),
-      "--epoch", String(critiqueStarted.epoch), "--mode", "design",
+      "--stage", "critique", "--revision", String(submitted.revision),
+      "--epoch", String(submitted.epoch), "--mode", "design",
       "--reason", "retry the critique", "--json",
     ]);
     assert.equal(critiqueFailed.stages.critique.status, "retryable_failed");
@@ -389,11 +380,6 @@ describe("workflow companion internals", () => {
         }),
       }
     );
-    workflow = runJson(testEnv, [
-      "workflow-start-stage", workflow.id, "--cwd", testEnv.workspaceDir,
-      "--stage", "memo", "--revision", String(workflow.revision),
-      "--epoch", String(workflow.epoch), "--json",
-    ]);
     workflow = runJson(
       testEnv,
       [

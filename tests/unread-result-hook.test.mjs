@@ -113,6 +113,9 @@ function writeWorkflow(testEnv, overrides = {}) {
     critique: null,
     finalResult: overrides.finalResult ?? null,
     failureReason: overrides.failureReason ?? null,
+    ...(overrides.incompleteGeneration != null
+      ? { incompleteGeneration: overrides.incompleteGeneration }
+      : {}),
     ...(overrides.notifiedEvents ? { notifiedEvents: overrides.notifiedEvents } : {}),
     createdAt: "2026-09-01T10:00:00Z",
     updatedAt: overrides.updatedAt ?? "2026-09-01T10:01:00Z",
@@ -303,6 +306,53 @@ test("announces workflow milestones once and never announces their linked jobs",
     });
     assert.match(completedOutput, /workflow-notify.*completed/);
     assert.deepEqual(readWorkflow(testEnv, workflow.id).notifiedEvents, ["checkpoint", "completed"]);
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("announces every distinct incomplete generation exactly once", () => {
+  const testEnv = createEnv();
+  try {
+    const first = writeWorkflow(testEnv, {
+      id: "workflow-incomplete-notify",
+      status: "incomplete",
+      phase: "memo",
+      checkpoint: null,
+      failureReason: "FIRST_ATTEMPT_FAILED",
+      incompleteGeneration: 1,
+    });
+    const payload = {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue with something else",
+    };
+
+    const firstOutput = runHook(testEnv, payload);
+    assert.match(firstOutput, /workflow-incomplete-notify.*incomplete:1/);
+    const notified = readWorkflow(testEnv, first.id);
+    assert.deepEqual(notified.notifiedEvents, ["incomplete:1"]);
+    assert.equal(runHook(testEnv, payload), "");
+
+    writeWorkflow(testEnv, {
+      id: first.id,
+      status: "incomplete",
+      phase: "memo",
+      revision: notified.revision,
+      checkpoint: null,
+      failureReason: "SECOND_ATTEMPT_FAILED",
+      incompleteGeneration: 2,
+      notifiedEvents: notified.notifiedEvents,
+      updatedAt: "2026-09-01T10:02:00Z",
+    });
+    const secondOutput = runHook(testEnv, payload);
+    assert.match(secondOutput, /workflow-incomplete-notify.*incomplete:2/);
+    assert.deepEqual(
+      readWorkflow(testEnv, first.id).notifiedEvents,
+      ["incomplete:1", "incomplete:2"]
+    );
+    assert.equal(runHook(testEnv, payload), "");
   } finally {
     cleanupEnv(testEnv);
   }

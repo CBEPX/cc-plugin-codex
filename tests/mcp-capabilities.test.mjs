@@ -139,6 +139,20 @@ describe("MCP configuration collection", () => {
 });
 
 describe("MCP capability discovery", () => {
+  it("reports a missing stdio executable without throwing during process cleanup", async () => {
+    const result = await mcp.probeMcpCapabilities({
+      available: {
+        missing: { command: `/definitely-missing-cc-mcp-${process.pid}` },
+      },
+      sources: { missing: "user" },
+      sourceDetails: {},
+    }, { timeoutMs: 100 });
+
+    assert.deepEqual(result.catalog, []);
+    assert.equal(result.diagnostics[0].serverName, "missing");
+    assert.equal(result.diagnostics[0].code, "probe_failed");
+  });
+
   it("probes a real stdio server and normalizes read-only tool metadata", async () => {
     await withTempHome(async ({ homeDir, cwd }) => {
       const serverPath = writeStdioServer(homeDir, {
@@ -616,6 +630,117 @@ describe("MCP capability discovery", () => {
 
       assert.deepEqual(result.catalog, []);
       assert.equal(result.diagnostics[0].code, "probe_timeout");
+    });
+  });
+
+  it("enforces an absolute HTTP deadline against a slow trickle", async () => {
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const server = http.createServer(async (request, response) => {
+        for await (const _chunk of request) {}
+        response.setHeader("content-type", "application/json");
+        const body = JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            protocolVersion: "2024-11-05",
+            capabilities: { tools: {} },
+          },
+        });
+        let index = 0;
+        const timer = setInterval(() => {
+          if (index >= body.length) {
+            clearInterval(timer);
+            response.end();
+            return;
+          }
+          response.write(body[index++]);
+        }, 10);
+        response.once("close", () => clearInterval(timer));
+      });
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+      try {
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({
+          mcpServers: {
+            trickle: { type: "http", url: `http://127.0.0.1:${address.port}/mcp` },
+          },
+        }), "utf8");
+        const startedAt = Date.now();
+        const result = await mcp.probeMcpCapabilities(
+          mcp.collectConfiguredMcpServers(cwd, { homeDir }),
+          { timeoutMs: 80 }
+        );
+        assert.equal(result.diagnostics[0].code, "probe_timeout");
+        assert.ok(Date.now() - startedAt < 500);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+  });
+
+  it("rejects an HTTP response above one MiB without buffering it", async () => {
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const server = http.createServer(async (request, response) => {
+        for await (const _chunk of request) {}
+        response.setHeader("content-type", "application/json");
+        response.end("x".repeat(1024 * 1024 + 1));
+      });
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+      try {
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({
+          mcpServers: {
+            oversized: { type: "http", url: `http://127.0.0.1:${address.port}/mcp` },
+          },
+        }), "utf8");
+        const result = await mcp.probeMcpCapabilities(
+          mcp.collectConfiguredMcpServers(cwd, { homeDir })
+        );
+        assert.deepEqual(result.catalog, []);
+        assert.equal(result.diagnostics[0].code, "response_too_large");
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+  });
+
+  it("escalates and reaps a stdio server that ignores SIGTERM", async () => {
+    if (process.platform === "win32") return;
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const pidFile = path.join(homeDir, "stubborn.pid");
+      const serverPath = path.join(homeDir, "stubborn-server.mjs");
+      fs.writeFileSync(serverPath, [
+        'import fs from "node:fs";',
+        "fs.writeFileSync(process.env.FAKE_MCP_PID_FILE, String(process.pid));",
+        "process.on('SIGTERM', () => {});",
+        "setInterval(() => {}, 1000);",
+      ].join("\n"), "utf8");
+      fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({
+        mcpServers: {
+          stubborn: {
+            command: process.execPath,
+            args: [serverPath],
+            env: { FAKE_MCP_PID_FILE: pidFile },
+          },
+        },
+      }), "utf8");
+
+      const result = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir }),
+        { timeoutMs: 80 }
+      );
+      assert.equal(result.diagnostics[0].code, "probe_timeout");
+      const pid = Number(fs.readFileSync(pidFile, "utf8"));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
     });
   });
 

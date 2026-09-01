@@ -469,6 +469,17 @@ function workflowEvidenceSummary(branch) {
   return `repo=${payload.repoCitations?.length ?? 0}, web=${payload.webCitations?.length ?? 0}, tools=${payload.toolEvents?.length ?? 0}`;
 }
 
+function fencedJson(value) {
+  const json = JSON.stringify(value, null, 2);
+  const longest = Math.max(0, ...[...json.matchAll(/`+/gu)].map(([run]) => run.length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return [
+    `${fence}json`,
+    json,
+    fence,
+  ];
+}
+
 function renderWorkflowDetails(workflow, options = {}) {
   const lines = [
     options.result ? "# Peer Workflow Result" : "# Peer Workflow Status",
@@ -518,23 +529,28 @@ function renderWorkflowDetails(workflow, options = {}) {
 
   const tools = Array.isArray(workflow.toolManifest) ? workflow.toolManifest : [];
   if (tools.length > 0) {
-    lines.push("", "Selected tools:", "", "| Tool | Source | Capability | Reason |", "| --- | --- | --- | --- |");
+    lines.push("", "Selected tools:", "", "| Tool | Source | Capability | Reason | Trust basis |", "| --- | --- | --- | --- | --- |");
     for (const tool of tools) {
       lines.push(`| ${[
         tool.toolId,
         tool.source,
         tool.capability,
         tool.reason,
+        tool.safetyDecision?.reason,
       ].map(escapeMarkdownCell).join(" | ")} |`);
     }
   }
 
   const payload = workflow.finalResult ?? workflow.checkpoint;
   if (payload) {
-    lines.push("", workflow.finalResult ? "Final result:" : "Checkpoint:", "", "```json", JSON.stringify(payload, null, 2), "```");
+    lines.push("", workflow.finalResult ? "Final result:" : "Checkpoint:", "", ...fencedJson(payload));
   }
   const next = workflowNextCommand(workflow);
-  lines.push("", next ? `Next command: \`${next}\`` : "Next command: none");
+  if (workflow.status === "incomplete" && workflow.failureReason === "STALE_WORKSPACE") {
+    lines.push("", `Next step: start a new workflow with \`$cc:${workflow.mode}\`; this snapshot cannot be retried.`);
+  } else {
+    lines.push("", next ? `Next command: \`${next}\`` : "Next command: none");
+  }
   return `${lines.join("\n").trimEnd()}\n`;
 }
 

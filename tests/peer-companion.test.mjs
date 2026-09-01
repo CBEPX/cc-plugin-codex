@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,10 +23,14 @@ function runGit(cwd, args) {
 function writeFakeMcp(root) {
   const filePath = path.join(root, "fake-mcp.mjs");
   fs.writeFileSync(filePath, `#!/usr/bin/env node
+import fs from "node:fs";
 import readline from "node:readline";
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
   const request = JSON.parse(line);
+  if (process.env.FAKE_MCP_REQUEST_LOG) {
+    fs.appendFileSync(process.env.FAKE_MCP_REQUEST_LOG, process.env.FAKE_MCP_NAME + ":" + request.method + "\\n");
+  }
   if (request.id == null) return;
   const result = request.method === "initialize"
     ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "docs", version: "1" } }
@@ -89,17 +93,26 @@ async function main() {
         ? {}
         : { critique: "Compare the frozen memos." } }
     : {
-        content: { findings: ["The repository and primary source agree."] },
+        content: { findings: [process.env.FAKE_CLAUDE_MARKER || "The repository and primary source agree."] },
         repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
         webCitations: sparse ? [] : ["https://example.test/primary"],
       };
-  process.stdout.write(JSON.stringify({
-    type: "result",
-    session_id: sessionId,
-    result: JSON.stringify(payload),
-    model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5",
-    modelUsage: { "claude-fable-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
-  }) + "\\n");
+  const emitResult = () => process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: sessionId,
+      result: JSON.stringify(payload),
+      model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5",
+      modelUsage: { "claude-fable-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
+    }) + "\\n");
+  if (process.env.FAKE_CLAUDE_RESULT_ON_TERM === "1") {
+    process.on("SIGTERM", () => {
+      emitResult();
+      process.exit(0);
+    });
+    setInterval(() => {}, 1000);
+    return;
+  }
+  emitResult();
 }
 main().catch((error) => { process.stderr.write(String(error.stack || error) + "\\n"); process.exitCode = 1; });
 `, "utf8");
@@ -117,8 +130,20 @@ function createEnvironment() {
   fs.mkdirSync(workspaceDir, { recursive: true });
   writeFakeClaude(binDir);
   const mcpPath = writeFakeMcp(rootDir);
+  const mcpRequestLog = path.join(rootDir, "mcp-requests.log");
   fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({
-    mcpServers: { docs: { command: process.execPath, args: [mcpPath] } },
+    mcpServers: {
+      docs: {
+        command: process.execPath,
+        args: [mcpPath],
+        env: { FAKE_MCP_REQUEST_LOG: mcpRequestLog, FAKE_MCP_NAME: "docs" },
+      },
+      unused: {
+        command: process.execPath,
+        args: [mcpPath],
+        env: { FAKE_MCP_REQUEST_LOG: mcpRequestLog, FAKE_MCP_NAME: "unused" },
+      },
+    },
   }), "utf8");
   runGit(workspaceDir, ["init", "--initial-branch=main"]);
   runGit(workspaceDir, ["config", "user.name", "Codex Test"]);
@@ -132,6 +157,7 @@ function createEnvironment() {
     workspaceDir,
     repoFile,
     claudeLog: path.join(rootDir, "claude.ndjson"),
+    mcpRequestLog,
     env: {
       ...process.env,
       HOME: homeDir,
@@ -160,6 +186,49 @@ function runJson(testEnv, args, options = {}) {
   const result = run(testEnv, args, options);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
+}
+
+function runAsync(testEnv, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [COMPANION, ...args], {
+      cwd: PROJECT_ROOT,
+      env: { ...testEnv.env, ...(options.env ?? {}) },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (status) => resolve({ status, stdout, stderr }));
+    child.stdin.end(options.input ?? "");
+  });
+}
+
+async function waitFor(check, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail("Timed out waiting for test condition");
+}
+
+function readManagedStateText(testEnv) {
+  const root = peerStateDir(testEnv);
+  const values = [];
+  const visit = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const candidate = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(candidate);
+      else if (entry.isFile()) values.push(fs.readFileSync(candidate, "utf8"));
+    }
+  };
+  visit(root);
+  return values.join("\n");
 }
 
 function peerStateDir(testEnv) {
@@ -212,30 +281,53 @@ describe("peer companion with fake Claude", () => {
 
     const result = run(testEnv, [
       "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--branch", "claude", "--brief-hash", created.workflow.briefHash, "--json",
+      "--branch", "claude", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify(forged) });
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /CODEX_MEMO_ONLY/);
     assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
 
-    const genericStart = run(testEnv, [
-      "workflow-start-stage", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--mode", "design", "--stage", "memo", "--branch", "claude",
-      "--revision", String(before.revision), "--epoch", String(before.epoch), "--json",
-    ]);
-    assert.notEqual(genericStart.status, 0);
-    assert.match(genericStart.stderr, /TRUSTED_CLAUDE_PATH_REQUIRED/);
+    for (const [command, extra, input] of [
+      ["workflow-start-stage", ["--stage", "memo", "--branch", "codex"], undefined],
+      ["workflow-start-stage", ["--stage", "memo", "--branch", "claude"], undefined],
+      ["workflow-submit-stage", [
+        "--stage", "memo", "--branch", "codex", "--field", "checkpoint",
+        "--status", "completed", "--claude-session-id", "forged",
+      ], JSON.stringify({ forged: true })],
+      ["workflow-fail-branch", [
+        "--stage", "memo", "--branch", "codex", "--reason", "forged",
+      ], undefined],
+    ]) {
+      const generic = run(testEnv, [
+        command, created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--mode", "design", ...extra,
+        "--revision", String(before.revision), "--epoch", String(before.epoch), "--json",
+      ], { input });
+      assert.notEqual(generic.status, 0);
+      assert.match(generic.stderr, /TRUSTED_PEER_PATH_REQUIRED/);
+    }
     assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
   });
 
-  it("redacts a completed Claude sibling until Codex seals its own memo", () => {
+  it("keeps a Claude-first memo only in memory until Codex seals", async () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);
-    runJson(testEnv, [
+    const marker = "CLAUDE_FIRST_STORAGE_MARKER_9F4D2A";
+    const claudePromise = runAsync(testEnv, [
       "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
-    ]);
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { env: { FAKE_CLAUDE_MARKER: marker } });
+
+    await waitFor(() => readWorkflow(testEnv, created.workflow.id)
+      .branches.claude.commitment);
+    const committed = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(committed.branches.codex.status, "pending");
+    assert.equal(committed.branches.claude.status, "running");
+    assert.equal(committed.branches.claude.payload, null);
+    assert.doesNotMatch(readManagedStateText(testEnv), new RegExp(marker));
 
     for (const command of ["peer-wait", "workflow-read"]) {
       const view = runJson(testEnv, [
@@ -244,7 +336,7 @@ describe("peer companion with fake Claude", () => {
       ]);
       assert.equal(view.readyForCheckpoint, false);
       assert.equal(view.branches.codex.status, "pending");
-      assert.equal(view.branches.claude.status, "completed");
+      assert.equal(view.branches.claude.status, "running");
       const serialized = JSON.stringify(view);
       assert.doesNotMatch(serialized, /The repository and primary source agree/);
       assert.doesNotMatch(serialized, /toolEvents|repoCitations|webCitations|payload/);
@@ -267,8 +359,11 @@ describe("peer companion with fake Claude", () => {
     };
     runJson(testEnv, [
       "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--branch", "codex", "--brief-hash", created.workflow.briefHash, "--json",
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify(codexMemo) });
+    const claude = await claudePromise;
+    assert.equal(claude.status, 0, claude.stderr || claude.stdout);
     const ready = runJson(testEnv, [
       "peer-wait", created.workflow.id, "--cwd", testEnv.workspaceDir,
       "--mode", "design", "--json",
@@ -276,8 +371,85 @@ describe("peer companion with fake Claude", () => {
     assert.equal(ready.readyForCheckpoint, true);
     assert.deepEqual(ready.memos.codex.content, codexMemo.content);
     assert.deepEqual(ready.memos.claude.content, {
-      findings: ["The repository and primary source agree."],
+      findings: [marker],
     });
+  });
+
+  it("revalidates only MCP servers represented in the frozen selection", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    fs.writeFileSync(testEnv.mcpRequestLog, "", "utf8");
+    const codexMemo = {
+      content: { findings: ["Independent Codex result."] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: ["https://example.test/codex"],
+      toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    };
+    runJson(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: JSON.stringify(codexMemo) });
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ]);
+
+    const probes = fs.readFileSync(testEnv.mcpRequestLog, "utf8");
+    assert.match(probes, /docs:initialize/);
+    assert.doesNotMatch(probes, /unused:/);
+  });
+
+  it("cancels before a live Claude termination callback can mutate the aggregate", async () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const claudePromise = runAsync(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { env: { FAKE_CLAUDE_RESULT_ON_TERM: "1" } });
+    await waitFor(() => {
+      const jobsDir = path.join(peerStateDir(testEnv), "jobs");
+      return fs.existsSync(jobsDir) && readPeerJobs(testEnv, created.workflow.id)
+        .find((job) => job.status === "running" && Number.isInteger(job.pid));
+    });
+
+    const cancelled = run(testEnv, [
+      "cancel", created.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
+    ]);
+    const claude = await claudePromise;
+    assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+    assert.doesNotMatch(`${cancelled.stdout}\n${cancelled.stderr}`, /STALE_REVISION|STALE_EPOCH/u);
+    assert.equal(JSON.parse(cancelled.stdout).workflow.status, "cancelled");
+    assert.equal(readWorkflow(testEnv, created.workflow.id).status, "cancelled");
+    assert.doesNotMatch(`${claude.stdout}\n${claude.stderr}`, /STALE_REVISION/u);
+  });
+
+  it("rejects a specialized worker that starts after its captured epoch was invalidated", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const rebound = runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--retry", "--owner-session-id", "owner-b", "--json",
+    ]);
+    assert.equal(rebound.workflow.epoch, created.workflow.epoch + 1);
+    const before = readWorkflow(testEnv, created.workflow.id);
+
+    const stale = run(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: JSON.stringify({
+      content: { findings: ["Late worker result."] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: ["https://example.test/late"],
+      toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    }) });
+
+    assert.notEqual(stale.status, 0);
+    assert.match(stale.stderr, /STALE_EPOCH/);
+    assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
   });
 
   it("creates a frozen workflow and runs Claude with exact strict read-only tools and fallback telemetry", () => {
@@ -287,10 +459,21 @@ describe("peer companion with fake Claude", () => {
       cwd: testEnv.workspaceDir,
       encoding: "utf8",
     }).stdout;
+    runJson(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: JSON.stringify({
+      content: { findings: ["Independent Codex result."] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: ["https://example.test/codex"],
+      toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    }) });
 
     const result = runJson(testEnv, [
       "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { env: { FAKE_CLAUDE_FALLBACK: "1" } });
 
     assert.equal(result.status, "completed");
@@ -341,12 +524,14 @@ describe("peer companion with fake Claude", () => {
     };
     runJson(testEnv, [
       "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--branch", "codex", "--brief-hash", created.workflow.briefHash, "--json",
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify(codexMemo) });
 
     const failed = run(testEnv, [
       "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { env: { FAKE_CLAUDE_SPARSE: "1" } });
 
     assert.notEqual(failed.status, 0);
@@ -375,28 +560,32 @@ describe("peer companion with fake Claude", () => {
     });
     runJson(testEnv, [
       "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--branch", "codex", "--brief-hash", created.workflow.briefHash, "--json",
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify(memo("codex")) });
     runJson(testEnv, [
       "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ]);
     runJson(testEnv, [
       "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify({
       agreements: ["Both support the same constraint."],
       disagreements: ["They rank the alternatives differently."],
       decisionsNeeded: ["Choose the operating trade-off."],
     }) });
 
-    runJson(testEnv, [
+    const continuation = runJson(testEnv, [
       "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
       "--mode", "design", "--continue", "--owner-session-id", "owner-b", "--json",
     ], { input: JSON.stringify({ feedback: "Prefer operational simplicity." }) });
     runJson(testEnv, [
       "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(continuation.workflow.epoch), "--json",
     ]);
 
     const invocations = fs.readFileSync(testEnv.claudeLog, "utf8").trim()
@@ -430,24 +619,28 @@ describe("peer companion with fake Claude", () => {
     });
     runJson(testEnv, [
       "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--branch", "codex", "--brief-hash", created.workflow.briefHash, "--json",
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify(memo("codex")) });
     runJson(testEnv, [
       "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ]);
     runJson(testEnv, [
       "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify({ agreements: [], disagreements: [], decisionsNeeded: [] }) });
-    runJson(testEnv, [
+    const continuation = runJson(testEnv, [
       "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
       "--mode", "design", "--continue", "--owner-session-id", "owner-b", "--json",
     ], { input: JSON.stringify({ feedback: "Check both memos." }) });
 
     const failed = run(testEnv, [
       "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(continuation.workflow.epoch), "--json",
     ], { env: { FAKE_CLAUDE_EMPTY_CRITIQUE: "1" } });
 
     assert.notEqual(failed.status, 0);

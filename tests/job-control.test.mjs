@@ -170,6 +170,27 @@ describe("buildStatusSnapshot", () => {
     });
   });
 
+  it("bounds default workflow listings with maxJobs while --all remains unbounded", () => {
+    withTempJobRepo((repoDir) => {
+      writePeerWorkflow(repoDir, { id: "workflow-limit-00" });
+      for (let index = 1; index < 8; index += 1) {
+        reserveWorkflow(repoDir, {
+          id: `workflow-limit-0${index}`,
+          mode: "design",
+          brief: `Workflow ${index}`,
+          originSessionId: "session-a",
+          currentOwnerSessionId: "session-a",
+          stages: ["checkpoint"],
+          branches: ["codex", "claude"],
+        });
+      }
+      setCurrentSession(repoDir, "session-a");
+
+      assert.equal(buildStatusSnapshot(repoDir, { maxJobs: 3 }).workflows.length, 3);
+      assert.equal(buildStatusSnapshot(repoDir, { all: true, maxJobs: 3 }).workflows.length, 8);
+    });
+  });
+
   it("filters overview jobs to the current session marker when env is absent", () => {
     const repoDir = createTempGitRepo();
     const scopedIds = ["test-status-session-a", "test-status-session-b"];

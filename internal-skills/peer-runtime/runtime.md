@@ -26,7 +26,7 @@ In short: rerun preflight after installation or restart.
 ## New workflow
 
 1. Resolve routing with `session-routing-context --json`.
-2. Run `mcp-diagnose --json` with the user's exact MCP flags. The active Codex controller chooses the smallest relevant subset of eligible exact IDs from their descriptions. Pass those choices as repeated internal `--auto-mcp-tool` values to `peer-create`; Node validates exact IDs and safety only. With `--no-auto-tools`, choose none automatically. Exact user pins remain exact and still must be eligible.
+2. Run `mcp-diagnose --json` with the user's exact MCP flags. This actively starts/probes every configured server in scope and can therefore have server-defined side effects. The active Codex controller chooses the smallest relevant subset of eligible exact IDs from their descriptions. Pass those choices as repeated internal `--auto-mcp-tool` values to `peer-create`; Node validates exact IDs and safety only. Eligibility trusts a server's `readOnlyHint` declaration or the audited registry, is not an OS sandbox, and always vetoes `destructiveHint`. With `--no-auto-tools`, choose none automatically. Exact user pins remain exact and still must be eligible.
 3. Keep a shell-hostile or multiline brief out of argv: normalize it once, write it to an OS temporary file outside the workspace, and use the internal `--brief-file`. Delete that temporary file after `peer-create` returns.
 4. Run `peer-create --mode <mode> --cwd <workspaceRoot> --owner-session-id <ownerSessionId> ... --json`. Preserve public model/MCP flags and controller-selected internal IDs.
 5. Use the returned `spawnPlan` with built-in `spawn_agent`: spawn exactly two children. For both, pass `fork_turns: "none"` and the returned self-contained message. Do not add parent history.
@@ -39,11 +39,11 @@ Initial execution is always background: do not wait in the parent turn. Return t
 
 ## Child contracts
 
-The Codex reasoning worker is not a forwarder. It researches independently with the repo and web routes exposed to its turn, performs zero workspace writes, and sends one object with `content`, `repoCitations`, `webCitations`, and public `toolEvents` as JSON on stdin to `peer-submit-memo`. That command accepts only the Codex memo; Claude memo submission occurs only inside the trusted `peer-claude-turn` execution path. It then polls `peer-wait`, whose status-only view redacts the sibling payload until the Codex memo is sealed. If Claude completed, it compares the separate frozen memos and sends `agreements`, `disagreements`, and `decisionsNeeded` as JSON on stdin to `peer-checkpoint`. If Claude is incomplete, it stops without replacing either memo.
+The Codex reasoning worker is not a forwarder. It researches independently with the repo and web routes exposed to its turn, performs zero workspace writes, and sends one object with `content`, `repoCitations`, `webCitations`, and public `toolEvents` as JSON on stdin to `peer-submit-memo`. Every specialized mutating command includes `--epoch <returned-epoch>` from its spawn or resume plan; never omit or refresh that captured workflow epoch inside an old worker. That command accepts only the Codex memo; Claude memo submission occurs only inside the trusted `peer-claude-turn` execution path. It then polls `peer-wait`, whose status-only view redacts the sibling payload until the Codex memo is sealed. If Claude completed, it compares the separate frozen memos and sends `agreements`, `disagreements`, and `decisionsNeeded` as JSON on stdin to `peer-checkpoint`. If Claude is incomplete, it stops without replacing either memo.
 
 The pure Claude forwarder must run exactly one companion command, in the foreground, and return stdout unchanged. It does no repository inspection or reasoning itself. Never use shell backgrounding (`nohup`, detached spawn, or an ampersand operator). Never invoke `codex exec`. If the shell yields a session, poll that same session until exit.
 
-`peer-claude-turn` gives Claude only Read, Glob, Grep, the selected `WebSearch, WebFetch` route, and exact selected MCP tools. The companion enforces `permission-mode=dontAsk`, a strict MCP config, no Bash, and no Agent. It records requested/final/fallback model telemetry and actual public tool-event names.
+`peer-claude-turn` gives Claude only Read, Glob, Grep, the selected `WebSearch, WebFetch` route, and exact selected MCP tools. The companion enforces `permission-mode=dontAsk`, a strict MCP config, no Bash, and no Agent. Selected external MCP servers remain trusted declarations rather than an OS sandbox; the rendered manifest preserves the exact trust basis. Revalidation starts/probes only the servers represented in the frozen selection. It records requested/final/fallback model telemetry and actual public tool-event names.
 
 Each foreground Claude peer turn is registered as a workflow-linked tracked job owned by the workflow session, so SessionEnd can terminate the identity-matched Claude process before marking unfinished work retryable. A failed or unresolved linked cancellation leaves the target `cancel_failed` with no retry work.
 
@@ -55,14 +55,14 @@ Every initial memo needs non-empty structured content, a canonical in-workspace 
 
 Continue is foreground.
 
-1. Read the explicit workflow in the current canonical workspace. Run `peer-resume-plan <id> --continue --owner-session-id <current-id> --json`, sending optional feedback as JSON on stdin. This explicitly rebinds a cross-session owner; never use generic rescue `--resume-last`.
+1. Read the explicit workflow in the current canonical workspace. Run `peer-resume-plan <id> --continue --owner-session-id <current-id> --json`, sending optional feedback as JSON on stdin. This explicitly rebinds a cross-session owner; never use generic rescue `--resume-last`. Capture the returned workflow epoch in every `peer-claude-critique` and `peer-final` command.
 2. Spawn one pure Claude forwarder with `fork_turns: "none"`, inherited model, and medium effort. It runs exactly one foreground `peer-claude-critique` command and returns stdout unchanged. Wait for it.
 3. The companion resumes only the workflow-owned Claude session with both `--resume <id>` and `--fork-session`. Its stdin prompt contains both frozen memos plus feedback; neither memo is rewritten.
 4. Spawn one Codex synthesizer with `fork_turns: "none"`, the workflow's Codex model choice, and Codex effort. It reads the frozen workflow, produces the mode-specific final answer, sends it as JSON on stdin to `peer-final`, and performs zero workspace writes. Wait for it and return the stored final answer.
 
 ## Retry
 
-Run `peer-resume-plan <id> --retry --owner-session-id <current-id> --json`. Execute only the returned work:
+Run `peer-resume-plan <id> --retry --owner-session-id <current-id> --json`. Execute only the returned work, passing the returned workflow epoch to each specialized mutating command:
 
 - a missing `codex` branch gets an independent Codex reasoning worker;
 - a missing `claude` branch gets the pure Claude forwarder;

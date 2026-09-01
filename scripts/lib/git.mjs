@@ -90,7 +90,8 @@ function hashText(value) {
 
 export function getWorkingTreeFingerprint(cwd) {
   const repoRoot = getRepoRoot(cwd);
-  const head = gitChecked(repoRoot, ["rev-parse", "HEAD"]).stdout.trim();
+  const headResult = git(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+  const head = headResult.status === 0 ? headResult.stdout.trim() : "unborn";
   const stagedDiffHash = hashText(
     gitChecked(repoRoot, ["ls-files", "--stage", "-z"]).stdout
   );
@@ -117,7 +118,6 @@ export function getWorkingTreeFingerprint(cwd) {
   const untrackedFingerprintHash = hashWorkingTreePaths(repoRoot, untracked);
   const signature = hashText(
     [
-      head,
       stagedDiffHash,
       unstagedDiffHash,
       untrackedFingerprintHash,

@@ -152,7 +152,7 @@ In foreground, review returns the result directly. In background, the plugin use
 
 If the diff is too large to inline safely, the review prompt falls back to concise status/stat context and tells Claude to inspect the diff directly with read-only `git diff` commands instead of failing the run.
 
-By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted read-only tools when reviewing untrusted diffs. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
+By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted tools when reviewing untrusted diffs. Eligibility is based on the server's `readOnlyHint` declaration or the plugin's audited read-only registry; it is not an OS-enforced sandbox. A `destructiveHint` declaration is always vetoed. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
 
 ### `$cc:mcp-diagnose`
 
@@ -163,7 +163,7 @@ $cc:mcp-diagnose --user-mcp-tool mcp__context7__resolve-library-id
 $cc:mcp-diagnose --allow-project-mcp-servers --user-mcp-tool mcp__localdocs__search
 ```
 
-The diagnostic output lists server names and config sources only; it does not print raw MCP server configs or secrets.
+The diagnostic actively starts/probes every configured server in scope (or sends HTTP initialize and tool-list requests), with a five-second absolute deadline per server. Treat that discovery as potentially side-effecting. The output lists server names and config sources only; it does not print raw MCP server configs or secrets. Once a peer workflow freezes its selected manifest, later turn revalidation probes only those selected servers.
 
 ### Peer design and research
 
@@ -178,7 +178,7 @@ $cc:design --continue <workflow-id> optional feedback
 $cc:design --retry <workflow-id>
 ```
 
-New workflows default to Claude `fable` with `opus` fallback and inherited Codex model at `xhigh` effort. Use `--model`, `--fallback-model`, `--effort`, `--codex-model`, or `--codex-effort` to override them. Repeat `--user-mcp-tool <mcp__server__tool>` for explicit safe tools; automatic selection is limited to the smallest relevant read-only set exposed to the active Codex turn. Project MCP servers still require `--allow-project-mcp-servers`.
+New workflows default to Claude `fable` with `opus` fallback and inherited Codex model at `xhigh` effort. Use `--model`, `--fallback-model`, `--effort`, `--codex-model`, or `--codex-effort` to override them. Repeat `--user-mcp-tool <mcp__server__tool>` for explicitly trusted eligible tools; automatic selection is limited to the smallest relevant eligible set exposed to the active Codex turn. Eligibility records whether trust came from `readOnlyHint` or the audited registry, but does not independently enforce server behavior. Project MCP servers still require `--allow-project-mcp-servers`.
 
 The stored and rendered workflow shows independent branch states, requested/final models and fallback events, source/tool evidence counts, selected public tool IDs and reasons, checkpoint or final result, and the exact continue/retry command. Raw MCP configuration, environment variables, headers, and credentials are never persisted or rendered. Claude receives no Bash, write, or Agent capability, and only selected MCP servers enter its strict runtime config.
 

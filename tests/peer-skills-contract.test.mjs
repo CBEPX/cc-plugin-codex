@@ -81,6 +81,8 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
 
   includesAll(runtime, [
     "peer-submit-memo",
+    "workflow epoch",
+    "--epoch",
     "accepts only the Codex memo",
     "peer-wait",
     "redacts the sibling payload until the Codex memo is sealed",
@@ -92,6 +94,8 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
     "no Agent",
     "permission-mode=dontAsk",
     "strict MCP config",
+    "not an OS sandbox",
+    "Revalidation starts/probes only the servers represented in the frozen selection",
     "canonical in-workspace repository citation",
     "direct `https://` citation",
     "actual repository and web tool events",

@@ -623,7 +623,15 @@ describe("hooks", () => {
         modelManifest: [],
         toolManifest: [],
         stages: {
-          checkpoint: { status: "pending", payload: null, failureReason: null, attempts: 0 },
+          checkpoint: {
+            status: "running",
+            payload: null,
+            failureReason: null,
+            attempts: 1,
+            stage: "checkpoint",
+            startFingerprint: fingerprint,
+            startedAt: timestamp,
+          },
         },
         branches: {
           codex: {
@@ -666,6 +674,8 @@ describe("hooks", () => {
       assert.equal(workflow.branches.codex.status, "retryable_failed");
       assert.equal(workflow.branches.codex.failureReason, "SESSION_ENDED");
       assert.equal(workflow.branches.claude.status, "completed");
+      assert.equal(workflow.stages.checkpoint.status, "retryable_failed");
+      assert.equal(workflow.stages.checkpoint.failureReason, "SESSION_ENDED");
       assert.deepEqual(workflow.branches.claude.payload, {
         content: { finding: "frozen" },
       });
@@ -715,7 +725,15 @@ describe("hooks", () => {
         modelManifest: [],
         toolManifest: [],
         stages: {
-          checkpoint: { status: "pending", payload: null, failureReason: null, attempts: 0 },
+          checkpoint: {
+            status: "running",
+            payload: null,
+            failureReason: null,
+            attempts: 1,
+            stage: "checkpoint",
+            startFingerprint: fingerprint,
+            startedAt: timestamp,
+          },
         },
         branches: {
           codex: { status: "completed", payload: { content: { finding: "frozen" } }, attempts: 1 },
@@ -779,6 +797,8 @@ process.exit(result.status ?? 1);
       assert.equal(job.status, "cancel_failed");
       assert.equal(workflow.branches.claude.status, "cancel_failed");
       assert.equal(workflow.branches.claude.failureReason, "SESSION_END_CANCEL_FAILED");
+      assert.equal(workflow.stages.checkpoint.status, "retryable_failed");
+      assert.equal(workflow.stages.checkpoint.failureReason, "SESSION_ENDED");
       assert.deepEqual(nextPeerRetryWork(workflow), []);
       assert.doesNotThrow(() => process.kill(child.pid, 0));
     } finally {

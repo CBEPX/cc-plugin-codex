@@ -9,9 +9,12 @@ import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
+import { terminateProcessTree } from "./process.mjs";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const MCP_PROBE_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_HTTP_RESPONSE_BYTES = 1024 * 1024;
+const PROBE_TERMINATION_GRACE_MS = 100;
 const SENSITIVE_NAME_PATTERN = /(?:token|secret|password|authorization|api.?key|cookie)/iu;
 const probeCacheSalt = randomBytes(32);
 const probeCache = new Map();
@@ -203,15 +206,44 @@ function stdioProbe(config, timeoutMs) {
       env: { ...process.env, ...(config.env ?? {}) },
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
     let settled = false;
+    let finishing = false;
     let buffer = "";
     const finish = (value) => {
-      if (settled) return;
-      settled = true;
+      if (settled || finishing) return;
+      finishing = true;
       clearTimeout(timer);
-      child.kill();
-      resolve(value);
+      child.stdin.destroy();
+      child.stdout.destroy();
+      const signal = (name) => {
+        if (!Number.isInteger(child.pid)) return false;
+        try {
+          if (process.platform === "win32") {
+            return terminateProcessTree(child.pid).attempted;
+          }
+          process.kill(-child.pid, name);
+        } catch (error) {
+          if (error?.code !== "ESRCH") return false;
+        }
+        return true;
+      };
+      const finalize = () => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      child.once("close", finalize);
+      if (!signal("SIGTERM")) {
+        finalize();
+        return;
+      }
+      setTimeout(() => {
+        if (settled) return;
+        signal("SIGKILL");
+        setTimeout(finalize, PROBE_TERMINATION_GRACE_MS);
+      }, PROBE_TERMINATION_GRACE_MS);
     };
     const send = (message) => {
       child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -266,22 +298,52 @@ function postJson(config, message, sessionId, deadline) {
       ...(config.headers ?? {}),
     };
     if (sessionId) headers["mcp-session-id"] = sessionId;
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wallClockTimer);
+      callback(value);
+    };
     const request = (url.protocol === "https:" ? https : http).request(url, {
       method: "POST",
       headers,
     }, (response) => {
       const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => resolve({
+      let bytes = 0;
+      response.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > MAX_HTTP_RESPONSE_BYTES) {
+          const error = Object.assign(new Error("response_too_large"), {
+            code: "response_too_large",
+          });
+          response.destroy(error);
+          request.destroy(error);
+          finish(reject, error);
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on("error", (error) => finish(reject, error));
+      response.on("end", () => finish(resolve, {
         statusCode: response.statusCode ?? 0,
         headers: response.headers,
         body: Buffer.concat(chunks).toString("utf8"),
       }));
     });
-    request.setTimeout(Math.max(1, deadline - Date.now()), () => {
-      request.destroy(new Error("timeout"));
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const timeoutError = () => Object.assign(new Error("timeout"), { code: "probe_timeout" });
+    const wallClockTimer = setTimeout(() => {
+      const error = timeoutError();
+      request.destroy(error);
+      finish(reject, error);
+    }, remainingMs);
+    request.setTimeout(remainingMs, () => {
+      const error = timeoutError();
+      request.destroy(error);
+      finish(reject, error);
     });
-    request.on("error", reject);
+    request.on("error", (error) => finish(reject, error));
     request.end(body);
   });
 }
@@ -338,7 +400,8 @@ async function httpProbe(config, timeoutMs) {
     const listResponse = parseRpcResponse(listed.body);
     return { tools: Array.isArray(listResponse.result?.tools) ? listResponse.result.tools : [] };
   } catch (error) {
-    return { code: Date.now() >= deadline || error?.message === "timeout"
+    if (error?.code === "response_too_large") return { code: "response_too_large" };
+    return { code: Date.now() >= deadline || error?.code === "probe_timeout" || error?.message === "timeout"
       ? "probe_timeout"
       : "probe_failed" };
   }

@@ -8,6 +8,7 @@ import path from "node:path";
 import { parseArgs } from "./args.mjs";
 
 const USER_MCP_TOOL_RE = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/u;
+const CREDENTIAL_QUERY_RE = /(?:token|secret|password|authorization|api[_-]?key|access[_-]?key|credential|signature|^key$)/iu;
 const PUBLIC_VALUE_OPTIONS = [
   "model",
   "fallback-model",
@@ -155,17 +156,19 @@ export function buildInitialAgentPlan(workflow, options) {
   ].join("\n");
   const baseCommand =
     `node ${quoted(companionPath)} peer-claude-turn ${quoted(workflow.id)}` +
-    ` --cwd ${quoted(workflow.workspaceRoot)} --brief-hash ${quoted(workflow.briefHash)} --json`;
+    ` --cwd ${quoted(workflow.workspaceRoot)} --brief-hash ${quoted(workflow.briefHash)}` +
+    ` --epoch ${quoted(workflow.epoch)} --json`;
   const submitMemoCommand =
     `node ${quoted(companionPath)} peer-submit-memo ${quoted(workflow.id)}` +
     ` --cwd ${quoted(workflow.workspaceRoot)} --branch codex` +
-    ` --brief-hash ${quoted(workflow.briefHash)} --json`;
+    ` --brief-hash ${quoted(workflow.briefHash)} --epoch ${quoted(workflow.epoch)} --json`;
   const readCommand =
     `node ${quoted(companionPath)} peer-wait ${quoted(workflow.id)}` +
     ` --cwd ${quoted(workflow.workspaceRoot)} --mode ${quoted(workflow.mode)} --json`;
   const checkpointCommand =
     `node ${quoted(companionPath)} peer-checkpoint ${quoted(workflow.id)}` +
-    ` --cwd ${quoted(workflow.workspaceRoot)} --brief-hash ${quoted(workflow.briefHash)} --json`;
+    ` --cwd ${quoted(workflow.workspaceRoot)} --brief-hash ${quoted(workflow.briefHash)}` +
+    ` --epoch ${quoted(workflow.epoch)} --json`;
   const codex = {
     task_name: `cc_${workflow.mode}_codex_${suffix}`,
     fork_turns: "none",
@@ -221,6 +224,11 @@ function insideWorkspace(workspaceRoot, filePath) {
     : path.resolve(workspaceRoot, filePath);
   const canonical = canonicalPath(candidate);
   if (!canonical) return null;
+  try {
+    if (!fs.statSync(canonical).isFile()) return null;
+  } catch {
+    return null;
+  }
   const relative = path.relative(workspaceRoot, canonical);
   return !relative.startsWith("..") && !path.isAbsolute(relative)
     ? canonical
@@ -230,7 +238,16 @@ function insideWorkspace(workspaceRoot, filePath) {
 function directHttps(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && Boolean(url.hostname) ? url.toString() : null;
+    if (
+      url.protocol !== "https:" ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      [...url.searchParams.keys()].some((name) => CREDENTIAL_QUERY_RE.test(name))
+    ) {
+      return null;
+    }
+    return url.toString();
   } catch {
     return null;
   }
@@ -250,7 +267,7 @@ export function validatePeerMemo(workflow, memo, options = {}) {
       );
       if (!canonical) return [];
       const line = Number(citation.line);
-      return [{ path: canonical, ...(Number.isInteger(line) && line > 0 ? { line } : {}) }];
+      return Number.isInteger(line) && line > 0 ? [{ path: canonical, line }] : [];
     });
   if (repoCitations.length === 0) {
     throw peerError(

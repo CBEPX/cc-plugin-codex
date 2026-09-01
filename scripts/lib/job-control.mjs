@@ -269,6 +269,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
   const sessionId = getCurrentSessionId({ ...options, cwd: workspaceRoot });
+  const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const jobs = sortJobsNewestFirst(
     options.all
       ? listJobs(workspaceRoot)
@@ -279,8 +280,8 @@ export function buildStatusSnapshot(cwd, options = {}) {
   );
   const workflows = listWorkflows(workspaceRoot)
     .filter((workflow) => options.all || !sessionId || workflow.currentOwnerSessionId === sessionId)
-    .map(summarizeWorkflow);
-  const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
+    .map(summarizeWorkflow)
+    .slice(0, options.all ? undefined : maxJobs);
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
   const running = jobs

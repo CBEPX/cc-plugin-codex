@@ -343,4 +343,50 @@ describe("collectReviewContext", () => {
     assert.equal(before.untrackedCount, 1);
     assert.notEqual(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
   });
+
+  it("keeps HEAD as metadata without invalidating an identical index and worktree", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    const before = getWorkingTreeFingerprint(repo);
+
+    runGit(repo, ["commit", "--allow-empty", "-m", "metadata only"]);
+    const after = getWorkingTreeFingerprint(repo);
+
+    assert.notEqual(after.head, before.head);
+    assert.equal(after.stagedDiffHash, before.stagedDiffHash);
+    assert.equal(after.unstagedDiffHash, before.unstagedDiffHash);
+    assert.equal(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+    assert.equal(after.signature, before.signature);
+  });
+
+  it("uses a stable unborn HEAD sentinel before the first commit", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "draft.txt"), "draft\n", "utf8");
+
+    const first = getWorkingTreeFingerprint(repo);
+    const second = getWorkingTreeFingerprint(repo);
+
+    assert.equal(first.head, "unborn");
+    assert.equal(second.head, "unborn");
+    assert.equal(second.signature, first.signature);
+  });
+
+  it("content-hashes a large untracked file independently of metadata", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    const large = path.join(repo, "large.bin");
+    fs.writeFileSync(large, Buffer.alloc(5 * 1024 * 1024, 0x61));
+    const before = getWorkingTreeFingerprint(repo);
+    const times = fs.statSync(large);
+    fs.writeFileSync(large, Buffer.alloc(5 * 1024 * 1024, 0x62));
+    fs.utimesSync(large, times.atime, times.mtime);
+
+    const after = getWorkingTreeFingerprint(repo);
+    assert.notEqual(after.untrackedFingerprintHash, before.untrackedFingerprintHash);
+    assert.notEqual(after.signature, before.signature);
+  });
 });

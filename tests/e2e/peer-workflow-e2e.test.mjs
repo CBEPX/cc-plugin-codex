@@ -181,6 +181,14 @@ function readWorkflow(testEnv, id) {
   return JSON.parse(fs.readFileSync(path.join(stateDir(testEnv), "workflows", `${id}.json`), "utf8"));
 }
 
+function writeWorkflow(testEnv, workflow) {
+  fs.writeFileSync(
+    path.join(stateDir(testEnv), "workflows", `${workflow.id}.json`),
+    `${JSON.stringify(workflow, null, 2)}\n`,
+    "utf8"
+  );
+}
+
 function createPeer(testEnv, id = null) {
   const created = runJson(testEnv, [
     "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
@@ -210,18 +218,21 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     const [codex, claude] = await Promise.all([
       runAsync(testEnv, [
         "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
-        "--branch", "codex", "--brief-hash", created.workflow.briefHash, "--json",
+        "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
       ], { input: JSON.stringify(memo(testEnv, "codex")) }),
       runAsync(testEnv, [
         "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-        "--brief-hash", created.workflow.briefHash, "--json",
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
       ]),
     ]);
     assert.equal(codex.status, 0, codex.stderr || codex.stdout);
     assert.equal(claude.status, 0, claude.stderr || claude.stdout);
     runJson(testEnv, [
       "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
     ], { input: JSON.stringify({ agreements: ["same"], disagreements: [], decisionsNeeded: ["choose"] }) });
 
     const status = runJson(testEnv, ["status", "--cwd", testEnv.workspaceDir, "--json"]);
@@ -240,17 +251,19 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     assert.equal(checkpoint.workflow.phase, "checkpoint");
     assert.deepEqual(checkpoint.workflow.checkpoint.agreements, ["same"]);
 
-    runJson(testEnv, [
+    const continuation = runJson(testEnv, [
       "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
       "--continue", "--owner-session-id", "owner-b", "--json",
     ], { input: JSON.stringify({ feedback: "Prefer simple." }) });
     runJson(testEnv, [
       "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(continuation.workflow.epoch), "--json",
     ]);
     runJson(testEnv, [
       "peer-final", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash, "--json",
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(continuation.workflow.epoch), "--json",
     ], { input: JSON.stringify({ recommendation: "Use the narrow path." }) });
     const finalResult = runJson(testEnv, [
       "result", created.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
@@ -261,11 +274,13 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     const partial = createPeer(testEnv, "Partial failure retry.");
     runJson(testEnv, [
       "peer-submit-memo", partial.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--branch", "codex", "--brief-hash", partial.workflow.briefHash, "--json",
+      "--branch", "codex", "--brief-hash", partial.workflow.briefHash,
+      "--epoch", String(partial.workflow.epoch), "--json",
     ], { input: JSON.stringify(memo(testEnv, "partial-codex")) });
     const sparse = run(testEnv, [
       "peer-claude-turn", partial.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", partial.workflow.briefHash, "--json",
+      "--brief-hash", partial.workflow.briefHash,
+      "--epoch", String(partial.workflow.epoch), "--json",
     ], { env: { FAKE_CLAUDE_SPARSE: "1" } });
     assert.notEqual(sparse.status, 0);
     const retry = runJson(testEnv, [
@@ -275,12 +290,28 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     assert.deepEqual(retry.work, [{ kind: "branch", id: "claude" }]);
 
     const lifecycle = createPeer(testEnv, "SessionEnd path.");
-    const started = runJson(testEnv, [
-      "workflow-start-stage", lifecycle.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--stage", "memo", "--branch", "codex",
-      "--revision", String(lifecycle.workflow.revision), "--epoch", "0", "--json",
-    ]);
-    assert.equal(started.branches.codex.status, "running");
+    const startedAt = new Date().toISOString();
+    writeWorkflow(testEnv, {
+      ...lifecycle.workflow,
+      status: "running",
+      phase: "memo",
+      revision: lifecycle.workflow.revision + 1,
+      startedAt,
+      updatedAt: startedAt,
+      branches: {
+        ...lifecycle.workflow.branches,
+        codex: {
+          ...lifecycle.workflow.branches.codex,
+          status: "running",
+          stage: "memo",
+          attempts: 1,
+          startedAt,
+          startFingerprint: lifecycle.workflow.fingerprint,
+          attemptEpoch: lifecycle.workflow.epoch,
+          leaseDigest: createHash("sha256").update("e2e-attempt").digest("hex"),
+        },
+      },
+    });
     const ended = spawnSync(process.execPath, [SESSION_HOOK, "SessionEnd"], {
       cwd: PROJECT_ROOT,
       env: testEnv.env,

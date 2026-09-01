@@ -12,17 +12,22 @@ import { afterEach, describe, it } from "node:test";
 
 import {
   cleanupOldWorkflows,
+  commitWorkflowStage,
   completeWorkflowCancellation,
   getWorkflowRetryContext,
   listWorkflows,
   markWorkflowBranchFailure,
+  markWorkflowNotification,
   readWorkflow,
   rebindWorkflowOwner,
+  reserveWorkflowCancellation,
   reserveWorkflow,
   resolveWorkflowFile,
   resolveWorkflowsDir,
   casStartWorkflowStage,
   submitWorkflowStage,
+  revealWorkflowStage,
+  workflowNotificationEvent,
 } from "../scripts/lib/workflows.mjs";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -117,6 +122,150 @@ afterEach(() => {
 });
 
 describe("peer workflow store", () => {
+  it("requires the captured attempt lease and epoch for every late callback", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-attempt-lease" });
+    const first = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: created.revision, epoch: created.epoch,
+    });
+    assert.match(first.attemptLease, /^[a-f0-9]{64}$/u);
+    const storedSource = fs.readFileSync(resolveWorkflowFile(repo, created.id), "utf8");
+    assert.doesNotMatch(storedSource, new RegExp(first.attemptLease));
+    assert.match(readWorkflow(repo, created.id).branches.alpha.leaseDigest, /^[a-f0-9]{64}$/u);
+
+    assert.equal(errorCode(() => submitWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: first.revision, epoch: first.epoch,
+      payload: { summary: "missing lease" },
+    })), "STALE_ATTEMPT");
+    const failed = markWorkflowBranchFailure(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: first.revision, epoch: first.epoch,
+      lease: first.attemptLease,
+      reason: "retry",
+    });
+    const second = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: failed.revision, epoch: failed.epoch,
+    });
+    assert.notEqual(second.attemptLease, first.attemptLease);
+    assert.equal(errorCode(() => submitWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: second.revision, epoch: second.epoch,
+      lease: first.attemptLease,
+      payload: { summary: "late success" },
+    })), "STALE_ATTEMPT");
+    assert.equal(errorCode(() => markWorkflowBranchFailure(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: second.revision, epoch: second.epoch,
+      lease: first.attemptLease,
+      reason: "late failure",
+    })), "STALE_ATTEMPT");
+  });
+
+  it("commits without plaintext and reveals only with the same attempt fence", () => {
+    const repo = createRepo();
+    const marker = "CLAUDE_COMMIT_REVEAL_MARKER_41B7";
+    const created = createWorkflow(repo, { id: "workflow-commit-reveal" });
+    const started = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: created.revision, epoch: created.epoch,
+    });
+    const payload = { summary: marker };
+    const committed = commitWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: started.revision, epoch: started.epoch,
+      lease: started.attemptLease,
+      payload,
+    });
+    assert.equal(committed.branches.alpha.status, "running");
+    assert.equal(committed.branches.alpha.payload, null);
+    assert.match(committed.branches.alpha.commitment, /^[a-f0-9]{64}$/u);
+    assert.doesNotMatch(
+      fs.readFileSync(resolveWorkflowFile(repo, created.id), "utf8"),
+      new RegExp(marker)
+    );
+    assert.equal(errorCode(() => revealWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: committed.revision, epoch: committed.epoch,
+      lease: "f".repeat(64), payload,
+    })), "STALE_ATTEMPT");
+    const revealed = revealWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: committed.revision, epoch: committed.epoch,
+      lease: started.attemptLease, payload,
+    });
+    assert.deepEqual(revealed.branches.alpha.payload, payload);
+  });
+
+  it("reserves cancellation before awaits and rejects callbacks from the old epoch", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-cancellation-lease" });
+    const started = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: created.revision, epoch: created.epoch,
+    });
+    const cancellation = reserveWorkflowCancellation(repo, created.id, {
+      revision: started.revision,
+      epoch: started.epoch,
+      mode: started.mode,
+    });
+    assert.equal(cancellation.workflow.epoch, started.epoch + 1);
+    assert.equal(cancellation.workflow.status, "running");
+    assert.match(cancellation.lease, /^[a-f0-9]{64}$/u);
+    assert.doesNotMatch(
+      fs.readFileSync(resolveWorkflowFile(repo, created.id), "utf8"),
+      new RegExp(cancellation.lease)
+    );
+    assert.equal(errorCode(() => submitWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: cancellation.workflow.revision,
+      epoch: started.epoch,
+      lease: started.attemptLease,
+      payload: { summary: "late" },
+    })), "STALE_EPOCH");
+    const cancelled = completeWorkflowCancellation(repo, created.id, {
+      revision: cancellation.workflow.revision,
+      epoch: cancellation.workflow.epoch,
+      lease: cancellation.lease,
+      failedJobIds: [],
+    });
+    assert.equal(cancelled.status, "cancelled");
+  });
+
+  it("allocates a persistent notification key for every incomplete generation", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-incomplete-generation" });
+    const first = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: created.revision, epoch: created.epoch,
+    });
+    let failed = markWorkflowBranchFailure(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: first.revision, epoch: first.epoch,
+      lease: first.attemptLease,
+      reason: "first",
+    });
+    assert.equal(workflowNotificationEvent(failed), "incomplete:1");
+    failed = markWorkflowNotification(repo, created.id, {
+      event: "incomplete:1",
+      revision: failed.revision,
+      epoch: failed.epoch,
+    });
+    const second = casStartWorkflowStage(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: failed.revision, epoch: failed.epoch,
+    });
+    const failedAgain = markWorkflowBranchFailure(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: second.revision, epoch: second.epoch,
+      lease: second.attemptLease,
+      reason: "second",
+    });
+    assert.equal(workflowNotificationEvent(failedAgain), "incomplete:2");
+    assert.deepEqual(failedAgain.notifiedEvents, ["incomplete:1"]);
+  });
   it("persists a complete secret-free workflow record in its own workspace store", () => {
     const repo = createRepo();
     const workflow = createWorkflow(repo);
@@ -255,6 +404,7 @@ describe("peer workflow store", () => {
       field: "checkpoint",
       claudeSessionId: "claude-workflow-session",
       status: "awaiting_user",
+      lease: started.attemptLease,
     });
     const rawCompleted = fs.readFileSync(resolveWorkflowFile(repo, created.id), "utf8");
 
@@ -288,6 +438,7 @@ describe("peer workflow store", () => {
       epoch: workflow.epoch,
       payload: { summary: "final" },
       field: "finalResult",
+      lease: workflow.attemptLease,
     });
     const before = fs.readFileSync(resolveWorkflowFile(repo, workflow.id));
     fs.writeFileSync(path.join(repo, "tracked.txt"), "drift after completion\n", "utf8");
@@ -311,9 +462,13 @@ describe("peer workflow store", () => {
       revision: workflow.revision,
       epoch: workflow.epoch,
     });
+    const cancellation = reserveWorkflowCancellation(repo, workflow.id, {
+      revision: workflow.revision, epoch: workflow.epoch,
+    });
     workflow = completeWorkflowCancellation(repo, workflow.id, {
-      revision: workflow.revision,
-      epoch: workflow.epoch,
+      revision: cancellation.workflow.revision,
+      epoch: cancellation.workflow.epoch,
+      lease: cancellation.lease,
       failedJobIds: [],
     });
     const workflowFile = resolveWorkflowFile(repo, workflow.id);
@@ -342,9 +497,13 @@ describe("peer workflow store", () => {
       revision: workflow.revision,
       epoch: workflow.epoch,
     });
+    const cancellation = reserveWorkflowCancellation(repo, workflow.id, {
+      revision: workflow.revision, epoch: workflow.epoch,
+    });
     workflow = completeWorkflowCancellation(repo, workflow.id, {
-      revision: workflow.revision,
-      epoch: workflow.epoch,
+      revision: cancellation.workflow.revision,
+      epoch: cancellation.workflow.epoch,
+      lease: cancellation.lease,
       failedJobIds: [],
     });
     const workflowFile = resolveWorkflowFile(repo, workflow.id);
@@ -374,6 +533,7 @@ describe("peer workflow store", () => {
     workflow = submitWorkflowStage(repo, workflow.id, {
       stage: "memo", revision: workflow.revision, epoch: workflow.epoch,
       payload: { text: "keep these exact bytes: π" },
+      lease: workflow.attemptLease,
     });
     workflow = casStartWorkflowStage(repo, workflow.id, {
       stage: "critique", revision: workflow.revision, epoch: workflow.epoch,
@@ -381,6 +541,7 @@ describe("peer workflow store", () => {
     workflow = markWorkflowBranchFailure(repo, workflow.id, {
       stage: "critique", revision: workflow.revision, epoch: workflow.epoch,
       reason: "model unavailable",
+      lease: workflow.attemptLease,
     });
     workflow = casStartWorkflowStage(repo, workflow.id, {
       stage: "memo", branchId: "alpha", revision: workflow.revision, epoch: workflow.epoch,
@@ -388,6 +549,7 @@ describe("peer workflow store", () => {
     workflow = submitWorkflowStage(repo, workflow.id, {
       stage: "memo", branchId: "alpha", revision: workflow.revision, epoch: workflow.epoch,
       payload: { text: "alpha memo" },
+      lease: workflow.attemptLease,
     });
     workflow = casStartWorkflowStage(repo, workflow.id, {
       stage: "memo", branchId: "beta", revision: workflow.revision, epoch: workflow.epoch,
@@ -395,6 +557,7 @@ describe("peer workflow store", () => {
     workflow = markWorkflowBranchFailure(repo, workflow.id, {
       stage: "memo", branchId: "beta", revision: workflow.revision, epoch: workflow.epoch,
       reason: "timeout",
+      lease: workflow.attemptLease,
     });
     const before = fs.readFileSync(resolveWorkflowFile(repo, workflow.id));
 
@@ -469,7 +632,10 @@ describe("peer workflow store", () => {
       })),
       "STALE_WORKSPACE"
     );
-    assert.equal(readWorkflow(staleRepo, stale.id).failureReason, "STALE_WORKSPACE");
+    const staleStored = readWorkflow(staleRepo, stale.id);
+    assert.equal(staleStored.failureReason, "STALE_WORKSPACE");
+    assert.equal(staleStored.incompleteGeneration, 1);
+    assert.equal(workflowNotificationEvent(staleStored), "incomplete:1");
 
     const unsafeRepo = createRepo();
     let unsafe = createWorkflow(unsafeRepo, { id: "workflow-unsafe" });
@@ -482,6 +648,7 @@ describe("peer workflow store", () => {
       errorCode(() => submitWorkflowStage(unsafeRepo, unsafe.id, {
         stage: "memo", revision: unsafe.revision, epoch: unsafe.epoch,
         payload: { text: "unsafe" },
+        lease: unsafe.attemptLease,
       })),
       "SAFETY_VIOLATION"
     );
@@ -510,6 +677,7 @@ describe("peer workflow store", () => {
         revision: workflow.revision,
         epoch: workflow.epoch,
         reason: "worker timeout",
+        lease: workflow.attemptLease,
       })),
       "SAFETY_VIOLATION"
     );
@@ -612,6 +780,7 @@ describe("peer workflow store", () => {
       epoch: workflow.epoch,
       reason: "process identity unavailable",
       cancelFailed: true,
+      lease: workflow.attemptLease,
     });
 
     assert.equal(workflow.status, "cancel_failed");
@@ -632,14 +801,19 @@ describe("peer workflow store", () => {
     workflow = markWorkflowBranchFailure(repo, workflow.id, {
       stage: "memo", branchId: "alpha", revision: workflow.revision, epoch: workflow.epoch,
       reason: "cancel signal failed", cancelFailed: true,
+      lease: workflow.attemptLease,
     });
 
     assert.deepEqual(workflow.branchAttempts[0], startedAttempt);
     assert.equal(workflow.branchAttempts[1].status, "cancel_failed");
 
+    const reservation = reserveWorkflowCancellation(repo, workflow.id, {
+      revision: workflow.revision, epoch: workflow.epoch,
+    });
     const cancelled = completeWorkflowCancellation(repo, workflow.id, {
-      revision: workflow.revision,
-      epoch: workflow.epoch,
+      revision: reservation.workflow.revision,
+      epoch: reservation.workflow.epoch,
+      lease: reservation.lease,
       failedJobIds: ["workflow-child-a"],
     });
     assert.equal(cancelled.status, "cancel_failed");
