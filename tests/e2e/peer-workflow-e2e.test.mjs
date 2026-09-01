@@ -39,6 +39,7 @@ input.on("line", (line) => {
 function writeFakeClaude(filePath) {
   fs.writeFileSync(filePath, `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 const args = process.argv.slice(2);
 const value = (flag) => {
   const index = args.indexOf(flag);
@@ -55,13 +56,24 @@ async function main() {
   if (args[0] === "auth" && args[1] === "status") return void process.stdout.write("authenticated\\n");
   const prompt = await stdin();
   const resumed = value("--resume");
-  const sessionId = resumed ? "forked-peer-session" : "fresh-peer-session";
+  const critique = prompt.includes("Critique both frozen memos");
+  const sessionId = resumed ? "forked-peer-session" : critique ? "fresh-critique-session" : "fresh-peer-session";
   const mcpPath = value("--mcp-config");
   fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({
     args,
     prompt,
     mcpConfig: mcpPath ? JSON.parse(fs.readFileSync(mcpPath, "utf8")) : null,
   }) + "\\n");
+  if (process.env.FAKE_CLAUDE_SANDBOX_UNAVAILABLE === "1") {
+    process.stderr.write("Sandbox initialization failed: sandbox unavailable\\n");
+    process.exitCode = 1;
+    return;
+  }
+  if (!args.includes("--no-session-persistence")) {
+    const projectDir = path.join(process.env.HOME, ".claude", "projects", "fake");
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(path.join(projectDir, sessionId + ".jsonl"), prompt, "utf8");
+  }
   const tool = (name, input) => process.stdout.write(JSON.stringify({
     type: "stream_event",
     session_id: sessionId,
@@ -69,22 +81,39 @@ async function main() {
   }) + "\\n");
   tool("Read", { file_path: process.env.FAKE_REPO_FILE });
   if (process.env.FAKE_CLAUDE_SPARSE !== "1") tool("WebSearch", { query: "primary docs" });
+  if (process.env.FAKE_CLAUDE_DELTA_MARKER) process.stdout.write(JSON.stringify({
+    type: "stream_event",
+    session_id: sessionId,
+    event: { type: "content_block_delta", delta: {
+      type: "text_delta", text: process.env.FAKE_CLAUDE_DELTA_MARKER,
+    } },
+  }) + "\\n");
   if (!resumed) process.stdout.write(JSON.stringify({
     type: "system", subtype: "model_fallback", session_id: sessionId,
     from_model: "claude-fable-5", to_model: "claude-opus-5", reason: "capacity",
   }) + "\\n");
-  const payload = resumed
+  const payload = critique
+    ? { content: { critique: "Compare the frozen memos." } }
+    : resumed
     ? { content: { critique: "Compare the frozen memos." } }
     : {
-        content: { findings: ["Repository and primary evidence agree."] },
+        content: { findings: [process.env.FAKE_CLAUDE_MARKER || "Repository and primary evidence agree."] },
         repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
         webCitations: process.env.FAKE_CLAUDE_SPARSE === "1" ? [] : ["https://example.test/primary"],
       };
-  process.stdout.write(JSON.stringify({
+  const emitResult = () => process.stdout.write(JSON.stringify({
     type: "result", session_id: sessionId, result: JSON.stringify(payload),
     model: "claude-opus-5",
     modelUsage: { "claude-opus-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
   }) + "\\n");
+  if (process.env.FAKE_CLAUDE_RESULT_ON_TERM === "1") {
+    process.on("SIGTERM", () => { emitResult(); process.exit(0); });
+    setInterval(() => {}, 1000);
+    return;
+  }
+  const delayMs = Number(process.env.FAKE_CLAUDE_DELAY_MS || 0);
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  emitResult();
 }
 main().catch((error) => { process.stderr.write(String(error.stack || error) + "\\n"); process.exitCode = 1; });
 `, "utf8");
@@ -171,6 +200,16 @@ function runAsync(testEnv, args, options = {}) {
   });
 }
 
+async function waitFor(check, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail("Timed out waiting for test condition");
+}
+
 function stateDir(testEnv) {
   const canonical = fs.realpathSync.native(testEnv.workspaceDir);
   const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 12);
@@ -179,6 +218,15 @@ function stateDir(testEnv) {
 
 function readWorkflow(testEnv, id) {
   return JSON.parse(fs.readFileSync(path.join(stateDir(testEnv), "workflows", `${id}.json`), "utf8"));
+}
+
+function readJobs(testEnv, workflowId) {
+  const jobsDir = path.join(stateDir(testEnv), "jobs");
+  if (!fs.existsSync(jobsDir)) return [];
+  return fs.readdirSync(jobsDir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(jobsDir, name), "utf8")))
+    .filter((job) => job.workflowId === workflowId);
 }
 
 function readStateText(testEnv) {
@@ -191,6 +239,20 @@ function readStateText(testEnv) {
     }
   };
   visit(stateDir(testEnv));
+  return values.join("\n");
+}
+
+function readTreeText(root, include = (_filePath) => true) {
+  if (!fs.existsSync(root)) return "";
+  const values = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(candidate);
+      else if (entry.isFile() && include(candidate)) values.push(fs.readFileSync(candidate, "utf8"));
+    }
+  };
+  visit(root);
   return values.join("\n");
 }
 
@@ -255,19 +317,38 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     const claudeLease = planLease(created, "_claude_");
     const checkpointLease = planLease(created, "_codex_", "checkpoint");
     activate(testEnv, created, "memo", "codex", codexLease);
+    const marker = "CLAUDE_FIRST_ACCEPTANCE_MARKER_4A7D91";
+    const progressMarker = "CLAUDE_PROGRESS_MUST_NOT_PERSIST_8C2E65";
+    const claudePromise = runAsync(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease), env: {
+      FAKE_CLAUDE_MARKER: marker,
+      FAKE_CLAUDE_DELTA_MARKER: progressMarker,
+      FAKE_CLAUDE_DELAY_MS: "25",
+    } });
+    await waitFor(() => readWorkflow(testEnv, created.workflow.id).branches.claude.commitment);
+    const managedRoot = stateDir(testEnv);
+    const waitingSurfaces = {
+      workflows: readTreeText(path.join(managedRoot, "workflows")),
+      jobs: readTreeText(path.join(managedRoot, "jobs"), (file) => file.endsWith(".json")),
+      logs: readTreeText(path.join(managedRoot, "jobs"), (file) => file.endsWith(".log")),
+      codexState: readTreeText(testEnv.env.CODEX_HOME),
+      claudeProjects: readTreeText(path.join(testEnv.env.HOME, ".claude", "projects")),
+    };
+    for (const [surface, text] of Object.entries(waitingSurfaces)) {
+      assert.doesNotMatch(text, new RegExp(marker), `${surface} exposed terminal content`);
+      assert.doesNotMatch(text, new RegExp(progressMarker), `${surface} exposed streamed content`);
+    }
+    assert.equal(fs.existsSync(path.join(testEnv.env.HOME, ".claude", "projects")), false);
 
-    const [codex, claude] = await Promise.all([
-      runAsync(testEnv, [
-        "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
-        "--branch", "codex", "--brief-hash", created.workflow.briefHash,
-        "--epoch", String(created.workflow.epoch), "--json",
-      ], { input: attemptInput(codexLease, memo(testEnv, "codex")) }),
-      runAsync(testEnv, [
-        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-        "--brief-hash", created.workflow.briefHash,
-        "--epoch", String(created.workflow.epoch), "--json",
-      ], { input: attemptInput(claudeLease) }),
-    ]);
+    const codex = await runAsync(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(codexLease, memo(testEnv, "codex")) });
+    const claude = await claudePromise;
     assert.equal(codex.status, 0, codex.stderr || codex.stdout);
     assert.equal(claude.status, 0, claude.stderr || claude.stdout);
     activate(testEnv, created, "checkpoint", null, checkpointLease);
@@ -349,6 +430,19 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     const retryClaudeLease = planLease(retry, "_claude_");
     const retryCheckpointLease = planLease(retry, "_checkpoint_", "checkpoint");
 
+    const isolated = createPeer(testEnv, "Sandbox failure path.");
+    const isolationLease = planLease(isolated, "_claude_");
+    const isolationFailure = run(testEnv, [
+      "peer-claude-turn", isolated.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", isolated.workflow.briefHash,
+      "--epoch", String(isolated.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(isolationLease),
+      env: { FAKE_CLAUDE_SANDBOX_UNAVAILABLE: "1" },
+    });
+    assert.notEqual(isolationFailure.status, 0);
+    assert.match(isolationFailure.stderr, /PEER_ISOLATION_UNAVAILABLE/u);
+
     const lifecycle = createPeer(testEnv, "SessionEnd path.");
     const startedAt = new Date().toISOString();
     writeWorkflow(testEnv, {
@@ -386,27 +480,28 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     assert.equal(readWorkflow(testEnv, lifecycle.workflow.id).branches.codex.failureReason, "SESSION_ENDED");
 
     const cancellable = createPeer(testEnv, "Cancellation path.");
-    const jobsDir = path.join(stateDir(testEnv), "jobs");
-    fs.mkdirSync(jobsDir, { recursive: true });
-    fs.writeFileSync(path.join(jobsDir, "peer-cancel-e2e.json"), JSON.stringify({
-      id: "peer-cancel-e2e",
-      status: "queued",
-      jobClass: "workflow",
-      workflowId: cancellable.workflow.id,
-      workflowStage: "memo",
-      sessionId: "owner-a",
-      workspaceRoot: fs.realpathSync.native(testEnv.workspaceDir),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }), "utf8");
+    const cancellableLease = planLease(cancellable, "_claude_");
+    const cancellableClaude = runAsync(testEnv, [
+      "peer-claude-turn", cancellable.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", cancellable.workflow.briefHash,
+      "--epoch", String(cancellable.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(cancellableLease),
+      env: { FAKE_CLAUDE_RESULT_ON_TERM: "1" },
+    });
+    await waitFor(() => readJobs(testEnv, cancellable.workflow.id)
+      .some((job) => job.status === "running" && Number.isInteger(job.pid)));
     const cancelled = runJson(testEnv, [
       "cancel", cancellable.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
     ]);
+    await cancellableClaude;
     assert.equal(cancelled.workflow.status, "cancelled");
+    assert.equal(readWorkflow(testEnv, cancellable.workflow.id).status, "cancelled");
 
     const invocations = fs.readFileSync(testEnv.env.FAKE_CLAUDE_LOG, "utf8").trim()
       .split("\n").map((line) => JSON.parse(line));
     assert.equal(invocations.every(({ args }) => !args.some((value) => value.startsWith("Agent"))), true);
+    assert.equal(invocations.every(({ args }) => args.includes("--no-session-persistence")), true);
     assert.equal(invocations.every(({ mcpConfig }) =>
       JSON.stringify(Object.keys(mcpConfig.mcpServers)) === JSON.stringify(["docs"])
     ), true);
@@ -416,6 +511,7 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     assert.deepEqual(initialWorkflow.toolManifest.map(({ toolId }) => toolId), ["mcp__docs__search"]);
     assert.equal(initialWorkflow.branches.claude.payload.repoCitations.length, 1);
     assert.equal(initialWorkflow.branches.claude.payload.webCitations.length, 1);
+    assert.deepEqual(initialWorkflow.branches.claude.payload.content.findings, [marker]);
     const publicAndDurable = [
       readStateText(testEnv),
       JSON.stringify(created.workflow),
@@ -434,6 +530,8 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
       partialClaudeLease,
       retryClaudeLease,
       retryCheckpointLease,
+      isolationLease,
+      cancellableLease,
     ]) {
       assert.doesNotMatch(publicAndDurable, new RegExp(lease));
     }
