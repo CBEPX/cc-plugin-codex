@@ -29,7 +29,7 @@ In short: rerun preflight after installation or restart.
 2. Run `mcp-diagnose --json` with the user's exact MCP flags. This actively starts/probes every configured server in scope and can therefore have server-defined side effects. The active Codex controller chooses the smallest relevant subset of eligible exact IDs from their descriptions. Pass those choices as repeated internal `--auto-mcp-tool` values to `peer-create`; Node validates exact IDs and safety only. Eligibility trusts a server's `readOnlyHint` declaration or the audited registry, is not an OS sandbox, and always vetoes `destructiveHint`. With `--no-auto-tools`, choose none automatically. Exact user pins remain exact and still must be eligible.
 3. Keep a shell-hostile or multiline brief out of argv: normalize it once, write it to an OS temporary file outside the workspace, and use the internal `--brief-file`. Delete that temporary file after `peer-create` returns.
 4. Run `peer-create --mode <mode> --cwd <workspaceRoot> --owner-session-id <ownerSessionId> ... --json`. Preserve public model/MCP flags and controller-selected internal IDs.
-5. Use the returned `spawnPlan` with built-in `spawn_agent`: spawn exactly two children. For both, pass `fork_turns: "none"` and the returned self-contained message. Do not add parent history.
+5. `peer-create` has already reserved the Codex memo, Claude memo, and checkpoint attempts atomically. Use its returned `spawnPlan` with built-in `spawn_agent`: spawn exactly two children. For both, pass `fork_turns: "none"` and the returned self-contained message. Do not add parent history.
 
 The Codex reasoning child uses `reasoning_effort: "xhigh"` by default. Omit `model` when `--codex-model` was not supplied; otherwise pass the requested model. The Claude forwarder uses `reasoning_effort: "medium"` and omits `model`, inheriting the active runtime model.
 
@@ -39,7 +39,9 @@ Initial execution is always background: do not wait in the parent turn. Return t
 
 ## Child contracts
 
-The Codex reasoning worker is not a forwarder. It researches independently with the repo and web routes exposed to its turn, performs zero workspace writes, and sends one object with `content`, `repoCitations`, `webCitations`, and public `toolEvents` as JSON on stdin to `peer-submit-memo`. Every specialized mutating command includes `--epoch <returned-epoch>` from its spawn or resume plan; never omit or refresh that captured workflow epoch inside an old worker. That command accepts only the Codex memo; Claude memo submission occurs only inside the trusted `peer-claude-turn` execution path. It then polls `peer-wait`, whose status-only view redacts the sibling payload until the Codex memo is sealed. If Claude completed, it compares the separate frozen memos and sends `agreements`, `disagreements`, and `decisionsNeeded` as JSON on stdin to `peer-checkpoint`. If Claude is incomplete, it stops without replacing either memo.
+The Codex reasoning worker is not a forwarder. It first activates its reserved memo attempt by sending the raw lease through JSON stdin to the returned `peer-activate-attempt` command, then researches independently with the repo and web routes exposed to its turn and performs zero workspace writes. It sends `{lease,payload:{content,repoCitations,webCitations,toolEvents}}` as JSON on stdin to `peer-submit-memo`. Every specialized mutating command includes `--epoch <returned-epoch>` from its spawn or resume plan; never omit or refresh that captured workflow epoch inside an old worker. That command accepts only the Codex memo; Claude memo submission occurs only inside the trusted `peer-claude-turn` execution path. It then polls `peer-wait`, whose status-only view redacts the sibling payload until the Codex memo is sealed. If Claude completed, it activates its checkpoint reservation immediately before comparison and sends `{lease,payload:{agreements,disagreements,decisionsNeeded}}` as JSON on stdin to `peer-checkpoint`. If Claude is incomplete, it stops without replacing either memo.
+
+Each worker receives only its own raw lease in its spawn message. A raw lease is never a Node argv value and never enters workflow, job, log, status, result, or rendered state. Durable targets contain only `attemptReservation: { leaseDigest, epoch, reservedAt }`; attempts and append-only attempt history advance when activation wins, not when the controller reserves work. Submit and failure transitions reuse the activated lease and epoch fence.
 
 The pure Claude forwarder must run exactly one companion command, in the foreground, and return stdout unchanged. It does no repository inspection or reasoning itself. Never use shell backgrounding (`nohup`, detached spawn, or an ampersand operator). Never invoke `codex exec`. If the shell yields a session, poll that same session until exit.
 
@@ -57,21 +59,21 @@ Every initial memo needs non-empty structured content, a canonical in-workspace 
 
 Continue is foreground.
 
-1. Read the explicit workflow in the current canonical workspace. Run `peer-resume-plan <id> --continue --owner-session-id <current-id> --json`, sending optional feedback as JSON on stdin. This explicitly rebinds a cross-session owner; never use generic rescue `--resume-last`. Capture the returned workflow epoch in every `peer-claude-critique` and `peer-final` command.
-2. Spawn one pure Claude forwarder with `fork_turns: "none"`, inherited model, and medium effort. It runs exactly one foreground `peer-claude-critique` command and returns stdout unchanged. Wait for it.
+1. Read the explicit workflow in the current canonical workspace. Run `peer-resume-plan <id> --continue --owner-session-id <current-id> --json`, sending optional feedback as JSON on stdin. This explicitly rebinds a cross-session owner and reserves critique plus synthesis before dispatch; never use generic rescue `--resume-last`.
+2. Execute the returned plans sequentially. Spawn the pure Claude forwarder with `fork_turns: "none"`, inherited model, and medium effort. Its heredoc supplies the reserved critique lease to the one foreground `peer-claude-critique` command. Wait for it.
 3. The companion starts one fresh Claude turn with `--no-session-persistence`. Its stdin prompt contains the frozen brief, both frozen memos, and feedback; neither memo is rewritten.
-4. Spawn one Codex synthesizer with `fork_turns: "none"`, the workflow's Codex model choice, and Codex effort. It reads the frozen workflow, produces the mode-specific final answer, sends it as JSON on stdin to `peer-final`, and performs zero workspace writes. Wait for it and return the stored final answer.
+4. Spawn the returned Codex synthesizer with `fork_turns: "none"`, the workflow's Codex model choice, and Codex effort. It activates its supplied synthesis lease immediately before reading the frozen workflow, produces the mode-specific final answer, sends `{lease,payload}` as JSON on stdin to `peer-final`, and performs zero workspace writes. Wait for it and return the stored final answer.
 
 ## Retry
 
-Run `peer-resume-plan <id> --retry --owner-session-id <current-id> --json`. Execute only the returned work, passing the returned workflow epoch to each specialized mutating command:
+Run `peer-resume-plan <id> --retry --owner-session-id <current-id> --json`. It rotates reservations only for unfinished targets and returns the exact fenced spawn plans. Execute only those plans:
 
 - a missing `codex` branch gets an independent Codex reasoning worker;
-- a missing `claude` branch gets the pure Claude forwarder;
+- a missing `claude` branch gets the pure Claude forwarder plus a checkpoint waiter even when Codex is already complete;
 - a missing `checkpoint` gets a Codex checkpoint worker after both memos are terminal;
 - a missing `critique` gets the foreground Claude forwarder, then synthesis if still missing;
 - a missing `synthesis` gets only the foreground Codex synthesizer.
 
-Never restart or replace a completed branch/stage; retry only the missing stage. A cross-session retry uses the explicit workflow rebind, never generic task resume.
+When Codex itself retries, its worker owns the checkpoint lease instead of spawning a second waiter. Never restart or replace a completed branch/stage; retry only the missing stage and its still-unfinished downstream work, while completed payload bytes stay immutable. A cross-session retry uses the explicit workflow rebind, never generic task resume.
 
 SessionEnd owns shutdown: active linked companion work is stopped first; only targets whose linked cancellation is terminally successful become retryable. Cancellation failure remains `cancel_failed`, exposes no retry work, and no child may keep the workflow running headless.

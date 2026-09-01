@@ -127,7 +127,33 @@ afterEach(() => {
 });
 
 describe("workflow companion internals", () => {
-  it("creates, reads, lists, starts, submits, retries, and rebinds through narrow JSON commands", () => {
+  it("does not mutate a workflow when generic submission input is malformed", () => {
+    const testEnv = createEnvironment();
+    const workflow = runJson(testEnv, [
+      "workflow-create", "--cwd", testEnv.workspaceDir, "--json",
+    ], { input: JSON.stringify({
+      id: "workflow-malformed-submit",
+      mode: "design",
+      brief: "Keep malformed input atomic.",
+      originSessionId: "owner-a",
+      stages: ["memo"],
+    }) });
+    const filePath = path.join(
+      stateDirFor(testEnv), "workflows", `${workflow.id}.json`
+    );
+    const before = fs.readFileSync(filePath);
+
+    const malformed = runCompanion(testEnv, [
+      "workflow-submit-stage", workflow.id, "--cwd", testEnv.workspaceDir,
+      "--stage", "memo", "--revision", String(workflow.revision),
+      "--epoch", String(workflow.epoch), "--json",
+    ], { input: "{" });
+
+    assert.notEqual(malformed.status, 0);
+    assert.deepEqual(fs.readFileSync(filePath), before);
+  });
+
+  it("creates, reads, lists, submits, retries, and rebinds through narrow JSON commands", () => {
     const testEnv = createEnvironment();
     const created = runJson(
       testEnv,

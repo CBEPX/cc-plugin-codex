@@ -12,6 +12,7 @@ import { afterEach, describe, it } from "node:test";
 
 import {
   cleanupOldWorkflows,
+  activateWorkflowAttempt,
   commitWorkflowStage,
   completeWorkflowCancellation,
   getWorkflowRetryContext,
@@ -22,9 +23,9 @@ import {
   rebindWorkflowOwner,
   reserveWorkflowCancellation,
   reserveWorkflow,
+  reserveWorkflowAttempts,
   resolveWorkflowFile,
   resolveWorkflowsDir,
-  casStartWorkflowStage,
   submitWorkflowStage,
   revealWorkflowStage,
   workflowNotificationEvent,
@@ -35,7 +36,7 @@ const WORKFLOW_RACE_FIXTURE = path.join(
   PROJECT_ROOT,
   "tests",
   "fixtures",
-  "start-workflow-stage.mjs"
+  "activate-workflow-attempt.mjs"
 );
 const tempDirs = [];
 
@@ -97,12 +98,28 @@ function errorCode(fn) {
   return null;
 }
 
-function spawnRace(repo, id, revision, epoch) {
+function casStartWorkflowStage(cwd, workflowId, options) {
+  const reservation = reserveWorkflowAttempts(cwd, workflowId, options, [{
+    stage: options.stage,
+    ...(options.branchId ? { branchId: options.branchId } : {}),
+  }]);
+  const key = options.branchId ? `branch:${options.branchId}` : `stage:${options.stage}`;
+  const lease = reservation.leases[key];
+  const workflow = activateWorkflowAttempt(cwd, workflowId, {
+    ...options,
+    revision: reservation.workflow.revision,
+    lease,
+  });
+  Object.defineProperty(workflow, "attemptLease", { value: lease });
+  return workflow;
+}
+
+function spawnRace(repo, id, revision, epoch, lease) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       [WORKFLOW_RACE_FIXTURE, repo, id, String(revision), String(epoch)],
-      { cwd: PROJECT_ROOT, env: process.env, stdio: ["ignore", "pipe", "pipe"] }
+      { cwd: PROJECT_ROOT, env: process.env, stdio: ["pipe", "pipe", "pipe"] }
     );
     let stdout = "";
     let stderr = "";
@@ -112,6 +129,7 @@ function spawnRace(repo, id, revision, epoch) {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(JSON.stringify({ lease, stage: "memo", branchId: null }));
   });
 }
 
@@ -132,7 +150,10 @@ describe("peer workflow store", () => {
     assert.match(first.attemptLease, /^[a-f0-9]{64}$/u);
     const storedSource = fs.readFileSync(resolveWorkflowFile(repo, created.id), "utf8");
     assert.doesNotMatch(storedSource, new RegExp(first.attemptLease));
-    assert.match(readWorkflow(repo, created.id).branches.alpha.leaseDigest, /^[a-f0-9]{64}$/u);
+    assert.match(
+      readWorkflow(repo, created.id).branches.alpha.attemptReservation.leaseDigest,
+      /^[a-f0-9]{64}$/u
+    );
 
     assert.equal(errorCode(() => submitWorkflowStage(repo, created.id, {
       stage: "memo", branchId: "alpha",
@@ -356,11 +377,16 @@ describe("peer workflow store", () => {
 
   it("allows only one CAS stage start for a shared revision", async () => {
     const repo = createRepo();
-    const workflow = createWorkflow(repo);
+    const created = createWorkflow(repo);
+    const reservation = reserveWorkflowAttempts(repo, created.id, {
+      revision: created.revision,
+      epoch: created.epoch,
+    }, [{ stage: "memo" }]);
+    const lease = reservation.leases["stage:memo"];
 
     const results = await Promise.all([
-      spawnRace(repo, workflow.id, workflow.revision, workflow.epoch),
-      spawnRace(repo, workflow.id, workflow.revision, workflow.epoch),
+      spawnRace(repo, reservation.workflow.id, reservation.workflow.revision, reservation.workflow.epoch, lease),
+      spawnRace(repo, reservation.workflow.id, reservation.workflow.revision, reservation.workflow.epoch, lease),
     ]);
 
     assert.equal(results.filter((result) => result.code === 0).length, 1);
@@ -369,8 +395,8 @@ describe("peer workflow store", () => {
       1,
       JSON.stringify(results)
     );
-    const stored = readWorkflow(repo, workflow.id);
-    assert.equal(stored.revision, 1);
+    const stored = readWorkflow(repo, reservation.workflow.id);
+    assert.equal(stored.revision, 2);
     assert.equal(stored.stages.memo.status, "running");
   });
 

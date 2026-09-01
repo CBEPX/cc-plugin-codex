@@ -87,6 +87,9 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
     "peer-wait",
     "redacts the sibling payload until the Codex memo is sealed",
     "JSON on stdin",
+    "attemptReservation: { leaseDigest, epoch, reservedAt }",
+    "never a Node argv value",
+    "attempt history advance when activation wins",
     "peer-claude-turn",
     "Read, Glob, Grep",
     "WebSearch, WebFetch",
@@ -112,6 +115,7 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
     "decisions needed",
     "fresh Claude turn",
     "retry only the missing stage",
+    "checkpoint waiter",
     "A failed or unresolved linked cancellation leaves the target `cancel_failed` with no retry work",
     "peer-final",
   ], "peer runtime");

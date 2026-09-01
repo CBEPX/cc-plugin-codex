@@ -273,19 +273,12 @@ function newLease() {
   return randomBytes(32).toString("hex");
 }
 
-function withAttemptLease(workflow, lease) {
-  Object.defineProperty(workflow, "attemptLease", {
-    value: lease,
-    enumerable: false,
-  });
-  return workflow;
-}
-
 function assertAttemptFence(workflow, target, options) {
+  const reservation = target.state.attemptReservation;
   if (
-    target.state.attemptEpoch !== workflow.epoch ||
+    reservation?.epoch !== workflow.epoch ||
     typeof options.lease !== "string" ||
-    target.state.leaseDigest !== leaseDigest(options.lease)
+    reservation.leaseDigest !== leaseDigest(options.lease)
   ) {
     throw workflowError("STALE_ATTEMPT", `${target.key} attempt lease is stale.`);
   }
@@ -390,13 +383,21 @@ function updateTarget(workflow, target, state) {
   };
 }
 
+function attemptTargetKey(target) {
+  return `${target.collection === "branches" ? "branch" : "stage"}:${target.key}`;
+}
+
+function terminalTargetState(state, fields) {
+  const { attemptReservation: _attemptReservation, ...rest } = state;
+  return { ...rest, ...fields };
+}
+
 function workflowSafetyViolation(workflow, target, timestamp, fingerprint) {
-  const failedState = {
-    ...target.state,
+  const failedState = terminalTargetState(target.state, {
     status: "retryable_failed",
     failureReason: "SAFETY_VIOLATION",
     completedAt: timestamp,
-  };
+  });
   return {
     ...updateTarget(workflow, target, failedState),
     status: "incomplete",
@@ -533,14 +534,59 @@ export function listWorkflows(cwd, options = {}) {
     .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
 }
 
-export function casStartWorkflowStage(cwd, workflowId, options) {
+export function reserveWorkflowAttempts(cwd, workflowId, options, targets) {
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw workflowError("INVALID_ATTEMPT_TARGETS", "At least one attempt target is required.");
+  }
+  const leases = {};
+  const workflow = mutateWorkflow(cwd, workflowId, options, (current, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(current.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${current.id} is ${current.status}.`);
+    }
+    const resolved = targets.map(({ stage, branchId }) => targetState(current, stage, branchId));
+    const keys = resolved.map(attemptTargetKey);
+    if (new Set(keys).size !== keys.length) {
+      throw workflowError("DUPLICATE_ATTEMPT_TARGET", "Attempt targets must be unique.");
+    }
+    let next = current;
+    for (const target of resolved) {
+      if (target.state.status === "completed") {
+        throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
+      }
+      if (!["pending", "retryable_failed"].includes(target.state.status)) {
+        throw workflowError("DUPLICATE_CONTINUE", `${target.key} cannot be reserved from ${target.state.status}.`);
+      }
+      const lease = newLease();
+      leases[attemptTargetKey(target)] = lease;
+      next = updateTarget(next, targetState(next, target.stage, target.collection === "branches" ? target.key : null), {
+        ...target.state,
+        attemptReservation: {
+          leaseDigest: leaseDigest(lease),
+          epoch: current.epoch,
+          reservedAt: timestamp,
+        },
+      });
+    }
+    return next;
+  });
+  return { workflow, leases };
+}
+
+export function activateWorkflowAttempt(cwd, workflowId, options) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
-  const lease = newLease();
   let drifted = false;
   const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
     if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
       throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
     }
+    const target = targetState(workflow, options.stage, options.branchId);
+    if (target.state.status === "completed") {
+      throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
+    }
+    if (target.state.status === "running") {
+      throw workflowError("DUPLICATE_CONTINUE", `${target.key} is already running.`);
+    }
+    assertAttemptFence(workflow, target, options);
     if (!sameFingerprint(workflow.fingerprint, currentFingerprint)) {
       drifted = true;
       return {
@@ -551,13 +597,6 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
         ...enterIncomplete(workflow),
       };
     }
-    const target = targetState(workflow, options.stage, options.branchId);
-    if (target.state.status === "completed") {
-      throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
-    }
-    if (target.state.status === "running") {
-      throw workflowError("DUPLICATE_CONTINUE", `${target.key} is already running.`);
-    }
     const attempts = target.state.attempts + 1;
     const startedState = {
       ...target.state,
@@ -567,8 +606,6 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
       failureReason: null,
       startedAt: timestamp,
       startFingerprint: currentFingerprint,
-      attemptEpoch: workflow.epoch,
-      leaseDigest: leaseDigest(lease),
       commitment: null,
     };
     return {
@@ -590,7 +627,7 @@ export function casStartWorkflowStage(cwd, workflowId, options) {
   if (drifted) {
     throw workflowError("STALE_WORKSPACE", "Workspace changed before continuation.", next);
   }
-  return withAttemptLease(next, lease);
+  return next;
 }
 
 function completeWorkflowStage(cwd, workflowId, options, reveal) {
@@ -611,10 +648,13 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
     if (target.state.status === "completed") {
       throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
     }
-    if (target.state.status !== "running") {
+    if (!options.oneShot && target.state.status !== "running") {
       throw workflowError("STAGE_NOT_RUNNING", `${target.key} is not running.`);
     }
-    assertAttemptFence(workflow, target, options);
+    if (options.oneShot && !["pending", "retryable_failed"].includes(target.state.status)) {
+      throw workflowError("DUPLICATE_CONTINUE", `${target.key} cannot be submitted from ${target.state.status}.`);
+    }
+    if (!options.oneShot) assertAttemptFence(workflow, target, options);
     if (reveal) {
       if (!target.state.commitment || target.state.commitment !== payloadCommitment(payload)) {
         throw workflowError("COMMITMENT_MISMATCH", `${target.key} payload does not match its commitment.`);
@@ -622,7 +662,8 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
     } else if (target.state.commitment) {
       throw workflowError("STAGE_REVEAL_REQUIRED", `${target.key} requires the trusted reveal path.`);
     }
-    if (!sameFingerprint(target.state.startFingerprint, currentFingerprint)) {
+    const startFingerprint = options.oneShot ? workflow.fingerprint : target.state.startFingerprint;
+    if (!sameFingerprint(startFingerprint, currentFingerprint)) {
       violated = true;
       return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
     }
@@ -636,13 +677,18 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
         `Workflow ${workflow.id} already owns another Claude session.`
       );
     }
-    const completedState = {
-      ...target.state,
+    const completedState = terminalTargetState(target.state, {
       status: "completed",
       payload,
+      attempts: target.state.attempts + (options.oneShot ? 1 : 0),
       failureReason: null,
+      ...(options.oneShot ? {
+        stage: target.stage,
+        startedAt: timestamp,
+        startFingerprint: currentFingerprint,
+      } : {}),
       completedAt: timestamp,
-    };
+    });
     const status = options.status ?? (options.field === "finalResult" ? "completed" : "running");
     const phase = options.phase ?? (status === "completed" ? "done" : target.stage);
     return {
@@ -654,14 +700,21 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
       ...(options.field ? { [options.field]: payload } : {}),
       ...(options.claudeSessionId ? { claudeSessionId: options.claudeSessionId } : {}),
       ...(status === "completed" ? { completedAt: timestamp } : {}),
-      branchAttempts: appendBranchAttempt(
-        workflow,
-        target,
-        "completed",
-        "completed",
-        timestamp,
-        { payload }
-      ),
+      branchAttempts: options.oneShot
+        ? appendBranchAttempt(
+            {
+              ...workflow,
+              branchAttempts: appendBranchAttempt(
+                workflow, target, "started", "running", timestamp,
+                { fingerprint: currentFingerprint }
+              ),
+            },
+            { ...target, state: completedState },
+            "completed", "completed", timestamp, { payload }
+          )
+        : appendBranchAttempt(
+            workflow, target, "completed", "completed", timestamp, { payload }
+          ),
     };
   });
   if (violated) {
@@ -739,40 +792,86 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
     if (target.state.status === "completed") {
       throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
     }
-    if (target.state.status !== "running") {
+    if (!options.oneShot && target.state.status !== "running") {
       throw workflowError("STAGE_NOT_RUNNING", `${target.key} is not running.`);
     }
-    assertAttemptFence(workflow, target, options);
-    if (!sameFingerprint(target.state.startFingerprint, currentFingerprint)) {
+    if (options.oneShot && !["pending", "retryable_failed"].includes(target.state.status)) {
+      throw workflowError("DUPLICATE_CONTINUE", `${target.key} cannot fail from ${target.state.status}.`);
+    }
+    if (!options.oneShot) assertAttemptFence(workflow, target, options);
+    const startFingerprint = options.oneShot ? workflow.fingerprint : target.state.startFingerprint;
+    if (!sameFingerprint(startFingerprint, currentFingerprint)) {
       violated = true;
       return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
     }
-    const failedState = {
-      ...target.state,
+    const failedState = terminalTargetState(target.state, {
       status,
+      attempts: target.state.attempts + (options.oneShot ? 1 : 0),
       failureReason: reason,
+      ...(options.oneShot ? {
+        stage: target.stage,
+        startedAt: timestamp,
+        startFingerprint: currentFingerprint,
+      } : {}),
       completedAt: timestamp,
-    };
+    });
     return {
       ...updateTarget(workflow, target, failedState),
       status: options.cancelFailed ? "cancel_failed" : "incomplete",
       phase: target.stage,
       failureReason: reason,
       ...enterIncomplete(workflow),
-      branchAttempts: appendBranchAttempt(
-        workflow,
-        target,
-        "failed",
-        status,
-        timestamp,
-        { failureReason: reason }
-      ),
+      branchAttempts: options.oneShot
+        ? appendBranchAttempt(
+            {
+              ...workflow,
+              branchAttempts: appendBranchAttempt(
+                workflow, target, "started", "running", timestamp,
+                { fingerprint: currentFingerprint }
+              ),
+            },
+            { ...target, state: failedState },
+            "failed", status, timestamp, { failureReason: reason }
+          )
+        : appendBranchAttempt(
+            workflow, target, "failed", status, timestamp, { failureReason: reason }
+          ),
     };
   });
   if (violated) {
     throw workflowError("SAFETY_VIOLATION", "Workspace changed while a worker was running.", next);
   }
   return next;
+}
+
+export function reconcilePeerRetry(cwd, workflowId, options, linkedJobs = []) {
+  void linkedJobs;
+  const workflow = readWorkflow(cwd, workflowId, options);
+  if (!workflow) {
+    throw workflowError("WORKFLOW_NOT_FOUND", `No workflow found for ${workflowId}.`);
+  }
+  assertCas(workflow, options);
+  const retryable = (target) => ["pending", "retryable_failed"].includes(target?.status);
+  /** @type {Array<{stage: string, branchId?: string}>} */
+  const retryTargets = ["codex", "claude"]
+    .filter((branchId) => retryable(workflow.branches?.[branchId]))
+    .map((branchId) => ({ stage: "memo", branchId }));
+  if (retryTargets.length > 0) {
+    if (retryable(workflow.stages?.checkpoint)) retryTargets.push({ stage: "checkpoint" });
+    return { workflow, retryTargets };
+  }
+  if (retryable(workflow.stages?.checkpoint)) {
+    return { workflow, retryTargets: [{ stage: "checkpoint" }] };
+  }
+  if (workflow.stages?.feedback?.status === "completed" && retryable(workflow.stages?.critique)) {
+    retryTargets.push({ stage: "critique" });
+    if (retryable(workflow.stages?.synthesis)) retryTargets.push({ stage: "synthesis" });
+    return { workflow, retryTargets };
+  }
+  if (workflow.stages?.critique?.status === "completed" && retryable(workflow.stages?.synthesis)) {
+    retryTargets.push({ stage: "synthesis" });
+  }
+  return { workflow, retryTargets };
 }
 
 export function getWorkflowRetryContext(cwd, workflowId, options = {}) {
