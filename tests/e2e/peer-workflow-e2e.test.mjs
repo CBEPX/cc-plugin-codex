@@ -107,7 +107,16 @@ async function main() {
     modelUsage: { "claude-opus-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
   }) + "\\n");
   if (process.env.FAKE_CLAUDE_RESULT_ON_TERM === "1") {
-    process.on("SIGTERM", () => { emitResult(); process.exit(0); });
+    process.on("SIGTERM", () => {
+      emitResult();
+      fs.writeFileSync(
+        process.env.FAKE_CLAUDE_TERM_EMITTED_FILE,
+        process.env.FAKE_CLAUDE_MARKER + "\\n",
+        "utf8"
+      );
+      process.exit(0);
+    });
+    fs.writeFileSync(process.env.FAKE_CLAUDE_TERM_READY_FILE, "ready\\n", "utf8");
     setInterval(() => {}, 1000);
     return;
   }
@@ -218,15 +227,6 @@ function stateDir(testEnv) {
 
 function readWorkflow(testEnv, id) {
   return JSON.parse(fs.readFileSync(path.join(stateDir(testEnv), "workflows", `${id}.json`), "utf8"));
-}
-
-function readJobs(testEnv, workflowId) {
-  const jobsDir = path.join(stateDir(testEnv), "jobs");
-  if (!fs.existsSync(jobsDir)) return [];
-  return fs.readdirSync(jobsDir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => JSON.parse(fs.readFileSync(path.join(jobsDir, name), "utf8")))
-    .filter((job) => job.workflowId === workflowId);
 }
 
 function readStateText(testEnv) {
@@ -481,22 +481,41 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
 
     const cancellable = createPeer(testEnv, "Cancellation path.");
     const cancellableLease = planLease(cancellable, "_claude_");
+    const termReadyFile = path.join(testEnv.rootDir, "term-handler-ready");
+    const termEmittedFile = path.join(testEnv.rootDir, "term-result-emitted");
+    const lateResultMarker = "LATE_TERM_RESULT_MUST_NOT_PERSIST_73B4C1";
+    assert.equal(path.relative(testEnv.workspaceDir, termReadyFile).startsWith(".."), true);
     const cancellableClaude = runAsync(testEnv, [
       "peer-claude-turn", cancellable.workflow.id, "--cwd", testEnv.workspaceDir,
       "--brief-hash", cancellable.workflow.briefHash,
       "--epoch", String(cancellable.workflow.epoch), "--json",
     ], {
       input: attemptInput(cancellableLease),
-      env: { FAKE_CLAUDE_RESULT_ON_TERM: "1" },
+      env: {
+        FAKE_CLAUDE_RESULT_ON_TERM: "1",
+        FAKE_CLAUDE_MARKER: lateResultMarker,
+        FAKE_CLAUDE_TERM_READY_FILE: termReadyFile,
+        FAKE_CLAUDE_TERM_EMITTED_FILE: termEmittedFile,
+      },
     });
-    await waitFor(() => readJobs(testEnv, cancellable.workflow.id)
-      .some((job) => job.status === "running" && Number.isInteger(job.pid)));
+    try {
+      await waitFor(() => fs.existsSync(termReadyFile)
+        && fs.readFileSync(termReadyFile, "utf8") === "ready\n");
+    } catch (error) {
+      runJson(testEnv, ["cancel", cancellable.workflow.id, "--cwd", testEnv.workspaceDir, "--json"]);
+      await cancellableClaude;
+      throw error;
+    }
     const cancelled = runJson(testEnv, [
       "cancel", cancellable.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
     ]);
     await cancellableClaude;
+    assert.equal(fs.readFileSync(termEmittedFile, "utf8"), `${lateResultMarker}\n`);
     assert.equal(cancelled.workflow.status, "cancelled");
-    assert.equal(readWorkflow(testEnv, cancellable.workflow.id).status, "cancelled");
+    const cancelledStored = readWorkflow(testEnv, cancellable.workflow.id);
+    assert.equal(cancelledStored.status, "cancelled");
+    assert.equal(cancelledStored.branches.claude.payload, null);
+    assert.doesNotMatch(JSON.stringify(cancelledStored), new RegExp(lateResultMarker));
 
     const invocations = fs.readFileSync(testEnv.env.FAKE_CLAUDE_LOG, "utf8").trim()
       .split("\n").map((line) => JSON.parse(line));
