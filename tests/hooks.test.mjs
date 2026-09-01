@@ -683,6 +683,76 @@ describe("hooks", () => {
     }
   });
 
+  it("SessionEnd invalidates peer reservations whose workers never started", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const workspaceRoot = fs.realpathSync.native(testEnv.workspaceDir);
+      const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
+      const timestamp = new Date().toISOString();
+      const reserved = (label) => ({
+        status: "pending",
+        payload: null,
+        failureReason: null,
+        attempts: 0,
+        attemptReservation: {
+          epoch: 0,
+          leaseDigest: createHash("sha256").update(label).digest("hex"),
+          reservedAt: timestamp,
+        },
+      });
+      writePeerWorkflow(testEnv, {
+        version: 1,
+        id: "workflow-session-end-never-started",
+        mode: "design",
+        status: "queued",
+        phase: "queued",
+        revision: 1,
+        epoch: 0,
+        workspaceRoot,
+        fingerprint,
+        brief: "Invalidate never-started workers.",
+        briefHash: createHash("sha256").update("Invalidate never-started workers.").digest("hex"),
+        originSessionId: "hook-session",
+        currentOwnerSessionId: "hook-session",
+        modelManifest: [],
+        toolManifest: [],
+        stages: { checkpoint: reserved("checkpoint") },
+        branches: { codex: reserved("codex"), claude: reserved("claude") },
+        branchAttempts: [],
+        claudeSessionId: null,
+        checkpoint: null,
+        feedback: null,
+        critique: null,
+        finalResult: null,
+        failureReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+
+      runHook(
+        SESSION_HOOK,
+        ["SessionEnd"],
+        { cwd: testEnv.workspaceDir, session_id: "hook-session" },
+        testEnv.env
+      );
+
+      const workflow = readPeerWorkflow(testEnv, "workflow-session-end-never-started");
+      assert.equal(workflow.epoch, 1);
+      assert.equal(workflow.status, "incomplete");
+      for (const target of [
+        workflow.branches.codex,
+        workflow.branches.claude,
+        workflow.stages.checkpoint,
+      ]) {
+        assert.equal(target.status, "retryable_failed");
+        assert.equal(target.failureReason, "SESSION_ENDED");
+        assert.equal(Object.hasOwn(target, "attemptReservation"), false);
+      }
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
   it("SessionEnd keeps peer work cancel_failed when its linked process cannot be cancelled", async (t) => {
     if (process.platform !== "darwin") {
       t.skip("Darwin ps identity lookup behavior");

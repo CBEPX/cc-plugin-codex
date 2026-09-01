@@ -44,8 +44,8 @@ const TERMINAL_WORKFLOW_STATUSES = new Set([
 const RETRYABLE_STATUSES = new Set([
   "pending",
   "retryable_failed",
-  "cancel_failed",
 ]);
+const ACTIVE_LINKED_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
 const TOP_LEVEL_PAYLOAD_FIELDS = new Set([
   "checkpoint",
   "feedback",
@@ -392,6 +392,25 @@ function terminalTargetState(state, fields) {
   return { ...rest, ...fields };
 }
 
+function invalidatedTargetState(state, status, failureReason, timestamp) {
+  const {
+    attemptReservation: _attemptReservation,
+    commitment: _commitment,
+    ...rest
+  } = state;
+  return {
+    ...rest,
+    status,
+    payload: null,
+    failureReason,
+    completedAt: timestamp,
+  };
+}
+
+function hasUnfinishedAttempt(state) {
+  return state?.status === "running" || Boolean(state?.attemptReservation);
+}
+
 function assertNoActiveAttemptLeaseReflection(workflow, payload) {
   const activeDigests = new Set([
     ...Object.values(workflow.branches ?? {}),
@@ -421,11 +440,12 @@ function assertNoActiveAttemptLeaseReflection(workflow, payload) {
 }
 
 function workflowSafetyViolation(workflow, target, timestamp, fingerprint) {
-  const failedState = terminalTargetState(target.state, {
-    status: "retryable_failed",
-    failureReason: "SAFETY_VIOLATION",
-    completedAt: timestamp,
-  });
+  const failedState = invalidatedTargetState(
+    target.state,
+    "retryable_failed",
+    "SAFETY_VIOLATION",
+    timestamp
+  );
   return {
     ...updateTarget(workflow, target, failedState),
     status: "incomplete",
@@ -834,17 +854,15 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
       violated = true;
       return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
     }
-    const failedState = terminalTargetState(target.state, {
-      status,
+    const failedState = {
+      ...invalidatedTargetState(target.state, status, reason, timestamp),
       attempts: target.state.attempts + (options.oneShot ? 1 : 0),
-      failureReason: reason,
       ...(options.oneShot ? {
         stage: target.stage,
         startedAt: timestamp,
         startFingerprint: currentFingerprint,
       } : {}),
-      completedAt: timestamp,
-    });
+    };
     return {
       ...updateTarget(workflow, target, failedState),
       status: options.cancelFailed ? "cancel_failed" : "incomplete",
@@ -875,12 +893,85 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
 }
 
 export function reconcilePeerRetry(cwd, workflowId, options, linkedJobs = []) {
-  void linkedJobs;
-  const workflow = readWorkflow(cwd, workflowId, options);
+  let workflow = readWorkflow(cwd, workflowId, options);
   if (!workflow) {
     throw workflowError("WORKFLOW_NOT_FOUND", `No workflow found for ${workflowId}.`);
   }
   assertCas(workflow, options);
+  if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+    return { workflow, retryTargets: [] };
+  }
+  const claudeJobs = (Array.isArray(linkedJobs) ? linkedJobs : []).filter(
+    (job) => job?.workflowId === workflow.id && job?.workflowStage === "memo"
+  );
+  const latestClaudeJob = claudeJobs.reduce((latest, job) => {
+    if (!latest) return job;
+    const jobCreatedAt = Date.parse(job.createdAt ?? "");
+    const latestCreatedAt = Date.parse(latest.createdAt ?? "");
+    return Number.isFinite(jobCreatedAt) &&
+      (!Number.isFinite(latestCreatedAt) || jobCreatedAt > latestCreatedAt)
+      ? job
+      : latest;
+  }, null);
+  const activeClaudeWaiter = Boolean(
+    latestClaudeJob &&
+    ACTIVE_LINKED_JOB_STATUSES.has(latestClaudeJob.status) &&
+    !latestClaudeJob.reapedBy &&
+    latestClaudeJob.reapedUnverifiable !== true
+  );
+  const claudeCancellationFailed =
+    !activeClaudeWaiter && latestClaudeJob?.status === "cancel_failed";
+  const preserveClaudeWaiter = Boolean(
+    workflow.branches?.claude?.status === "running" &&
+    workflow.branches.claude.commitment &&
+    activeClaudeWaiter
+  );
+  /** @type {Array<{stage: string, branchId?: string}>} */
+  const runningTargets = [
+    ...Object.entries(workflow.branches ?? {}).flatMap(([branchId, state]) =>
+      state.status === "running" && !(branchId === "claude" && preserveClaudeWaiter)
+        ? [{ stage: state.stage ?? "memo", branchId }]
+        : []
+    ),
+    ...Object.entries(workflow.stages ?? {}).flatMap(([stage, state]) =>
+      state.status === "running" ? [{ stage }] : []
+    ),
+  ];
+  if (runningTargets.length > 0) {
+    workflow = mutateWorkflow(cwd, workflowId, options, (current, timestamp) => {
+      let next = current;
+      let cancellationFailed = false;
+      for (const { stage, branchId } of runningTargets) {
+        const target = targetState(next, stage, branchId);
+        const cancelFailed = branchId === "claude" && claudeCancellationFailed;
+        cancellationFailed ||= cancelFailed;
+        const status = cancelFailed ? "cancel_failed" : "retryable_failed";
+        const failureReason = cancelFailed ? "CANCEL_FAILED" : "EXPLICIT_RETRY";
+        next = {
+          ...updateTarget(
+            next,
+            target,
+            invalidatedTargetState(target.state, status, failureReason, timestamp)
+          ),
+          branchAttempts: appendBranchAttempt(
+            next,
+            target,
+            "failed",
+            status,
+            timestamp,
+            { failureReason }
+          ),
+        };
+      }
+      return {
+        ...next,
+        status: cancellationFailed ? "cancel_failed" : "incomplete",
+        phase: cancellationFailed ? "cancel_failed" : current.phase,
+        failureReason: cancellationFailed ? "CANCEL_FAILED" : "EXPLICIT_RETRY",
+        ...(cancellationFailed ? {} : enterIncomplete(current)),
+      };
+    });
+  }
   const retryable = (target) => ["pending", "retryable_failed"].includes(target?.status);
   /** @type {Array<{stage: string, branchId?: string}>} */
   const retryTargets = ["codex", "claude"]
@@ -908,6 +999,18 @@ export function getWorkflowRetryContext(cwd, workflowId, options = {}) {
   const workflow = readWorkflow(cwd, workflowId, options);
   if (!workflow) {
     throw workflowError("WORKFLOW_NOT_FOUND", `No workflow found for ${workflowId}.`);
+  }
+  if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+    return {
+      workflowId: workflow.id,
+      mode: workflow.mode,
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      claudeSessionId: workflow.claudeSessionId,
+      stages: [],
+      branches: [],
+      hasRetryWork: false,
+    };
   }
   const requiredStages = normalizedNames(
     options.requiredStages ?? Object.keys(workflow.stages ?? {}),
@@ -951,16 +1054,19 @@ export function rebindWorkflowOwner(cwd, workflowId, options) {
     "current owner session ID"
   );
   return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+    }
     let invalidated = false;
     const invalidate = (items) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
-      if (item.status !== "running") return [key, item];
+      if (!hasUnfinishedAttempt(item)) return [key, item];
       invalidated = true;
-      return [key, {
-        ...item,
-        status: "retryable_failed",
-        failureReason: "OWNER_REBOUND",
-        completedAt: timestamp,
-      }];
+      return [key, invalidatedTargetState(
+        item,
+        "retryable_failed",
+        "OWNER_REBOUND",
+        timestamp
+      )];
     }));
     return {
       ...workflow,
@@ -1000,8 +1106,19 @@ export function completeWorkflowCancellation(cwd, workflowId, options) {
     ) {
       throw workflowError("STALE_CANCELLATION", "Cancellation lease is stale.");
     }
+    const invalidate = (items) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
+      if (item.status === "completed") return [key, item];
+      const {
+        attemptReservation: _attemptReservation,
+        commitment: _commitment,
+        ...rest
+      } = item;
+      return [key, rest];
+    }));
     return {
       ...workflow,
+      branches: invalidate(workflow.branches),
+      stages: invalidate(workflow.stages),
       status: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
       phase: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
       failureReason: failedJobIds.length > 0 ? "CANCEL_FAILED" : null,
@@ -1028,16 +1145,16 @@ export function completeWorkflowSessionEnd(cwd, workflowId, options) {
     let changed = false;
     let cancellationFailed = false;
     const finalize = (items, kind) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
-      if (item.status !== "running") return [key, item];
+      if (!hasUnfinishedAttempt(item)) return [key, item];
       changed = true;
       const failed = cancelFailedTargets.has(`${kind}:${key}`);
       cancellationFailed ||= failed;
-      return [key, {
-        ...item,
-        status: failed ? "cancel_failed" : "retryable_failed",
-        failureReason: failed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
-        completedAt: timestamp,
-      }];
+      return [key, invalidatedTargetState(
+        item,
+        failed ? "cancel_failed" : "retryable_failed",
+        failed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
+        timestamp
+      )];
     }));
     return {
       ...workflow,

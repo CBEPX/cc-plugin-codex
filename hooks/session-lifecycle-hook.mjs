@@ -315,17 +315,19 @@ function reserveSessionWorkflows(
   const reservations = [];
   for (const listed of listWorkflows(workspaceRoot)) {
     if (listed.currentOwnerSessionId !== sessionId) continue;
-    const hasRunningTarget = [
+    const hasUnfinishedAttempt = [
       ...Object.entries(listed.branches ?? {}).flatMap(([branchId, branch]) =>
-        branch.status === "running"
+        (branch.status === "running" || branch.attemptReservation)
           ? [{ stage: branch.stage ?? "memo", branchId }]
           : []
       ),
       ...Object.entries(listed.stages ?? {}).flatMap(([stage, state]) =>
-        state.status === "running" ? [{ stage, branchId: null }] : []
+        (state.status === "running" || state.attemptReservation)
+          ? [{ stage, branchId: null }]
+          : []
       ),
     ].length > 0;
-    if (!hasRunningTarget || remainingCleanupMs(cleanupDeadlineAt) < 1) continue;
+    if (!hasUnfinishedAttempt || remainingCleanupMs(cleanupDeadlineAt) < 1) continue;
     try {
       reservations.push(reserveWorkflowCancellation(workspaceRoot, listed.id, {
         revision: listed.revision,

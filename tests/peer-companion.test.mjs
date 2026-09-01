@@ -476,6 +476,57 @@ describe("peer companion with fake Claude", () => {
     });
   });
 
+  it("keeps a committed Claude waiter alive across a successful Codex retry", async () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const claudeLease = planLease(created, "_claude_");
+    const claudePromise = runAsync(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease) });
+    await waitFor(() => readWorkflow(testEnv, created.workflow.id)
+      .branches.claude.commitment);
+
+    const firstCodexLease = planLease(created, "_codex_", "memo");
+    activate(testEnv, created, "memo", "codex", firstCodexLease);
+    const failed = run(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(firstCodexLease, { content: {} }) });
+    assert.notEqual(failed.status, 0);
+    assert.equal(readWorkflow(testEnv, created.workflow.id).branches.codex.status, "retryable_failed");
+
+    const retry = runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--retry", "--owner-session-id", "owner-a", "--json",
+    ]);
+    assert.deepEqual(retry.work, [
+      { kind: "branch", id: "codex" },
+      { kind: "stage", id: "checkpoint" },
+    ]);
+    const retryCodexLease = planLease(retry, "_codex_", "memo");
+    assert.notEqual(retryCodexLease, firstCodexLease);
+    activate(testEnv, retry, "memo", "codex", retryCodexLease);
+    runJson(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(retry.workflow.epoch), "--json",
+    ], { input: attemptInput(retryCodexLease, {
+      content: { findings: ["Codex recovered."] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: ["https://example.test/retry"],
+      toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    }) });
+
+    const claude = await claudePromise;
+    assert.equal(claude.status, 0, claude.stderr || claude.stdout);
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(stored.branches.codex.status, "completed");
+    assert.equal(stored.branches.claude.status, "completed");
+  });
+
   it("revalidates only MCP servers represented in the frozen selection", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);

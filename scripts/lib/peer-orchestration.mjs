@@ -33,6 +33,9 @@ const RUN_OPTIONS = new Set([
   "allow-project-mcp-servers",
   "no-auto-tools",
 ]);
+const PEER_SIBLING_WAIT_TIMEOUT_MS = 30 * 60 * 1000;
+const PEER_SIBLING_POLL_MIN_MS = 100;
+const PEER_SIBLING_POLL_MAX_MS = 2_000;
 
 function peerError(code, message) {
   return Object.assign(new Error(`${code}: ${message}`), { code });
@@ -482,6 +485,36 @@ export function buildPeerWaitView(workflow) {
       },
     } : {}),
   };
+}
+
+export async function waitForCodexMemo(readWorkflow, expectedEpoch, clock = {}) {
+  const now = clock.now ?? Date.now;
+  const sleep = clock.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + PEER_SIBLING_WAIT_TIMEOUT_MS;
+  let pollInterval = PEER_SIBLING_POLL_MIN_MS;
+  while (true) {
+    const workflow = readWorkflow();
+    if (workflow.epoch !== expectedEpoch) {
+      throw peerError(
+        "STALE_EPOCH",
+        `Expected epoch ${expectedEpoch}, found ${workflow.epoch}.`
+      );
+    }
+    const status = workflow.branches?.codex?.status;
+    if (status === "completed") return workflow;
+    if (status === "cancel_failed") {
+      throw peerError("PEER_SIBLING_FAILED", "Codex memo did not seal.");
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) {
+      throw peerError(
+        "PEER_SIBLING_TIMEOUT",
+        "Codex memo did not seal within 30 minutes."
+      );
+    }
+    await sleep(Math.min(pollInterval, remaining));
+    pollInterval = Math.min(pollInterval * 2, PEER_SIBLING_POLL_MAX_MS);
+  }
 }
 
 export const PEER_CLAUDE_ALLOWED_BASE_TOOLS = [

@@ -70,6 +70,7 @@ import {
   normalizePeerRequest,
   PEER_CLAUDE_ALLOWED_BASE_TOOLS,
   validatePeerMemo,
+  waitForCodexMemo,
 } from "./lib/peer-orchestration.mjs";
 import {
   createReviewIsolation,
@@ -3254,19 +3255,6 @@ function validatePeerSelection(discovery, workflow) {
   });
 }
 
-async function waitForCodexMemo(cwd, workflowId, expectedEpoch) {
-  while (true) {
-    const workflow = readPeerWorkflow(cwd, workflowId);
-    assertPeerEpoch(workflow, expectedEpoch);
-    const view = buildPeerWaitView(workflow);
-    if (view.branches.codex.status === "completed") return;
-    if (["retryable_failed", "cancel_failed"].includes(view.branches.codex.status)) {
-      throw new Error("PEER_SIBLING_FAILED: Codex memo did not seal.");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}
-
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
   if (error?.code === "ATTEMPT_LEASE_REFLECTION") return;
   try {
@@ -3456,7 +3444,10 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         payload,
         ...fence,
       });
-      await waitForCodexMemo(cwd, workflowId, fence.epoch);
+      await waitForCodexMemo(
+        () => readPeerWorkflow(cwd, workflowId),
+        fence.epoch
+      );
       submitted = revealPeerTarget(cwd, workflowId, {
         stage,
         branchId,
