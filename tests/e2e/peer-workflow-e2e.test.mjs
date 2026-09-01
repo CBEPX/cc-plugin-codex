@@ -101,16 +101,17 @@ async function main() {
         repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
         webCitations: process.env.FAKE_CLAUDE_SPARSE === "1" ? [] : ["https://example.test/primary"],
       };
-  const emitResult = () => process.stdout.write(JSON.stringify({
+  const resultLine = () => JSON.stringify({
     type: "result", session_id: sessionId, result: JSON.stringify(payload),
     model: "claude-opus-5",
     modelUsage: { "claude-opus-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
-  }) + "\\n");
+  }) + "\\n";
+  const emitResult = () => process.stdout.write(resultLine());
   if (process.env.FAKE_CLAUDE_RESULT_ON_TERM === "1") {
     process.on("SIGTERM", () => {
-      emitResult();
+      fs.writeFileSync(process.stdout.fd, resultLine(), "utf8");
       fs.writeFileSync(
-        process.env.FAKE_CLAUDE_TERM_EMITTED_FILE,
+        process.env.FAKE_CLAUDE_TERM_DELIVERED_FILE,
         process.env.FAKE_CLAUDE_MARKER + "\\n",
         "utf8"
       );
@@ -482,9 +483,10 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     const cancellable = createPeer(testEnv, "Cancellation path.");
     const cancellableLease = planLease(cancellable, "_claude_");
     const termReadyFile = path.join(testEnv.rootDir, "term-handler-ready");
-    const termEmittedFile = path.join(testEnv.rootDir, "term-result-emitted");
+    const termDeliveredFile = path.join(testEnv.rootDir, "term-result-delivered");
     const lateResultMarker = "LATE_TERM_RESULT_MUST_NOT_PERSIST_73B4C1";
     assert.equal(path.relative(testEnv.workspaceDir, termReadyFile).startsWith(".."), true);
+    assert.equal(path.relative(testEnv.workspaceDir, termDeliveredFile).startsWith(".."), true);
     const cancellableClaude = runAsync(testEnv, [
       "peer-claude-turn", cancellable.workflow.id, "--cwd", testEnv.workspaceDir,
       "--brief-hash", cancellable.workflow.briefHash,
@@ -495,7 +497,7 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
         FAKE_CLAUDE_RESULT_ON_TERM: "1",
         FAKE_CLAUDE_MARKER: lateResultMarker,
         FAKE_CLAUDE_TERM_READY_FILE: termReadyFile,
-        FAKE_CLAUDE_TERM_EMITTED_FILE: termEmittedFile,
+        FAKE_CLAUDE_TERM_DELIVERED_FILE: termDeliveredFile,
       },
     });
     try {
@@ -509,9 +511,17 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     const cancelled = runJson(testEnv, [
       "cancel", cancellable.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
     ]);
-    await cancellableClaude;
-    assert.equal(fs.readFileSync(termEmittedFile, "utf8"), `${lateResultMarker}\n`);
     assert.equal(cancelled.workflow.status, "cancelled");
+    assert.equal(fs.readFileSync(termDeliveredFile, "utf8"), `${lateResultMarker}\n`);
+    const cancelledWorkflowPath = path.join(
+      stateDir(testEnv), "workflows", `${cancellable.workflow.id}.json`
+    );
+    const cancelledWorkflowBytes = fs.readFileSync(cancelledWorkflowPath);
+    const cancellableResult = await cancellableClaude;
+    assert.equal(cancellableResult.status, 1, cancellableResult.stderr || cancellableResult.stdout);
+    assert.equal(cancellableResult.stdout, "");
+    assert.equal(cancellableResult.stderr, "STALE_EPOCH: Expected epoch 0, found 1.\n");
+    assert.deepEqual(fs.readFileSync(cancelledWorkflowPath), cancelledWorkflowBytes);
     const cancelledStored = readWorkflow(testEnv, cancellable.workflow.id);
     assert.equal(cancelledStored.status, "cancelled");
     assert.equal(cancelledStored.branches.claude.payload, null);
