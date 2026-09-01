@@ -512,12 +512,12 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
       "cancel", cancellable.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
     ]);
     assert.equal(cancelled.workflow.status, "cancelled");
+    const cancellableResult = await cancellableClaude;
     assert.equal(fs.readFileSync(termDeliveredFile, "utf8"), `${lateResultMarker}\n`);
     const cancelledWorkflowPath = path.join(
       stateDir(testEnv), "workflows", `${cancellable.workflow.id}.json`
     );
     const cancelledWorkflowBytes = fs.readFileSync(cancelledWorkflowPath);
-    const cancellableResult = await cancellableClaude;
     assert.equal(cancellableResult.status, 1, cancellableResult.stderr || cancellableResult.stdout);
     assert.equal(cancellableResult.stdout, "");
     assert.equal(cancellableResult.stderr, "STALE_EPOCH\n");
