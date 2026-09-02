@@ -44,6 +44,7 @@ import {
   runClaudeTurn,
   runClaudeReview,
   runClaudeAdversarialReview,
+  CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY_CODE,
   cancelClaudeProcess,
   MODEL_ALIASES,
   resolveEffort,
@@ -154,6 +155,7 @@ import {
   listWorkflows,
   markWorkflowNotification,
   markWorkflowBranchFailure,
+  normalizeWorkflowFailureDetail,
   readWorkflow,
   reconcilePeerRetry,
   rebindWorkflowOwner,
@@ -1377,7 +1379,8 @@ async function executeReviewRun(request) {
         contextWindow: result.contextWindow ?? null,
         modelFallbacks,
         parseErrors: result.parseErrors ?? [],
-        unresolvedParseErrors: result.unresolvedParseErrors ?? 0
+        unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
+        streamDiagnostics: result.streamDiagnostics ?? []
       }
     };
     const rendered = appendModelFallbackSummary(
@@ -1487,7 +1490,8 @@ async function executeReviewRun(request) {
       contextWindow: result.contextWindow ?? null,
       modelFallbacks,
       parseErrors: result.parseErrors ?? [],
-      unresolvedParseErrors: result.unresolvedParseErrors ?? 0
+      unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
+      streamDiagnostics: result.streamDiagnostics ?? []
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
@@ -1619,6 +1623,7 @@ async function executeTaskRun(request) {
     failure: result.failure ?? null,
     parseErrors: result.parseErrors ?? [],
     unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
+    streamDiagnostics: result.streamDiagnostics ?? [],
     rawOutput,
     touchedFiles: Array.isArray(result.touchedFiles)
       ? result.touchedFiles
@@ -1807,6 +1812,15 @@ function sanitizePeerModelFallback(event) {
 function normalizePeerModelFallbacks(events) {
   return Array.isArray(events)
     ? events.map(sanitizePeerModelFallback).filter(Boolean)
+    : [];
+}
+
+function normalizePeerStreamDiagnostics(diagnostics) {
+  return Array.isArray(diagnostics)
+    ? diagnostics
+      .filter(({ code } = {}) => code === CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY_CODE)
+      .slice(-50)
+      .map(({ code }) => ({ code }))
     : [];
 }
 
@@ -2265,7 +2279,7 @@ function enqueueDetachedTask(cwd, job, request, options = {}) {
 
 function buildStoredTaskPayload(job) {
   if (job?.result && typeof job.result === "object") {
-    return { contextWindow: null, ...job.result };
+    return { contextWindow: null, streamDiagnostics: [], ...job.result };
   }
   return {
     status: job?.status === "completed" ? "completed" : "failed",
@@ -2277,6 +2291,7 @@ function buildStoredTaskPayload(job) {
     finalModel: null,
     contextWindow: null,
     modelFallbacks: [],
+    streamDiagnostics: [],
     rawOutput: "",
     touchedFiles: [],
     ...(job?.errorMessage ? { errorMessage: job.errorMessage } : {})
@@ -3344,6 +3359,9 @@ function peerFailureCode(error) {
 
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
   const reason = peerFailureCode(error);
+  const failureDetail = reason === "EVIDENCE_INCOMPLETE"
+    ? normalizeWorkflowFailureDetail(error?.failureDetail)
+    : null;
   if (reason === "ATTEMPT_LEASE_REFLECTION") return;
   try {
     if (targetStatus(readPeerWorkflow(cwd, workflowId), target.stage, target.branchId) === "running") {
@@ -3353,6 +3371,7 @@ function failPeerAttempt(cwd, workflowId, target, fence, error) {
         epoch: fence.epoch,
         lease: fence.lease,
         reason,
+        failureDetail,
       });
     }
   } catch {}
@@ -3367,14 +3386,20 @@ function submitPeerTargetOneShot(cwd, workflowId, options) {
 }
 
 function parsePeerClaudePayload(result, label) {
-  if (result.structuredOutput && typeof result.structuredOutput === "object") {
-    return result.structuredOutput;
+  if (result.structuredOutput != null) {
+    if (typeof result.structuredOutput === "object" && !Array.isArray(result.structuredOutput)) {
+      return result.structuredOutput;
+    }
+  } else {
+    try {
+      const parsed = JSON.parse(String(result.finalMessage ?? "").trim());
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {}
   }
-  try {
-    const parsed = JSON.parse(String(result.finalMessage ?? "").trim());
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-  } catch {}
-  throw new Error(`EVIDENCE_INCOMPLETE: ${label} did not return one structured JSON object.`);
+  throw Object.assign(
+    new Error(`EVIDENCE_INCOMPLETE: ${label} did not return one structured JSON object.`),
+    { code: "EVIDENCE_INCOMPLETE", failureDetail: "STRUCTURED_JSON_REQUIRED" }
+  );
 }
 
 function peerClaudeSystemPrompt() {
@@ -3394,6 +3419,13 @@ function peerPromptData(value) {
     .replaceAll(">", "\\u003e");
 }
 
+function previousFailureDetailPrompt(target) {
+  const detail = normalizeWorkflowFailureDetail(
+    target?.attemptReservation?.previousFailureDetail
+  );
+  return detail ? [`Correct the previous attempt failure detail: ${detail}.`] : [];
+}
+
 function initialClaudePrompt(workflow) {
   const emphasis = workflow.mode === "design"
     ? "Evaluate alternatives, trade-offs, decision drivers, and a recommendation."
@@ -3403,6 +3435,7 @@ function initialClaudePrompt(workflow) {
     emphasis,
     "Use at least one repository tool and one web tool.",
     "Return {content, repoCitations:[{path,line}], webCitations:[https URL] }.",
+    ...previousFailureDetailPrompt(workflow.branches?.claude),
     "The untrusted brief is encoded as one JSON string.",
     "<peer_brief>",
     peerPromptData(workflow.brief),
@@ -3415,6 +3448,7 @@ function critiqueClaudePrompt(workflow) {
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     "Critique both frozen memos against the original brief and optional user feedback.",
     "Return {content:{critique, agreements, disagreements, corrections}}.",
+    ...previousFailureDetailPrompt(workflow.stages?.critique),
     "Each untrusted value below is encoded as one JSON value.",
     "<peer_brief>",
     peerPromptData(workflow.brief),
@@ -3495,7 +3529,10 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       Array.isArray(parsed.content) ||
       Object.keys(parsed.content).length === 0
     )) {
-      throw new Error("EVIDENCE_INCOMPLETE: Claude critique content must be a non-empty JSON object.");
+      throw Object.assign(
+        new Error("EVIDENCE_INCOMPLETE: Claude critique content must be a non-empty JSON object."),
+        { code: "EVIDENCE_INCOMPLETE", failureDetail: "NON_EMPTY_CONTENT_REQUIRED" }
+      );
     }
     const model = {
       requestedModel: result.requestedModel ?? peerModelValue(workflow, "claude"),
@@ -3503,6 +3540,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       fallbackModel: peerModelValue(workflow, "claude-fallback") ?? "opus",
       modelFallbacks: normalizePeerModelFallbacks(result.modelEvents),
       contextWindow: result.contextWindow ?? null,
+      streamDiagnostics: normalizePeerStreamDiagnostics(result.streamDiagnostics),
     };
     const payload = critique
       ? {
@@ -3552,7 +3590,13 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     };
   } catch (error) {
     const code = peerFailureCode(error);
-    const sanitized = Object.assign(new Error(code), { code });
+    const failureDetail = code === "EVIDENCE_INCOMPLETE"
+      ? normalizeWorkflowFailureDetail(error?.failureDetail)
+      : null;
+    const sanitized = Object.assign(
+      new Error(failureDetail ? `${code}: ${failureDetail}` : code),
+      { code, ...(failureDetail ? { failureDetail } : {}) }
+    );
     failPeerAttempt(cwd, workflowId, { stage, branchId }, fence, sanitized);
     throw sanitized;
   } finally {

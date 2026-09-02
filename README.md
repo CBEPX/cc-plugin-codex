@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.0
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.1
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.0 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.0/cc-plugin-codex-1.7.0.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.1 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.1/cc-plugin-codex-1.7.1.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -142,7 +142,7 @@ $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 
 **Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version; for older pinned IDs, pass `--effort` explicitly instead of inheriting a current-family default.
 
-Fable 5 has a native 1M context window, so current Claude Code only needs the bare `fable` alias; no `[1m]` suffix is required. See Claude Code's [model configuration](https://code.claude.com/docs/en/model-config).
+Fable 5.1 (`claude-fable-5-1`) has a native 1M context window and requires Claude Code 2.1.257 or newer. The bare `fable` alias remains floating and may still resolve to Fable 5 behind Claude Apps Gateway; use the full model ID when Fable 5.1 is required. No `[1m]` suffix or hidden Fable effort default is added. See Claude Code's [model configuration](https://code.claude.com/docs/en/model-config).
 
 JSON task and review results keep `requestedModel` as the forwarded alias or full ID, report `finalModel` from Claude's terminal result, and expose the terminal `contextWindow` reported in `modelUsage` (`null` when Claude does not provide it). The plugin does not infer a context limit from a floating alias.
 
@@ -369,7 +369,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.0
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.1
 codex plugin add cc@cbepx
 ```
 
@@ -390,8 +390,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.0 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.0/cc-plugin-codex-1.7.0.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.1 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.1/cc-plugin-codex-1.7.1.tgz install
 ```
 
 After install, run:
@@ -421,7 +421,7 @@ $cc:setup
 Re-run the fork marketplace install flow, pinned to the release you want:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.0
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.1
 codex plugin add cc@cbepx
 ```
 

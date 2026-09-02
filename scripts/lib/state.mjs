@@ -439,6 +439,7 @@ function normalizeStoredJob(job) {
       result: {
         ...job.result,
         contextWindow: job.result.contextWindow ?? null,
+        streamDiagnostics: job.result.streamDiagnostics ?? [],
       },
     };
   }
@@ -462,6 +463,7 @@ function normalizeStoredJob(job) {
       codex: {
         ...job.result.codex,
         contextWindow: job.result.codex.contextWindow ?? null,
+        streamDiagnostics: job.result.codex.streamDiagnostics ?? [],
       },
     },
   };
@@ -1167,7 +1169,7 @@ export function readTurnBaseline(cwd, sessionId) {
 
 /**
  * Atomically transition job status from `expected` to `next`.
- * Returns true on success, false if current status !== expected.
+ * Returns true on success, false if the status or optional predicate does not match.
  * Throws on persistent lock contention.
  */
 export function casJobStatus(cwd, jobId, expected, next, extra = {}) {
@@ -1188,7 +1190,10 @@ export function transitionJob(
     : [expectedStatuses];
   return withStateFileLock(jobFile, () => {
     const job = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-    if (!expectedList.includes(job.status)) {
+    if (
+      !expectedList.includes(job.status) ||
+      (options.predicate && !options.predicate(job))
+    ) {
       return {
         transitioned: false,
         previousStatus: job.status,

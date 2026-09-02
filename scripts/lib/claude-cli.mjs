@@ -29,6 +29,7 @@ import {
 const CLAUDE_BIN = "claude";
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
 export const MAX_STREAM_PARSER_PARSE_ERRORS = 50;
+export const MAX_STREAM_PARSER_DIAGNOSTICS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
 export const MAX_STREAM_PARSER_TOUCHED_FILES = 256;
 export const MAX_STREAM_PARSER_MODEL_EVENTS = 50;
@@ -44,6 +45,10 @@ const MODEL_FIELD_NAMES = [
   "selected_model",
   "selectedModel",
 ];
+const CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY =
+  "Client.listTools() called but server does not advertise tools capability - returning empty list";
+export const CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY_CODE =
+  "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY";
 
 function resolveClaudeNpmShim(shimPath) {
   let source;
@@ -595,6 +600,7 @@ export class StreamParser {
       unknownEvents: [],
       parseErrors: [],
       unresolvedParseErrors: 0,
+      streamDiagnostics: [],
       toolUses: [],
       touchedFiles: [],
       modelEvents: [],
@@ -630,6 +636,14 @@ export class StreamParser {
 
   _parseLine(line) {
     if (!line.trim()) return null;
+    if (line === CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY) {
+      pushBoundedTail(
+        this.state.streamDiagnostics,
+        { code: CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY_CODE },
+        MAX_STREAM_PARSER_DIAGNOSTICS
+      );
+      return null;
+    }
     try {
       const event = JSON.parse(line);
       // Forwarded subagent events (--forward-subagent-text) carry
@@ -1439,6 +1453,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       modelEvents: [],
       parseErrors: [],
       unresolvedParseErrors: 0,
+      streamDiagnostics: [],
       failure: classifyClaudeFailure({
         stderr: command.error,
         exitCode: -1,
@@ -1579,6 +1594,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         modelEvents,
         parseErrors: [...parser.state.parseErrors],
         unresolvedParseErrors: parser.state.unresolvedParseErrors,
+        streamDiagnostics: [...parser.state.streamDiagnostics],
         failure,
         stderr,
         pid: proc.pid,
@@ -1601,6 +1617,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         modelEvents: [],
         parseErrors: [],
         unresolvedParseErrors: 0,
+        streamDiagnostics: [],
         failure: classifyClaudeFailure({
           stderr: err.message,
           exitCode: -1,
@@ -1649,6 +1666,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     modelEvents: result.modelEvents,
     parseErrors: result.parseErrors,
     unresolvedParseErrors: result.unresolvedParseErrors,
+    streamDiagnostics: result.streamDiagnostics,
     failure: result.failure,
     stderr: result.stderr,
     pid: result.pid,

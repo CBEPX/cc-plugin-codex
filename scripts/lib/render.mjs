@@ -492,13 +492,14 @@ function renderWorkflowDetails(workflow, options = {}) {
   pushKeyValueTableRow(lines, "Status", workflow.status);
   pushKeyValueTableRow(lines, "Phase", workflow.phase);
   pushKeyValueTableRow(lines, "Failure", workflow.failureReason ?? "");
+  pushKeyValueTableRow(lines, "Failure detail", workflow.failureDetail ?? "");
   pushKeyValueTableRow(lines, "Owner session", workflow.currentOwnerSessionId ?? "");
 
-  lines.push("", "Branches:", "", "| Branch | Status | Attempts | Failure | Evidence |", "| --- | --- | --- | --- | --- |");
+  lines.push("", "Branches:", "", "| Branch | Status | Attempts | Failure | Detail | Evidence |", "| --- | --- | --- | --- | --- | --- |");
   for (const branchId of ["codex", "claude"]) {
     const branch = workflow.branches?.[branchId] ?? {};
     lines.push(
-      `| ${branchId} | ${escapeMarkdownCell(branch.status ?? "missing")} | ${escapeMarkdownCell(branch.attempts ?? 0)} | ${escapeMarkdownCell(branch.failureReason ?? "")} | ${workflowEvidenceSummary(branch)} |`
+      `| ${branchId} | ${escapeMarkdownCell(branch.status ?? "missing")} | ${escapeMarkdownCell(branch.attempts ?? 0)} | ${escapeMarkdownCell(branch.failureReason ?? "")} | ${escapeMarkdownCell(branch.failureDetail ?? "")} | ${workflowEvidenceSummary(branch)} |`
     );
   }
 

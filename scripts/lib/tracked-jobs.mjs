@@ -42,6 +42,41 @@ function transitionTrackedJob(...args) {
   }
 }
 
+function isStatusReaperFailure(job) {
+  return job?.reapedBy === "status-reaper";
+}
+
+function transitionTrackedJobTerminal(workspaceRoot, jobId, status, terminalData) {
+  let transitioned = transitionTrackedJob(
+    workspaceRoot,
+    jobId,
+    ["running"],
+    status,
+    terminalData
+  );
+  if (
+    !transitioned.transitioned &&
+    transitioned.previousStatus === "failed" &&
+    isStatusReaperFailure(transitioned.job)
+  ) {
+    transitioned = transitionTrackedJob(
+      workspaceRoot,
+      jobId,
+      ["failed"],
+      status,
+      {
+        ...terminalData,
+        errorMessage: terminalData.errorMessage ?? null,
+        reapedBy: null,
+        reapReason: null,
+        reapedUnverifiable: false,
+      },
+      { predicate: isStatusReaperFailure }
+    );
+  }
+  return transitioned;
+}
+
 function sliceTextTailByBytes(text, maxBytes) {
   const normalized = typeof text === "string" ? text : String(text ?? "");
   if (!normalized || maxBytes <= 0) {
@@ -474,33 +509,12 @@ export async function runTrackedJob(job, runner, options = {}) {
       ...(modelFallbacks.length > 0 ? { modelFallbacks } : {}),
     };
 
-    let transitioned = transitionTrackedJob(
+    transitionTrackedJobTerminal(
       job.workspaceRoot,
       job.id,
-      ["running"],
       completionStatus,
       terminalData
     );
-    if (
-      !transitioned.transitioned &&
-      transitioned.previousStatus === "failed" &&
-      (transitioned.job?.reapedBy === "status-reaper" ||
-        transitioned.job?.reapedUnverifiable === true)
-    ) {
-      transitioned = transitionTrackedJob(
-        job.workspaceRoot,
-        job.id,
-        ["failed"],
-        completionStatus,
-        {
-          ...terminalData,
-          errorMessage: null,
-          reapedBy: null,
-          reapReason: null,
-          reapedUnverifiable: false,
-        }
-      );
-    }
     // If CAS failed, another actor (cancel) already moved the job to a different state — respect that
 
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
@@ -512,7 +526,7 @@ export async function runTrackedJob(job, runner, options = {}) {
 
     // Use CAS: running → failed
     if (error?.code !== "ELOCKBUSY") {
-      transitionTrackedJob(job.workspaceRoot, job.id, ["running"], "failed", {
+      transitionTrackedJobTerminal(job.workspaceRoot, job.id, "failed", {
         errorMessage,
         pid: null,
         pidIdentity: null,

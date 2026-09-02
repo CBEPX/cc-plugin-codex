@@ -109,10 +109,13 @@ async function main() {
       type: "system",
       subtype: "model_fallback",
       session_id: sessionId,
-      from_model: "claude-fable-5",
+      from_model: "claude-fable-5-1",
       to_model: "claude-opus-5",
       reason: process.env.FAKE_CLAUDE_FALLBACK_REASON || "capacity",
     }) + "\\n");
+  }
+  if (process.env.FAKE_CLAUDE_LIST_TOOLS_WARNING === "1") {
+    process.stdout.write("Client.listTools() called but server does not advertise tools capability - returning empty list\\n");
   }
   const payload = critique
     ? { content: process.env.FAKE_CLAUDE_EMPTY_CRITIQUE === "1"
@@ -126,9 +129,14 @@ async function main() {
   const emitResult = () => process.stdout.write(JSON.stringify({
       type: "result",
       session_id: sessionId,
-      result: JSON.stringify(payload),
-      model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5",
-      modelUsage: { "claude-fable-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
+      ...(process.env.FAKE_CLAUDE_STRUCTURED_ARRAY === "1"
+        ? { structured_output: [payload] }
+        : {}),
+      result: process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
+        ? "not structured JSON"
+        : JSON.stringify(payload),
+      model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5-1",
+      modelUsage: { "claude-fable-5-1": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
     }) + "\\n");
   if (process.env.FAKE_CLAUDE_RESULT_ON_TERM === "1") {
     process.on("SIGTERM", () => {
@@ -735,7 +743,7 @@ describe("peer companion with fake Claude", () => {
       "--epoch", String(created.workflow.epoch), "--json",
     ], {
       input: attemptInput(claudeLease),
-      env: { FAKE_CLAUDE_FALLBACK: "1" },
+      env: { FAKE_CLAUDE_FALLBACK: "1", FAKE_CLAUDE_LIST_TOOLS_WARNING: "1" },
     });
 
     assert.equal(result.status, "completed");
@@ -744,6 +752,11 @@ describe("peer companion with fake Claude", () => {
     assert.equal(result.memo.model.finalModel, "claude-opus-5");
     assert.equal(result.memo.model.fallbackModel, "opus");
     assert.equal(result.memo.model.modelFallbacks.length, 1);
+    assert.equal(result.memo.model.modelFallbacks[0].fromModel, "claude-fable-5-1");
+    assert.deepEqual(result.memo.model.streamDiagnostics, [
+      { code: "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY" },
+    ]);
+    assert.equal(JSON.stringify(result.memo).includes("Client.listTools()"), false);
     assert.deepEqual(result.memo.toolEvents.map(({ tool }) => tool), ["Read", "WebSearch"]);
     const invocation = JSON.parse(fs.readFileSync(testEnv.claudeLog, "utf8").trim());
     const allowed = invocation.args.flatMap((value, index, args) =>
@@ -796,6 +809,46 @@ describe("peer companion with fake Claude", () => {
     assert.equal(after, before);
   });
 
+  it("maps unstructured Claude output to the stable structured JSON detail", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const claudeLease = planLease(created, "_claude_");
+    const failed = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: { FAKE_CLAUDE_UNSTRUCTURED: "1" },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(stored.failureDetail, "STRUCTURED_JSON_REQUIRED");
+    assert.equal(stored.branches.claude.failureDetail, "STRUCTURED_JSON_REQUIRED");
+  });
+
+  it("rejects a native structured output array as not one JSON object", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const claudeLease = planLease(created, "_claude_");
+    const failed = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: { FAKE_CLAUDE_STRUCTURED_ARRAY: "1" },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(stored.failureDetail, "STRUCTURED_JSON_REQUIRED");
+    assert.equal(stored.branches.claude.failureDetail, "STRUCTURED_JSON_REQUIRED");
+  });
+
   it("marks missing Claude web evidence incomplete without replacing a successful sibling memo", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);
@@ -821,11 +874,36 @@ describe("peer companion with fake Claude", () => {
     ], { input: attemptInput(claudeLease), env: { FAKE_CLAUDE_SPARSE: "1" } });
 
     assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /EVIDENCE_INCOMPLETE/);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: DIRECT_HTTPS_CITATION_REQUIRED\n");
     const stored = readWorkflow(testEnv, created.workflow.id);
     assert.equal(stored.status, "incomplete");
+    assert.equal(stored.failureDetail, "DIRECT_HTTPS_CITATION_REQUIRED");
     assert.equal(stored.branches.claude.status, "retryable_failed");
+    assert.equal(stored.branches.claude.failureDetail, "DIRECT_HTTPS_CITATION_REQUIRED");
+    assert.equal(stored.branchAttempts.at(-1).failureDetail, "DIRECT_HTTPS_CITATION_REQUIRED");
     assert.deepEqual(stored.branches.codex.payload.content, codexMemo.content);
+    const [failedJob] = readPeerJobs(testEnv, created.workflow.id)
+      .filter(({ status }) => status === "failed");
+    assert.equal(
+      failedJob.errorMessage,
+      "EVIDENCE_INCOMPLETE: DIRECT_HTTPS_CITATION_REQUIRED"
+    );
+    const wait = runJson(testEnv, [
+      "peer-wait", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--json",
+    ]);
+    assert.equal(wait.terminalIncomplete, true);
+    assert.equal(wait.branches.claude.failureDetail, "DIRECT_HTTPS_CITATION_REQUIRED");
+    const context = runJson(testEnv, [
+      "workflow-retry-context", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--retry", "--required-branch", "claude", "--json",
+    ]);
+    assert.equal(context.branches[0].failureDetail, "DIRECT_HTTPS_CITATION_REQUIRED");
+    const rendered = run(testEnv, [
+      "status", created.workflow.id, "--cwd", testEnv.workspaceDir,
+    ]);
+    assert.equal(rendered.status, 0, rendered.stderr || rendered.stdout);
+    assert.match(rendered.stdout, /DIRECT_HTTPS_CITATION_REQUIRED/u);
     const retry = runJson(testEnv, [
       "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
       "--mode", "design", "--retry", "--owner-session-id", "owner-b", "--json",
@@ -837,6 +915,27 @@ describe("peer companion with fake Claude", () => {
     assert.equal(retry.spawnPlan.some(({ task_name }) => task_name.includes("_checkpoint_")), true);
     assert.equal(retry.workflow.currentOwnerSessionId, "owner-b");
     assert.equal(retry.workflow.epoch, 1);
+    assert.equal(
+      retry.workflow.branches.claude.attemptReservation.previousFailureDetail,
+      "DIRECT_HTTPS_CITATION_REQUIRED"
+    );
+    const retryWait = runJson(testEnv, [
+      "peer-wait", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--json",
+    ]);
+    assert.equal(retryWait.terminalIncomplete, false);
+    const retryClaudeLease = planLease(retry, "_claude_");
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(retry.workflow.epoch), "--json",
+    ], { input: attemptInput(retryClaudeLease) });
+    const retryInvocation = fs.readFileSync(testEnv.claudeLog, "utf8").trim()
+      .split("\n").map((line) => JSON.parse(line)).at(-1);
+    assert.match(retryInvocation.prompt, /DIRECT_HTTPS_CITATION_REQUIRED/u);
+    const recovered = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(recovered.failureDetail, null);
+    assert.equal(recovered.branches.claude.failureDetail, null);
   });
 
   it("runs initial and critique turns as fresh ephemeral sessions and retries only missing synthesis", () => {
@@ -1005,5 +1104,14 @@ describe("peer companion with fake Claude", () => {
       { kind: "stage", id: "critique" },
       { kind: "stage", id: "synthesis" },
     ]);
+    const retryCritiqueLease = planLease(retry, "_critique_");
+    runJson(testEnv, [
+      "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(retry.workflow.epoch), "--json",
+    ], { input: attemptInput(retryCritiqueLease) });
+    const retryInvocation = fs.readFileSync(testEnv.claudeLog, "utf8").trim()
+      .split("\n").map((line) => JSON.parse(line)).at(-1);
+    assert.match(retryInvocation.prompt, /NON_EMPTY_CONTENT_REQUIRED/u);
   });
 });

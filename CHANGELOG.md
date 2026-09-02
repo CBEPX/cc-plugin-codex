@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## v1.7.1
+
+### Changed
+
+- Qualify Fable 5.1 as `claude-fable-5-1` with a native 1M context window and Claude Code 2.1.257+ while keeping the floating `fable` alias and no hidden effort default.
+- Preserve actionable peer validation details across retries (#21).
+- Stop one-shot checkpoint workers before activation when a branch is terminally incomplete (#22).
+
+### Fixed
+
+- Classify the exact known `Client.listTools()` capability warning as a bounded stable diagnostic instead of an unresolved parse error (#18).
+- Preserve an already-incomplete peer aggregate when its late sibling succeeds.
+- Let authoritative runner results replace only status-reaper-owned unverifiable failures, including runner errors, without overwriting cancellation or unrelated terminal writers (#23).
+
 ## v1.7.0
 
 ### Added

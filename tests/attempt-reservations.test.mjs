@@ -116,8 +116,9 @@ describe("workflow attempt reservations", () => {
     assert.equal(reservation.workflow.branches.codex.attempts, 0);
     assert.deepEqual(reservation.workflow.branchAttempts, []);
     assert.deepEqual(Object.keys(reservation.workflow.branches.codex.attemptReservation).sort(), [
-      "epoch", "leaseDigest", "reservedAt",
+      "epoch", "leaseDigest", "previousFailureDetail", "reservedAt",
     ]);
+    assert.equal(reservation.workflow.branches.codex.attemptReservation.previousFailureDetail, null);
   });
 
   it("allows only one concurrent activation and increments attempt history once", async () => {
