@@ -2062,6 +2062,7 @@ describe("areModelIdsEquivalent", () => {
   it("treats Claude CLI aliases as equivalent to concrete family ids", () => {
     assert.equal(areModelIdsEquivalent("fable", "claude-fable-5"), true);
     assert.equal(areModelIdsEquivalent("fable", "claude-fable-5[1m]"), true);
+    assert.equal(areModelIdsEquivalent("fable", "claude-fable-5-1"), true);
     assert.equal(areModelIdsEquivalent("opus", "claude-opus-5"), true);
   });
 
@@ -2078,6 +2079,7 @@ describe("areModelIdsEquivalent", () => {
 
   it("does not treat pinned versions in the same family as equivalent", () => {
     assert.equal(areModelIdsEquivalent("claude-opus-4-8", "claude-opus-5"), false);
+    assert.equal(areModelIdsEquivalent("claude-fable-5", "claude-fable-5-1"), false);
   });
 });
 
@@ -2222,6 +2224,7 @@ describe("resolveDefaultEffort", () => {
 
   it("returns undefined for fable (no hidden effort default)", () => {
     assert.equal(resolveDefaultEffort("fable", null), undefined);
+    assert.equal(resolveDefaultEffort("claude-fable-5-1", undefined), undefined);
     assert.equal(resolveDefaultEffort("claude-fable-5[1m]", undefined), undefined);
   });
 

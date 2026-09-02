@@ -90,7 +90,7 @@ async function main() {
   }) + "\\n");
   if (!resumed) process.stdout.write(JSON.stringify({
     type: "system", subtype: "model_fallback", session_id: sessionId,
-    from_model: "claude-fable-5", to_model: "claude-opus-5", reason: "capacity",
+    from_model: "claude-fable-5-1", to_model: "claude-opus-5", reason: "capacity",
   }) + "\\n");
   const payload = critique
     ? { content: { critique: "Compare the frozen memos." } }

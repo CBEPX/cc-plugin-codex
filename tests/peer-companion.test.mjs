@@ -109,7 +109,7 @@ async function main() {
       type: "system",
       subtype: "model_fallback",
       session_id: sessionId,
-      from_model: "claude-fable-5",
+      from_model: "claude-fable-5-1",
       to_model: "claude-opus-5",
       reason: process.env.FAKE_CLAUDE_FALLBACK_REASON || "capacity",
     }) + "\\n");
@@ -135,8 +135,8 @@ async function main() {
       result: process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
         ? "not structured JSON"
         : JSON.stringify(payload),
-      model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5",
-      modelUsage: { "claude-fable-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
+      model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5-1",
+      modelUsage: { "claude-fable-5-1": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
     }) + "\\n");
   if (process.env.FAKE_CLAUDE_RESULT_ON_TERM === "1") {
     process.on("SIGTERM", () => {
@@ -752,6 +752,7 @@ describe("peer companion with fake Claude", () => {
     assert.equal(result.memo.model.finalModel, "claude-opus-5");
     assert.equal(result.memo.model.fallbackModel, "opus");
     assert.equal(result.memo.model.modelFallbacks.length, 1);
+    assert.equal(result.memo.model.modelFallbacks[0].fromModel, "claude-fable-5-1");
     assert.deepEqual(result.memo.model.streamDiagnostics, [
       { code: "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY" },
     ]);
