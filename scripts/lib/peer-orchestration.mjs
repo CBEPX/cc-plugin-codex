@@ -428,7 +428,7 @@ export function validatePeerMemo(workflow, memo, options = {}) {
     );
   }
   const webCitations = (Array.isArray(memo.webCitations) ? memo.webCitations : [])
-    .map(directHttps)
+    .map((citation) => directHttps(isPlainObject(citation) ? citation.path : citation))
     .filter(Boolean);
   if (webCitations.length === 0) {
     throw peerError(

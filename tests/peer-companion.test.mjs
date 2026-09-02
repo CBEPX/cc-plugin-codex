@@ -117,21 +117,49 @@ async function main() {
   if (process.env.FAKE_CLAUDE_LIST_TOOLS_WARNING === "1") {
     process.stdout.write("Client.listTools() called but server does not advertise tools capability - returning empty list\\n");
   }
+  const marker = process.env.FAKE_CLAUDE_MARKER || "The repository and primary source agree.";
+  const citations = {
+    repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
+    webCitations: sparse ? [] : [{ path: "https://example.test/primary", line: 1 }],
+  };
   const payload = critique
-    ? { content: process.env.FAKE_CLAUDE_EMPTY_CRITIQUE === "1"
-        ? {}
-        : { critique: "Compare the frozen memos." } }
+    ? {
+        content: process.env.FAKE_CLAUDE_EMPTY_CRITIQUE === "1"
+          ? {}
+          : {
+              critique: "Compare the frozen memos.",
+              agreements: [],
+              disagreements: [],
+              corrections: [],
+            },
+        ...citations,
+      }
     : {
-        content: { findings: [process.env.FAKE_CLAUDE_MARKER || "The repository and primary source agree."] },
-        repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
-        webCitations: sparse ? [] : ["https://example.test/primary"],
+        content: prompt.includes("Evaluate alternatives")
+          ? {
+              alternatives: ["Keep the current design."],
+              tradeoffs: ["It favors compatibility."],
+              decisionDrivers: ["Preserve the peer contract."],
+              recommendation: marker,
+              gaps: [],
+            }
+          : {
+              findings: [marker],
+              sourceQuality: "Primary source.",
+              contradictions: [],
+              confidence: "high",
+              gaps: [],
+            },
+        ...citations,
       };
   const emitResult = () => process.stdout.write(JSON.stringify({
       type: "result",
       session_id: sessionId,
       ...(process.env.FAKE_CLAUDE_STRUCTURED_ARRAY === "1"
         ? { structured_output: [payload] }
-        : {}),
+        : process.env.FAKE_CLAUDE_NATIVE_STRUCTURED === "1"
+          ? { structured_output: payload }
+          : {}),
       result: process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
         ? "not structured JSON"
         : JSON.stringify(payload),
@@ -298,13 +326,28 @@ function writePeerJob(testEnv, job) {
   );
 }
 
-function createPeer(testEnv, extra = []) {
+function createPeer(testEnv, extra = [], mode = "design") {
   return runJson(testEnv, [
-    "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
+    "peer-create", "--mode", mode, "--cwd", testEnv.workspaceDir,
     "--owner-session-id", "owner-a", "--user-mcp-tool", "mcp__docs__search",
     ...extra,
     "--json", "Compare", "the", "runtime", "design.",
   ]);
+}
+
+function submitCodexMemo(testEnv, created) {
+  const codexLease = planLease(created, "_codex_", "memo");
+  activate(testEnv, created, "memo", "codex", codexLease);
+  runJson(testEnv, [
+    "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+    "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+    "--epoch", String(created.workflow.epoch), "--json",
+  ], { input: attemptInput(codexLease, {
+    content: { findings: ["Independent Codex result."] },
+    repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+    webCitations: ["https://example.test/codex"],
+    toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+  }) });
 }
 
 function planLease(result, taskPart, attempt = null) {
@@ -340,6 +383,76 @@ afterEach(() => {
 });
 
 describe("peer companion with fake Claude", () => {
+  it("selects the design and research schemas for initial Claude turns", () => {
+    const testEnv = createEnvironment();
+    const invocationFor = (mode) => {
+      const created = createPeer(testEnv, [], mode);
+      submitCodexMemo(testEnv, created);
+      const claudeLease = planLease(created, "_claude_");
+      runJson(testEnv, [
+        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], { input: attemptInput(claudeLease) });
+      return fs.readFileSync(testEnv.claudeLog, "utf8").trim()
+        .split("\n").map((line) => JSON.parse(line)).at(-1);
+    };
+
+    const design = invocationFor("design");
+    const research = invocationFor("research");
+    for (const [invocation, file] of [
+      [design, "peer-design-output.schema.json"],
+      [research, "peer-research-output.schema.json"],
+    ]) {
+      const schemaIndex = invocation.args.indexOf("--json-schema");
+      assert.ok(schemaIndex >= 0);
+      assert.deepEqual(JSON.parse(invocation.args[schemaIndex + 1]), JSON.parse(
+        fs.readFileSync(path.join(PROJECT_ROOT, "schemas", file), "utf8")
+      ));
+    }
+  });
+
+  it("fails closed before spawning Claude when its output schema is missing", () => {
+    const testEnv = createEnvironment();
+    const schemaPath = path.join(PROJECT_ROOT, "schemas", "peer-design-output.schema.json");
+    const missingPath = `${schemaPath}.missing-for-test`;
+    fs.renameSync(schemaPath, missingPath);
+    try {
+      const created = createPeer(testEnv);
+      const claudeLease = planLease(created, "_claude_");
+      const failed = run(testEnv, [
+        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], {
+        input: attemptInput(claudeLease),
+        env: { FAKE_CLAUDE_SANDBOX_UNAVAILABLE: "1" },
+      });
+      assert.notEqual(failed.status, 0);
+      assert.match(failed.stderr, /PEER_OUTPUT_SCHEMA_UNAVAILABLE/);
+      assert.equal(fs.existsSync(testEnv.claudeLog), false);
+    } finally {
+      fs.renameSync(missingPath, schemaPath);
+    }
+  });
+
+  it("uses native structured output when final text is invalid JSON", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    submitCodexMemo(testEnv, created);
+    const claudeLease = planLease(created, "_claude_");
+    const result = runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: { FAKE_CLAUDE_NATIVE_STRUCTURED: "1", FAKE_CLAUDE_UNSTRUCTURED: "1" },
+    });
+
+    assert.equal(result.memo.content.recommendation, "The repository and primary source agree.");
+  });
+
   it("rejects a memo that reflects its live checkpoint lease without mutation or exposure", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);
@@ -499,7 +612,11 @@ describe("peer companion with fake Claude", () => {
     assert.equal(ready.readyForCheckpoint, true);
     assert.deepEqual(ready.memos.codex.content, codexMemo.content);
     assert.deepEqual(ready.memos.claude.content, {
-      findings: [marker],
+      alternatives: ["Keep the current design."],
+      tradeoffs: ["It favors compatibility."],
+      decisionDrivers: ["Preserve the peer contract."],
+      recommendation: marker,
+      gaps: [],
     });
   });
 
@@ -987,6 +1104,17 @@ describe("peer companion with fake Claude", () => {
       .split("\n")
       .map((line) => JSON.parse(line));
     const critique = invocations.at(-1);
+    const initial = invocations.at(-2);
+    for (const [invocation, file] of [
+      [initial, "peer-design-output.schema.json"],
+      [critique, "peer-critique-output.schema.json"],
+    ]) {
+      const schemaIndex = invocation.args.indexOf("--json-schema");
+      assert.ok(schemaIndex >= 0);
+      assert.deepEqual(JSON.parse(invocation.args[schemaIndex + 1]), JSON.parse(
+        fs.readFileSync(path.join(PROJECT_ROOT, "schemas", file), "utf8")
+      ));
+    }
     assert.ok(critique.args.includes("--no-session-persistence"));
     assert.equal(critique.args.includes("--resume"), false);
     assert.equal(critique.args.includes("--fork-session"), false);
