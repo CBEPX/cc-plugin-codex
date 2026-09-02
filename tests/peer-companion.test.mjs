@@ -9,22 +9,29 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMPANION = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
 const cleanup = [];
 
-function writeMissingSchemaPreload(rootDir) {
-  const filePath = path.join(rootDir, "missing-schema-preload.cjs");
-  fs.writeFileSync(filePath, `const fs = require("node:fs");
-const { syncBuiltinESMExports } = require("node:module");
-if (process.argv[1] === process.env.CC_TEST_COMPANION_PATH) {
-  const unavailablePath = process.env.CC_TEST_UNAVAILABLE_SCHEMA;
-  const existsSync = fs.existsSync;
-  fs.existsSync = (candidate) => candidate === unavailablePath ? false : existsSync(candidate);
-  syncBuiltinESMExports();
-}
+function writeMissingSchemaPreload(rootDir, unavailablePath) {
+  const filePath = path.join(rootDir, "missing-schema-preload.mjs");
+  fs.writeFileSync(filePath, `import fs from "node:fs";
+
+const target = ${JSON.stringify(unavailablePath)};
+const existsSync = fs.existsSync.bind(fs);
+const readFileSync = fs.readFileSync.bind(fs);
+fs.existsSync = (candidate) => candidate === target ? false : existsSync(candidate);
+fs.readFileSync = (candidate, ...args) => {
+  if (candidate === target) {
+    const error = new Error("ENOENT: no such file or directory, open " + target);
+    error.code = "ENOENT";
+    error.path = target;
+    throw error;
+  }
+  return readFileSync(candidate, ...args);
+};
 `, "utf8");
   return filePath;
 }
@@ -473,7 +480,9 @@ describe("peer companion with fake Claude", () => {
   it("fails closed before spawning Claude when its output schema is missing", () => {
     const testEnv = createEnvironment();
     const schemaPath = path.join(PROJECT_ROOT, "schemas", "peer-design-output.schema.json");
-    const preloadPath = writeMissingSchemaPreload(testEnv.rootDir);
+    const preloadDir = path.join(testEnv.rootDir, "preload with spaces");
+    fs.mkdirSync(preloadDir);
+    const preloadPath = writeMissingSchemaPreload(preloadDir, schemaPath);
     const created = createPeer(testEnv);
     const claudeLease = planLease(created, "_claude_");
     const failed = run(testEnv, [
@@ -483,9 +492,8 @@ describe("peer companion with fake Claude", () => {
     ], {
       input: attemptInput(claudeLease),
       env: {
-        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${preloadPath}`.trim(),
-        CC_TEST_COMPANION_PATH: COMPANION,
-        CC_TEST_UNAVAILABLE_SCHEMA: schemaPath,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preloadPath).href}`]
+          .filter(Boolean).join(" "),
         FAKE_CLAUDE_SANDBOX_UNAVAILABLE: "1",
       },
     });
