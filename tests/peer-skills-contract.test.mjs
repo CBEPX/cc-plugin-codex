@@ -87,7 +87,7 @@ test("peer runtime preserves stdin, evidence, strict tool, continuation, and ret
     "peer-wait",
     "redacts the sibling payload until the Codex memo is sealed",
     "JSON on stdin",
-    "attemptReservation: { leaseDigest, epoch, reservedAt }",
+    "attemptReservation: { leaseDigest, epoch, reservedAt, previousFailureDetail }",
     "never a Node argv value",
     "attempt history advance when activation wins",
     "peer-claude-turn",
