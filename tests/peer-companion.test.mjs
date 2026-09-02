@@ -20,8 +20,17 @@ function runGit(cwd, args) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
-function writeFakeMcp(root) {
-  const filePath = path.join(root, "fake-mcp.mjs");
+/**
+ * @param {string} root
+ * @param {string} [name]
+ * @param {Array<{name: string, description: string, annotations?: {readOnlyHint?: boolean, destructiveHint?: boolean}}>} [tools]
+ */
+function writeFakeMcp(root, name = "docs", tools = [{
+  name: "search",
+  description: "Search public web documentation",
+  annotations: { readOnlyHint: true },
+}]) {
+  const filePath = path.join(root, `fake-${name}.mjs`);
   fs.writeFileSync(filePath, `#!/usr/bin/env node
 import fs from "node:fs";
 import readline from "node:readline";
@@ -33,8 +42,8 @@ input.on("line", (line) => {
   }
   if (request.id == null) return;
   const result = request.method === "initialize"
-    ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "docs", version: "1" } }
-    : { tools: [{ name: "search", description: "Search public web documentation", annotations: { readOnlyHint: true } }] };
+    ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: ${JSON.stringify(name)}, version: "1" } }
+    : { tools: ${JSON.stringify(tools)} };
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
 });
 `, "utf8");
@@ -410,6 +419,41 @@ describe("peer companion with fake Claude", () => {
         fs.readFileSync(path.join(PROJECT_ROOT, "schemas", file), "utf8")
       ));
     }
+  });
+
+  it("guides the initial Claude turn to the selected Brave web tool", () => {
+    const testEnv = createEnvironment();
+    const configPath = path.join(testEnv.env.HOME, ".claude.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const braveMcp = writeFakeMcp(testEnv.rootDir, "brave-search", [{
+      name: "brave_web_search",
+      description: "Search the web",
+    }]);
+    config.mcpServers["brave-search"] = {
+      ...config.mcpServers.docs,
+      args: [braveMcp],
+      env: { ...config.mcpServers.docs.env, FAKE_MCP_NAME: "brave-search" },
+    };
+    delete config.mcpServers.docs;
+    fs.writeFileSync(configPath, JSON.stringify(config), "utf8");
+    const created = runJson(testEnv, [
+      "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
+      "--owner-session-id", "owner-a",
+      "--user-mcp-tool", "mcp__brave-search__brave_web_search",
+      "--json", "Compare", "the", "runtime", "design.",
+    ]);
+    submitCodexMemo(testEnv, created);
+    const claudeLease = planLease(created, "_claude_");
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease) });
+
+    const invocation = JSON.parse(fs.readFileSync(testEnv.claudeLog, "utf8").trim());
+    assert.match(invocation.prompt, /prefer the selected Brave web tool/u);
+    assert.match(invocation.prompt, /mcp__brave-search__brave_web_search/u);
+    assert.deepEqual(Object.keys(invocation.mcpConfig.mcpServers), ["brave-search"]);
   });
 
   it("fails closed before spawning Claude when its output schema is missing", () => {

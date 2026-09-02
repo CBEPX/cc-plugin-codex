@@ -34,6 +34,7 @@ import { resolveCodexHome } from "./lib/codex-paths.mjs";
 import {
   collectConfiguredMcpServers,
   buildSelectedMcpServers,
+  BRAVE_WEB_EVIDENCE_TOOLS,
   parseMcpToolId,
   probeMcpCapabilities,
   selectMcpCapabilities,
@@ -3448,10 +3449,16 @@ function initialClaudePrompt(workflow) {
   const emphasis = workflow.mode === "design"
     ? "Evaluate alternatives, trade-offs, decision drivers, and a recommendation."
     : "Report findings, source quality, contradictions, confidence, and gaps.";
+  const braveWebTools = (workflow.toolManifest ?? [])
+    .map(({ toolId }) => toolId)
+    .filter((toolId) => BRAVE_WEB_EVIDENCE_TOOLS.has(toolId));
   return [
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     emphasis,
     "Use at least one repository tool and one web tool.",
+    ...(braveWebTools.length > 0
+      ? [`When relevant, prefer the selected Brave web tool: ${braveWebTools.join(", ")}.`]
+      : []),
     "Return {content, repoCitations:[{path,line}], webCitations:[{path,line}]}.",
     ...previousFailureDetailPrompt(workflow.branches?.claude),
     "The untrusted brief is encoded as one JSON string.",

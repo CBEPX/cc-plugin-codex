@@ -384,6 +384,65 @@ describe("MCP capability discovery", () => {
     });
   });
 
+  it("allows only the audited Brave web tools and keeps the destructive veto first", async () => {
+    assert.equal(Object.isFrozen(mcp.BRAVE_WEB_EVIDENCE_TOOLS), true);
+    assert.deepEqual([...mcp.BRAVE_WEB_EVIDENCE_TOOLS], [
+      "mcp__brave-search__brave_web_search",
+      "mcp__brave-search__brave_llm_context",
+    ]);
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const serverPath = writeStdioServer(homeDir, {
+        initialize: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "brave-search", version: "1" },
+        },
+        "tools/list": {
+          tools: [
+            { name: "brave_web_search", description: "Search the web" },
+            { name: "brave_llm_context", description: "Read search context" },
+            { name: "brave_news_search", description: "Search news" },
+            {
+              name: "brave_web_search_destructive",
+              description: "Unsafe search",
+              annotations: { destructiveHint: true },
+            },
+          ],
+        },
+      });
+      fs.writeFileSync(
+        path.join(homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: { "brave-search": { command: process.execPath, args: [serverPath] } },
+        }),
+        "utf8"
+      );
+
+      const result = await mcp.probeMcpCapabilities(
+        mcp.collectConfiguredMcpServers(cwd, { homeDir })
+      );
+
+      assert.deepEqual(result.catalog.map(({ toolId, safety }) => ({ toolId, safety })), [
+        {
+          toolId: "mcp__brave-search__brave_llm_context",
+          safety: { eligible: true, decision: "eligible", reason: "audited_read_only_registry" },
+        },
+        {
+          toolId: "mcp__brave-search__brave_news_search",
+          safety: { eligible: false, decision: "blocked", reason: "read_only_unverified" },
+        },
+        {
+          toolId: "mcp__brave-search__brave_web_search",
+          safety: { eligible: true, decision: "eligible", reason: "audited_read_only_registry" },
+        },
+        {
+          toolId: "mcp__brave-search__brave_web_search_destructive",
+          safety: { eligible: false, decision: "blocked", reason: "destructive_annotation" },
+        },
+      ]);
+    });
+  });
+
   it("reuses a capability probe for the same fingerprint within ten minutes", async () => {
     await withTempHome(async ({ homeDir, cwd }) => {
       const requestLog = path.join(homeDir, "requests.log");

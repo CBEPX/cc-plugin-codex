@@ -21,7 +21,16 @@ function checked(cwd, command, args) {
   return result.stdout;
 }
 
-function writeFakeMcp(filePath, name) {
+/**
+ * @param {string} filePath
+ * @param {string} name
+ * @param {Array<{name: string, description: string, annotations?: {readOnlyHint?: boolean, destructiveHint?: boolean}}>} [tools]
+ */
+function writeFakeMcp(filePath, name, tools = [{
+  name: "search",
+  description: "Search public documentation",
+  annotations: { readOnlyHint: true },
+}]) {
   fs.writeFileSync(filePath, `#!/usr/bin/env node
 import readline from "node:readline";
 const input = readline.createInterface({ input: process.stdin });
@@ -30,7 +39,7 @@ input.on("line", (line) => {
   if (request.id == null) return;
   const result = request.method === "initialize"
     ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: ${JSON.stringify(name)}, version: "1" } }
-    : { tools: [{ name: "search", description: "Search public documentation", annotations: { readOnlyHint: true } }] };
+    : { tools: ${JSON.stringify(tools)} };
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
 });
 `, "utf8");
@@ -80,7 +89,10 @@ async function main() {
     event: { type: "content_block_start", content_block: { type: "tool_use", name, input } },
   }) + "\\n");
   tool("Read", { file_path: process.env.FAKE_REPO_FILE });
-  if (process.env.FAKE_CLAUDE_SPARSE !== "1") tool("WebSearch", { query: "primary docs" });
+  if (process.env.FAKE_CLAUDE_SPARSE !== "1") tool(
+    process.env.FAKE_CLAUDE_BRAVE === "1" ? "mcp__brave-search__brave_web_search" : "WebSearch",
+    { query: "primary docs" }
+  );
   if (process.env.FAKE_CLAUDE_DELTA_MARKER) process.stdout.write(JSON.stringify({
     type: "stream_event",
     session_id: sessionId,
@@ -306,6 +318,56 @@ function activate(testEnv, result, stage, branch, lease) {
     "--epoch", String(result.workflow.epoch), "--json",
   ], { input: attemptInput(lease) });
 }
+
+test("peer workflow accepts selected Brave MCP evidence without workspace writes", () => {
+  const testEnv = createEnvironment();
+  try {
+    const braveMcp = path.join(testEnv.rootDir, "brave-mcp.mjs");
+    writeFakeMcp(braveMcp, "brave-search", [{
+      name: "brave_web_search",
+      description: "Search the web",
+    }]);
+    const configPath = path.join(testEnv.env.HOME, ".claude.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    config.mcpServers["brave-search"] = { command: process.execPath, args: [braveMcp] };
+    fs.writeFileSync(configPath, JSON.stringify(config), "utf8");
+    const before = checked(testEnv.workspaceDir, "git", ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const created = runJson(testEnv, [
+      "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
+      "--owner-session-id", "owner-a",
+      "--user-mcp-tool", "mcp__brave-search__brave_web_search",
+      "--json", "Compare", "the", "runtime", "design.",
+    ]);
+    const codexLease = planLease(created, "_codex_", "memo");
+    activate(testEnv, created, "memo", "codex", codexLease);
+    runJson(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(codexLease, memo(testEnv, "codex")) });
+    const claudeLease = planLease(created, "_claude_");
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease), env: { FAKE_CLAUDE_BRAVE: "1" } });
+
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.deepEqual(stored.toolManifest.map(({ toolId }) => toolId), [
+      "mcp__brave-search__brave_web_search",
+    ]);
+    assert.deepEqual(stored.branches.claude.payload.toolEvents.map(({ tool }) => tool), [
+      "Read", "mcp__brave-search__brave_web_search",
+    ]);
+    assert.deepEqual(stored.branches.claude.payload.webCitations, ["https://example.test/primary"]);
+    const invocation = JSON.parse(fs.readFileSync(testEnv.env.FAKE_CLAUDE_LOG, "utf8").trim());
+    assert.deepEqual(Object.keys(invocation.mcpConfig.mcpServers), ["brave-search"]);
+    const after = checked(testEnv.workspaceDir, "git", ["status", "--porcelain=v1", "--untracked-files=all"]);
+    assert.equal(after, before);
+  } finally {
+    fs.rmSync(testEnv.rootDir, { recursive: true, force: true });
+  }
+});
 
 test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and no workspace writes", async () => {
   const testEnv = createEnvironment();
