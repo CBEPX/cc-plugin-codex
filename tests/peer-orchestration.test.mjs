@@ -11,9 +11,29 @@ import { describe, it } from "node:test";
 import {
   buildInitialAgentPlan,
   buildPeerCheckpoint,
+  buildPeerWaitView,
+  buildRetryAgentPlan,
   parsePeerArguments,
   validatePeerMemo,
 } from "../scripts/lib/peer-orchestration.mjs";
+
+function assertOneShotCheckpointInstructions(message) {
+  assert.match(
+    message,
+    /Make separate short foreground peer-wait calls; wait for each call to exit before starting another\./u
+  );
+  assert.match(
+    message,
+    /Do not use `while`, shell loops, background processes, or persistent pollers\./u
+  );
+  assert.match(message, /If terminalIncomplete is true, stop before checkpoint activation\./u);
+  assert.match(message, /Activate checkpoint only when readyForCheckpoint is true\./u);
+  assert.doesNotMatch(message, /--until-checkpoint/u);
+  assert.ok(
+    message.indexOf("terminalIncomplete") <
+      message.indexOf("peer-activate-attempt", message.indexOf("peer-submit-memo"))
+  );
+}
 
 describe("peer skill argument routing", () => {
   it("normalizes a new run with Fable, Opus fallback, and inherited xhigh Codex defaults", () => {
@@ -114,6 +134,7 @@ describe("fake built-in agent orchestration", () => {
     assert.match(calls[0].message, /peer-activate-attempt[^\n]+--branch 'codex'/u);
     assert.match(calls[0].message, /peer-submit-memo/u);
     assert.match(calls[0].message, /peer-checkpoint/u);
+    assertOneShotCheckpointInstructions(calls[0].message);
     assert.match(calls[1].message, /peer-claude-turn/u);
     assert.doesNotMatch(calls[1].message, /codex exec|nohup|\s&\s/);
     assert.match(calls[0].message, new RegExp("c{64}"));
@@ -126,6 +147,23 @@ describe("fake built-in agent orchestration", () => {
         assert.doesNotMatch(line, /[cdf]{64}|--lease/u);
       }
     }
+  });
+
+  it("generates a one-shot retry checkpoint worker that stops on terminal state", () => {
+    const [worker] = buildRetryAgentPlan({
+      id: "workflow-retry",
+      mode: "design",
+      epoch: 2,
+      workspaceRoot: "/workspace/repo",
+      brief: "Compare queues and streams.",
+      briefHash: "a".repeat(64),
+    }, [{ stage: "checkpoint" }], {
+      companionPath: "/plugin/scripts/claude-companion.mjs",
+      leases: { "stage:checkpoint": "f".repeat(64) },
+    });
+
+    assert.match(worker.task_name, /_checkpoint_/u);
+    assertOneShotCheckpointInstructions(worker.message);
   });
 
   it("keeps shell-hostile prompt delimiters inside the frozen brief data boundary", () => {
@@ -227,5 +265,149 @@ describe("peer evidence validation", () => {
     } finally {
       fs.rmSync(workspaceRoot, { recursive: true, force: true });
     }
+  });
+
+  it("maps every memo validation gap to one bounded failure detail", () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-detail-"));
+    try {
+      const source = path.join(workspaceRoot, "source.mjs");
+      fs.writeFileSync(source, "export const value = 1;\n", "utf8");
+      const workflow = { workspaceRoot: fs.realpathSync.native(workspaceRoot) };
+      const base = {
+        content: { finding: "validated" },
+        repoCitations: [{ path: source, line: 1 }],
+        webCitations: ["https://example.test/reference"],
+      };
+      /** @type {Array<[string, Record<string, unknown>, Record<string, unknown>]>} */
+      const cases = [
+        ["NON_EMPTY_CONTENT_REQUIRED", { ...base, content: {} }, {}],
+        ["REPOSITORY_CITATION_REQUIRED", { ...base, repoCitations: [] }, {}],
+        ["DIRECT_HTTPS_CITATION_REQUIRED", { ...base, webCitations: [] }, {}],
+        ["REPOSITORY_TOOL_EVENT_REQUIRED", base, {
+          role: "claude", toolEvents: [{ tool: "WebSearch" }],
+        }],
+        ["WEB_TOOL_EVENT_REQUIRED", base, {
+          role: "claude", toolEvents: [{ tool: "Read" }],
+        }],
+      ];
+
+      for (const [failureDetail, memo, options] of cases) {
+        assert.throws(
+          () => validatePeerMemo(workflow, memo, options),
+          (error) => {
+            const failure = /** @type {Error & {code?: string, failureDetail?: string}} */ (error);
+            return failure.code === "EVIDENCE_INCOMPLETE" &&
+              failure.failureDetail === failureDetail;
+          },
+          failureDetail
+        );
+      }
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("peer wait view", () => {
+  const branch = (status, overrides = {}) => ({
+    status,
+    attempts: 1,
+    failureReason: null,
+    failureDetail: null,
+    ...overrides,
+  });
+  const workflow = (overrides = {}) => ({
+    id: "workflow-wait",
+    mode: "design",
+    status: "incomplete",
+    phase: "memo",
+    revision: 4,
+    epoch: 3,
+    briefHash: "a".repeat(64),
+    stages: {},
+    branches: {
+      codex: branch("completed", { payload: { content: { finding: "done" } } }),
+      claude: branch("retryable_failed", {
+        failureReason: "EVIDENCE_INCOMPLETE",
+        failureDetail: "DIRECT_HTTPS_CITATION_REQUIRED",
+      }),
+    },
+    ...overrides,
+  });
+
+  it("distinguishes reserved retry work from terminal incomplete work", () => {
+    const terminal = buildPeerWaitView(workflow());
+    assert.equal(terminal.readyForCheckpoint, false);
+    assert.equal(terminal.terminalIncomplete, true);
+    assert.equal(
+      terminal.branches.claude.failureDetail,
+      "DIRECT_HTTPS_CITATION_REQUIRED"
+    );
+
+    const reserved = workflow({
+      branches: {
+        codex: branch("completed", { payload: { content: { finding: "done" } } }),
+        claude: branch("retryable_failed", {
+          failureReason: "EVIDENCE_INCOMPLETE",
+          failureDetail: "DIRECT_HTTPS_CITATION_REQUIRED",
+          attemptReservation: {
+            epoch: 3,
+            leaseDigest: "b".repeat(64),
+            reservedAt: "2026-09-02T00:00:00.000Z",
+          },
+        }),
+      },
+    });
+    assert.equal(buildPeerWaitView(reserved).terminalIncomplete, false);
+
+    const staleReservation = structuredClone(reserved);
+    staleReservation.epoch += 1;
+    assert.equal(buildPeerWaitView(staleReservation).terminalIncomplete, true);
+  });
+
+  it("treats cancellation and cancel_failed as terminal incomplete", () => {
+    const cancelFailed = workflow();
+    cancelFailed.branches.claude = branch("cancel_failed", {
+      failureReason: "CANCEL_FAILED",
+    });
+    assert.equal(buildPeerWaitView(cancelFailed).terminalIncomplete, true);
+
+    const cancelled = workflow({ status: "cancelled", phase: "cancelled" });
+    assert.equal(buildPeerWaitView(cancelled).terminalIncomplete, true);
+  });
+
+  it("keeps readiness backward-compatible while checkpoint retry state is terminal", () => {
+    const checkpointFailed = workflow({
+      branches: {
+        codex: branch("completed", { payload: { content: { finding: "codex" } } }),
+        claude: branch("completed", { payload: { content: { finding: "claude" } } }),
+      },
+      stages: {
+        checkpoint: branch("retryable_failed", { failureReason: "SESSION_ENDED" }),
+      },
+    });
+    const terminal = buildPeerWaitView(checkpointFailed);
+    assert.equal(terminal.readyForCheckpoint, true);
+    assert.equal(terminal.terminalIncomplete, true);
+
+    const checkpointReserved = workflow({
+      branches: checkpointFailed.branches,
+      stages: {
+        checkpoint: branch("retryable_failed", {
+          failureReason: "SESSION_ENDED",
+          attemptReservation: {
+            epoch: 3,
+            leaseDigest: "c".repeat(64),
+            reservedAt: "2026-09-02T00:00:00.000Z",
+          },
+        }),
+      },
+    });
+    const reserved = buildPeerWaitView(checkpointReserved);
+    assert.equal(reserved.readyForCheckpoint, true);
+    assert.equal(reserved.terminalIncomplete, false);
+
+    const staleWorkspace = workflow({ failureReason: "STALE_WORKSPACE" });
+    assert.equal(buildPeerWaitView(staleWorkspace).terminalIncomplete, true);
   });
 });

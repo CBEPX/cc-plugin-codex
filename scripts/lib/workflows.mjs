@@ -34,6 +34,14 @@ export const BRANCH_STATUSES = new Set([
   "retryable_failed",
   "cancel_failed",
 ]);
+const WORKFLOW_FAILURE_DETAILS = new Set([
+  "STRUCTURED_JSON_REQUIRED",
+  "NON_EMPTY_CONTENT_REQUIRED",
+  "REPOSITORY_CITATION_REQUIRED",
+  "DIRECT_HTTPS_CITATION_REQUIRED",
+  "REPOSITORY_TOOL_EVENT_REQUIRED",
+  "WEB_TOOL_EVENT_REQUIRED",
+]);
 
 const WORKFLOWS_DIR_NAME = "workflows";
 const TERMINAL_WORKFLOW_STATUSES = new Set([
@@ -99,6 +107,10 @@ function assertBranchStatus(status) {
     throw workflowError("INVALID_BRANCH_STATUS", `Unsupported branch status: ${status}`);
   }
   return status;
+}
+
+export function normalizeWorkflowFailureDetail(value) {
+  return typeof value === "string" && WORKFLOW_FAILURE_DETAILS.has(value) ? value : null;
 }
 
 function assertJsonObject(value, label) {
@@ -173,6 +185,7 @@ function initialWorkItems(names) {
       status: "pending",
       payload: null,
       failureReason: null,
+      failureDetail: null,
       attempts: 0,
     }])
   );
@@ -401,7 +414,7 @@ function terminalTargetState(state, fields) {
   return { ...rest, ...fields };
 }
 
-function invalidatedTargetState(state, status, failureReason, timestamp) {
+function invalidatedTargetState(state, status, failureReason, timestamp, failureDetail = null) {
   const {
     attemptReservation: _attemptReservation,
     commitment: _commitment,
@@ -412,6 +425,7 @@ function invalidatedTargetState(state, status, failureReason, timestamp) {
     status,
     payload: null,
     failureReason,
+    failureDetail: normalizeWorkflowFailureDetail(failureDetail),
     completedAt: timestamp,
   };
 }
@@ -462,6 +476,7 @@ function workflowSafetyViolation(workflow, target, timestamp, fingerprint) {
     status: "incomplete",
     phase: target.stage,
     failureReason: "SAFETY_VIOLATION",
+    failureDetail: null,
     ...enterIncomplete(workflow),
     branchAttempts: appendBranchAttempt(
       workflow,
@@ -469,7 +484,7 @@ function workflowSafetyViolation(workflow, target, timestamp, fingerprint) {
       "failed",
       "retryable_failed",
       timestamp,
-      { failureReason: "SAFETY_VIOLATION", fingerprint }
+      { failureReason: "SAFETY_VIOLATION", failureDetail: null, fingerprint }
     ),
   };
 }
@@ -539,6 +554,7 @@ export function reserveWorkflow(cwd, input) {
     critique: null,
     finalResult: null,
     failureReason: null,
+    failureDetail: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -624,6 +640,7 @@ export function reserveWorkflowAttempts(cwd, workflowId, options, targets) {
           leaseDigest: leaseDigest(lease),
           epoch: current.epoch,
           reservedAt: timestamp,
+          previousFailureDetail: normalizeWorkflowFailureDetail(target.state.failureDetail),
         },
       });
     }
@@ -654,6 +671,7 @@ export function activateWorkflowAttempt(cwd, workflowId, options) {
         status: "incomplete",
         phase: options.stage,
         failureReason: "STALE_WORKSPACE",
+        failureDetail: null,
         ...enterIncomplete(workflow),
       };
     }
@@ -664,6 +682,7 @@ export function activateWorkflowAttempt(cwd, workflowId, options) {
       stage: target.stage,
       attempts,
       failureReason: null,
+      failureDetail: null,
       startedAt: timestamp,
       startFingerprint: currentFingerprint,
       commitment: null,
@@ -673,6 +692,7 @@ export function activateWorkflowAttempt(cwd, workflowId, options) {
       status: "running",
       phase: target.stage,
       failureReason: null,
+      failureDetail: null,
       startedAt: workflow.startedAt ?? timestamp,
       branchAttempts: appendBranchAttempt(
         workflow,
@@ -743,6 +763,7 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
       payload,
       attempts: target.state.attempts + (options.oneShot ? 1 : 0),
       failureReason: null,
+      failureDetail: null,
       ...(options.oneShot ? {
         stage: target.stage,
         startedAt: timestamp,
@@ -750,14 +771,20 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
       } : {}),
       completedAt: timestamp,
     });
-    const status = options.status ?? (options.field === "finalResult" ? "completed" : "running");
-    const phase = options.phase ?? (status === "completed" ? "done" : target.stage);
+    const requestedStatus = options.status ??
+      (options.field === "finalResult" ? "completed" : "running");
+    const preserveAggregateFailure = workflow.status === "incomplete";
+    const status = preserveAggregateFailure ? workflow.status : requestedStatus;
+    const phase = preserveAggregateFailure
+      ? workflow.phase
+      : options.phase ?? (status === "completed" ? "done" : target.stage);
     return {
       ...updateTarget(workflow, target, completedState),
       status,
       phase,
       fingerprint: currentFingerprint,
-      failureReason: null,
+      failureReason: preserveAggregateFailure ? workflow.failureReason : null,
+      failureDetail: preserveAggregateFailure ? workflow.failureDetail ?? null : null,
       ...(options.field ? { [options.field]: payload } : {}),
       ...(options.claudeSessionId ? { claudeSessionId: options.claudeSessionId } : {}),
       ...(status === "completed" ? { completedAt: timestamp } : {}),
@@ -842,6 +869,7 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
   const status = assertBranchStatus(options.cancelFailed ? "cancel_failed" : "retryable_failed");
   const reason = String(options.reason ?? "").trim();
+  const failureDetail = normalizeWorkflowFailureDetail(options.failureDetail);
   if (!reason) {
     throw workflowError("INVALID_FAILURE_REASON", "A branch failure reason is required.");
   }
@@ -867,7 +895,7 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
       return workflowSafetyViolation(workflow, target, timestamp, currentFingerprint);
     }
     const failedState = {
-      ...invalidatedTargetState(target.state, status, reason, timestamp),
+      ...invalidatedTargetState(target.state, status, reason, timestamp, failureDetail),
       attempts: target.state.attempts + (options.oneShot ? 1 : 0),
       ...(options.oneShot ? {
         stage: target.stage,
@@ -880,6 +908,7 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
       status: options.cancelFailed ? "cancel_failed" : "incomplete",
       phase: target.stage,
       failureReason: reason,
+      failureDetail,
       ...enterIncomplete(workflow),
       branchAttempts: options.oneShot
         ? appendBranchAttempt(
@@ -891,10 +920,10 @@ export function markWorkflowBranchFailure(cwd, workflowId, options) {
               ),
             },
             { ...target, state: failedState },
-            "failed", status, timestamp, { failureReason: reason }
+            "failed", status, timestamp, { failureReason: reason, failureDetail }
           )
         : appendBranchAttempt(
-            workflow, target, "failed", status, timestamp, { failureReason: reason }
+            workflow, target, "failed", status, timestamp, { failureReason: reason, failureDetail }
           ),
     };
   });
@@ -987,6 +1016,7 @@ export function reconcilePeerRetry(cwd, workflowId, options, linkedJobs = []) {
         status: claudeCancellationFailed ? "cancel_failed" : "incomplete",
         phase: claudeCancellationFailed ? "cancel_failed" : current.phase,
         failureReason: claudeCancellationFailed ? "CANCEL_FAILED" : "EXPLICIT_RETRY",
+        failureDetail: null,
         ...(claudeCancellationFailed ? {} : enterIncomplete(current)),
       };
     });
@@ -1045,7 +1075,7 @@ export function getWorkflowRetryContext(cwd, workflowId, options = {}) {
   const select = (names, items, keyName) => names.flatMap((name) => {
     const item = items?.[name];
     if (!item) {
-      return [{ [keyName]: name, status: "missing", failureReason: null }];
+      return [{ [keyName]: name, status: "missing", failureReason: null, failureDetail: null }];
     }
     if (!RETRYABLE_STATUSES.has(item.status)) {
       return [];
@@ -1054,6 +1084,7 @@ export function getWorkflowRetryContext(cwd, workflowId, options = {}) {
       [keyName]: name,
       status: item.status,
       failureReason: item.failureReason ?? null,
+      failureDetail: normalizeWorkflowFailureDetail(item.failureDetail),
     }];
   });
   const stages = select(requiredStages, workflow.stages, "stage");
@@ -1099,6 +1130,7 @@ export function rebindWorkflowOwner(cwd, workflowId, options) {
       ...(invalidated ? {
         status: "incomplete",
         failureReason: "OWNER_REBOUND",
+        failureDetail: null,
         ...enterIncomplete(workflow),
       } : {}),
     };
@@ -1153,6 +1185,7 @@ export function completeWorkflowCancellation(cwd, workflowId, options) {
       status: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
       phase: failedJobIds.length > 0 ? "cancel_failed" : "cancelled",
       failureReason: failedJobIds.length > 0 ? "CANCEL_FAILED" : null,
+      failureDetail: null,
       cancelFailedJobIds: failedJobIds,
       cancellation: {
         ...workflow.cancellation,
@@ -1198,6 +1231,7 @@ export function completeWorkflowSessionEnd(cwd, workflowId, options) {
         status: cancellationFailed ? "cancel_failed" : "incomplete",
         phase: cancellationFailed ? "cancel_failed" : workflow.phase,
         failureReason: cancellationFailed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
+        failureDetail: null,
         ...(cancellationFailed ? {} : enterIncomplete(workflow)),
       } : {}),
       cancellation: {

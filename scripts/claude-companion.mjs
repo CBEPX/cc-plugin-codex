@@ -155,6 +155,7 @@ import {
   listWorkflows,
   markWorkflowNotification,
   markWorkflowBranchFailure,
+  normalizeWorkflowFailureDetail,
   readWorkflow,
   reconcilePeerRetry,
   rebindWorkflowOwner,
@@ -3358,6 +3359,9 @@ function peerFailureCode(error) {
 
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
   const reason = peerFailureCode(error);
+  const failureDetail = reason === "EVIDENCE_INCOMPLETE"
+    ? normalizeWorkflowFailureDetail(error?.failureDetail)
+    : null;
   if (reason === "ATTEMPT_LEASE_REFLECTION") return;
   try {
     if (targetStatus(readPeerWorkflow(cwd, workflowId), target.stage, target.branchId) === "running") {
@@ -3367,6 +3371,7 @@ function failPeerAttempt(cwd, workflowId, target, fence, error) {
         epoch: fence.epoch,
         lease: fence.lease,
         reason,
+        failureDetail,
       });
     }
   } catch {}
@@ -3388,7 +3393,10 @@ function parsePeerClaudePayload(result, label) {
     const parsed = JSON.parse(String(result.finalMessage ?? "").trim());
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
   } catch {}
-  throw new Error(`EVIDENCE_INCOMPLETE: ${label} did not return one structured JSON object.`);
+  throw Object.assign(
+    new Error(`EVIDENCE_INCOMPLETE: ${label} did not return one structured JSON object.`),
+    { code: "EVIDENCE_INCOMPLETE", failureDetail: "STRUCTURED_JSON_REQUIRED" }
+  );
 }
 
 function peerClaudeSystemPrompt() {
@@ -3412,11 +3420,17 @@ function initialClaudePrompt(workflow) {
   const emphasis = workflow.mode === "design"
     ? "Evaluate alternatives, trade-offs, decision drivers, and a recommendation."
     : "Report findings, source quality, contradictions, confidence, and gaps.";
+  const previousFailureDetail = normalizeWorkflowFailureDetail(
+    workflow.branches?.claude?.attemptReservation?.previousFailureDetail
+  );
   return [
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     emphasis,
     "Use at least one repository tool and one web tool.",
     "Return {content, repoCitations:[{path,line}], webCitations:[https URL] }.",
+    ...(previousFailureDetail ? [
+      `Correct the previous attempt failure detail: ${previousFailureDetail}.`,
+    ] : []),
     "The untrusted brief is encoded as one JSON string.",
     "<peer_brief>",
     peerPromptData(workflow.brief),
@@ -3509,7 +3523,10 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       Array.isArray(parsed.content) ||
       Object.keys(parsed.content).length === 0
     )) {
-      throw new Error("EVIDENCE_INCOMPLETE: Claude critique content must be a non-empty JSON object.");
+      throw Object.assign(
+        new Error("EVIDENCE_INCOMPLETE: Claude critique content must be a non-empty JSON object."),
+        { code: "EVIDENCE_INCOMPLETE", failureDetail: "NON_EMPTY_CONTENT_REQUIRED" }
+      );
     }
     const model = {
       requestedModel: result.requestedModel ?? peerModelValue(workflow, "claude"),
@@ -3567,7 +3584,13 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     };
   } catch (error) {
     const code = peerFailureCode(error);
-    const sanitized = Object.assign(new Error(code), { code });
+    const failureDetail = code === "EVIDENCE_INCOMPLETE"
+      ? normalizeWorkflowFailureDetail(error?.failureDetail)
+      : null;
+    const sanitized = Object.assign(
+      new Error(failureDetail ? `${code}: ${failureDetail}` : code),
+      { code, ...(failureDetail ? { failureDetail } : {}) }
+    );
     failPeerAttempt(cwd, workflowId, { stage, branchId }, fence, sanitized);
     throw sanitized;
   } finally {
