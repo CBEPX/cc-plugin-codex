@@ -25,7 +25,7 @@ const expectations = [
   ["scripts/lib/state.mjs:937-1109", ["unlinkLockIfUnchanged", "remainingLockDeadlineMs", "lockProcessTimeout", "recoverStaleLock", "acquireJobLock", "releaseJobLock"]],
   ["scripts/lib/state.mjs:1175-1240", ["casJobStatus", "transitionJob", "writeAtomic", "withStateFileLock"]],
   ["scripts/lib/state.mjs:1246-1292", ["cleanupOldJobs"]],
-  ["scripts/lib/tracked-jobs.mjs:30-43", ["transitionTrackedJob"]],
+  ["scripts/lib/tracked-jobs.mjs:30-81", ["transitionTrackedJob", "isUnverifiableStatusReaperFailure", "transitionTrackedJobTerminal"]],
   ["scripts/lib/tracked-jobs.mjs:311-395", ["createJobRecord", "createJobProgressUpdater"]],
   ["scripts/lib/tracked-jobs.mjs:414-547", ["runTrackedJob"]],
   ["scripts/lib/job-control.mjs:207-469", ["matchJobReference", "buildStatusSnapshot", "resolveCancelableJob"]],
