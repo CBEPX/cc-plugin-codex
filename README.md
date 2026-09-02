@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.2
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.1/cc-plugin-codex-1.7.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.2 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.2/cc-plugin-codex-1.7.2.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -179,6 +179,10 @@ $cc:design --retry <workflow-id>
 ```
 
 New workflows default to Claude `fable` with `opus` fallback and inherited Codex model at `xhigh` effort. Use `--model`, `--fallback-model`, `--effort`, `--codex-model`, or `--codex-effort` to override them. Repeat `--user-mcp-tool <mcp__server__tool>` for explicitly trusted eligible tools; automatic selection is limited to the smallest relevant eligible set exposed to the active Codex turn. Eligibility records whether trust came from `readOnlyHint` or the audited registry, but does not independently enforce server behavior. Project MCP servers still require `--allow-project-mcp-servers`.
+
+The audited annotationless Brave allowlist contains exactly `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`; other Brave IDs are not eligible through it. A Brave event counts as Claude web evidence only when that exact ID is also in the workflow's frozen selected-tool manifest. The manifest records the selected ID and trust basis, not the provider's behavior: an `@latest` Brave server can still change a tool behind the same ID. Pin a server version when that drift is unacceptable.
+
+Selected Brave MCP servers are external trusted processes/services, not an OS sandbox. Their query or context input can disclose the brief and research terms to the provider; do not send secrets or sensitive material through either tool. The workflow never persists raw MCP configuration or credentials, but that does not remove this upstream disclosure risk.
 
 The stored and rendered workflow shows independent branch states, requested/final models and fallback events, source/tool evidence counts, selected public tool IDs and reasons, checkpoint or final result, and the exact continue/retry command. Raw MCP configuration, environment variables, headers, and credentials are never persisted or rendered. Claude receives no Bash, write, or Agent capability, and only selected MCP servers enter its strict runtime config. Peer turns also require the platform filesystem sandbox, deny unsandboxed commands and reads of canonical Codex/Claude state, persist no Claude transcript, and expose only content-free phase/tool/model-fallback progress before reveal. Native Windows peer execution is unsupported and isolation failures stop with `PEER_ISOLATION_UNAVAILABLE`.
 
@@ -369,7 +373,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.2
 codex plugin add cc@cbepx
 ```
 
@@ -390,8 +394,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.1 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.1/cc-plugin-codex-1.7.1.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.2 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.2/cc-plugin-codex-1.7.2.tgz install
 ```
 
 After install, run:
@@ -421,7 +425,7 @@ $cc:setup
 Re-run the fork marketplace install flow, pinned to the release you want:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.1
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.2
 codex plugin add cc@cbepx
 ```
 

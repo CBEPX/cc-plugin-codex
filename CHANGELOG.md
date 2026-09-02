@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## v1.7.2
+
+### Added
+
+- Require strict mode-specific schemas for peer design, research, and critique output.
+- Allow the exact audited Brave web-search and LLM-context IDs as frozen-manifest-bound Claude web evidence.
+
 ## v1.7.1
 
 ### Changed
