@@ -44,6 +44,7 @@ import {
   runClaudeTurn,
   runClaudeReview,
   runClaudeAdversarialReview,
+  CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY_CODE,
   cancelClaudeProcess,
   MODEL_ALIASES,
   resolveEffort,
@@ -1377,7 +1378,8 @@ async function executeReviewRun(request) {
         contextWindow: result.contextWindow ?? null,
         modelFallbacks,
         parseErrors: result.parseErrors ?? [],
-        unresolvedParseErrors: result.unresolvedParseErrors ?? 0
+        unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
+        streamDiagnostics: result.streamDiagnostics ?? []
       }
     };
     const rendered = appendModelFallbackSummary(
@@ -1487,7 +1489,8 @@ async function executeReviewRun(request) {
       contextWindow: result.contextWindow ?? null,
       modelFallbacks,
       parseErrors: result.parseErrors ?? [],
-      unresolvedParseErrors: result.unresolvedParseErrors ?? 0
+      unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
+      streamDiagnostics: result.streamDiagnostics ?? []
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
@@ -1619,6 +1622,7 @@ async function executeTaskRun(request) {
     failure: result.failure ?? null,
     parseErrors: result.parseErrors ?? [],
     unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
+    streamDiagnostics: result.streamDiagnostics ?? [],
     rawOutput,
     touchedFiles: Array.isArray(result.touchedFiles)
       ? result.touchedFiles
@@ -1807,6 +1811,15 @@ function sanitizePeerModelFallback(event) {
 function normalizePeerModelFallbacks(events) {
   return Array.isArray(events)
     ? events.map(sanitizePeerModelFallback).filter(Boolean)
+    : [];
+}
+
+function normalizePeerStreamDiagnostics(diagnostics) {
+  return Array.isArray(diagnostics)
+    ? diagnostics
+      .filter(({ code } = {}) => code === CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY_CODE)
+      .slice(-50)
+      .map(({ code }) => ({ code }))
     : [];
 }
 
@@ -2265,7 +2278,7 @@ function enqueueDetachedTask(cwd, job, request, options = {}) {
 
 function buildStoredTaskPayload(job) {
   if (job?.result && typeof job.result === "object") {
-    return { contextWindow: null, ...job.result };
+    return { contextWindow: null, streamDiagnostics: [], ...job.result };
   }
   return {
     status: job?.status === "completed" ? "completed" : "failed",
@@ -2277,6 +2290,7 @@ function buildStoredTaskPayload(job) {
     finalModel: null,
     contextWindow: null,
     modelFallbacks: [],
+    streamDiagnostics: [],
     rawOutput: "",
     touchedFiles: [],
     ...(job?.errorMessage ? { errorMessage: job.errorMessage } : {})
@@ -3503,6 +3517,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       fallbackModel: peerModelValue(workflow, "claude-fallback") ?? "opus",
       modelFallbacks: normalizePeerModelFallbacks(result.modelEvents),
       contextWindow: result.contextWindow ?? null,
+      streamDiagnostics: normalizePeerStreamDiagnostics(result.streamDiagnostics),
     };
     const payload = critique
       ? {

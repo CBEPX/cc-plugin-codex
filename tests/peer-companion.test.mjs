@@ -114,6 +114,9 @@ async function main() {
       reason: process.env.FAKE_CLAUDE_FALLBACK_REASON || "capacity",
     }) + "\\n");
   }
+  if (process.env.FAKE_CLAUDE_LIST_TOOLS_WARNING === "1") {
+    process.stdout.write("Client.listTools() called but server does not advertise tools capability - returning empty list\\n");
+  }
   const payload = critique
     ? { content: process.env.FAKE_CLAUDE_EMPTY_CRITIQUE === "1"
         ? {}
@@ -735,7 +738,7 @@ describe("peer companion with fake Claude", () => {
       "--epoch", String(created.workflow.epoch), "--json",
     ], {
       input: attemptInput(claudeLease),
-      env: { FAKE_CLAUDE_FALLBACK: "1" },
+      env: { FAKE_CLAUDE_FALLBACK: "1", FAKE_CLAUDE_LIST_TOOLS_WARNING: "1" },
     });
 
     assert.equal(result.status, "completed");
@@ -744,6 +747,10 @@ describe("peer companion with fake Claude", () => {
     assert.equal(result.memo.model.finalModel, "claude-opus-5");
     assert.equal(result.memo.model.fallbackModel, "opus");
     assert.equal(result.memo.model.modelFallbacks.length, 1);
+    assert.deepEqual(result.memo.model.streamDiagnostics, [
+      { code: "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY" },
+    ]);
+    assert.equal(JSON.stringify(result.memo).includes("Client.listTools()"), false);
     assert.deepEqual(result.memo.toolEvents.map(({ tool }) => tool), ["Read", "WebSearch"]);
     const invocation = JSON.parse(fs.readFileSync(testEnv.claudeLog, "utf8").trim());
     const allowed = invocation.args.flatMap((value, index, args) =>

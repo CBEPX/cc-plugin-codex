@@ -115,6 +115,7 @@ async function main() {
     \`stub-\${sanitize(prompt)}-\${process.pid}\`;
   const emitUnknownNoTerminal = /\\bunknown-no-terminal\\b/.test(prompt);
   const emitMalformedLine = /\\bmalformed-line\\b/.test(prompt);
+  const emitListToolsWarning = process.env.CLAUDE_FAKE_LIST_TOOLS_WARNING === "1";
   const emitSessionLimit = /\\bsession-limit\\b/.test(prompt);
   const emitFableLimit = /\\bfable-limit\\b/.test(prompt);
   const emitAuthFailure = /\\bauth-failure\\b/.test(prompt);
@@ -213,6 +214,9 @@ async function main() {
 
   if (emitMalformedLine) {
     process.stdout.write("{not-json\\n");
+  }
+  if (emitListToolsWarning) {
+    process.stdout.write("Client.listTools() called but server does not advertise tools capability - returning empty list\\n");
   }
 
   const requestedModel = getValue("--model");
@@ -1794,6 +1798,33 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("returns stable list-tools diagnostics without raw warning text for a read-only task", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const payload = runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "document list-tools diagnostics",
+        ],
+        { env: { ...testEnv.env, CLAUDE_FAKE_LIST_TOOLS_WARNING: "1" } }
+      );
+
+      assert.equal(payload.status, "completed");
+      assert.equal(payload.unresolvedParseErrors, 0);
+      assert.deepEqual(payload.streamDiagnostics, [
+        { code: "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY" },
+      ]);
+      assert.equal(JSON.stringify(payload).includes("Client.listTools()"), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("does not classify failed output that only mentions rate limiting in the final message", () => {
     const testEnv = createTestEnvironment();
 
@@ -3117,6 +3148,7 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(statusPayload.job.result.contextWindow, null);
+      assert.deepEqual(statusPayload.job.result.streamDiagnostics, []);
 
       writeSessionScopedJob(testEnv, jobId, legacyJob);
       const resultPayload = runCompanionJson(
@@ -3125,6 +3157,7 @@ describe("claude-companion integration", () => {
       );
       assert.equal(resultPayload.job.result.contextWindow, null);
       assert.equal(resultPayload.storedJob.result.contextWindow, null);
+      assert.deepEqual(resultPayload.storedJob.result.streamDiagnostics, []);
 
       writeSessionScopedJob(testEnv, legacyReviewJob.id, legacyReviewJob);
       const reviewStatusPayload = runCompanionJson(
@@ -3132,6 +3165,7 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       assert.equal(reviewStatusPayload.job.result.codex.contextWindow, null);
+      assert.deepEqual(reviewStatusPayload.job.result.codex.streamDiagnostics, []);
 
       writeSessionScopedJob(testEnv, legacyReviewJob.id, legacyReviewJob);
       const reviewResultPayload = runCompanionJson(
@@ -3140,6 +3174,7 @@ describe("claude-companion integration", () => {
       );
       assert.equal(reviewResultPayload.job.result.codex.contextWindow, null);
       assert.equal(reviewResultPayload.storedJob.result.codex.contextWindow, null);
+      assert.deepEqual(reviewResultPayload.storedJob.result.codex.streamDiagnostics, []);
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -4367,6 +4402,36 @@ describe("claude-companion integration", () => {
       assert.equal(payload.codex.status, "completed");
       assert.equal(payload.codex.parseErrors.length, 1);
       assert.match(payload.codex.warning, /1 unrecovered parse error/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("returns stable list-tools diagnostics without raw warning text for a read-only review", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      fs.writeFileSync(path.join(testEnv.workspaceDir, "notes.md"), "review output\n", "utf8");
+
+      const payload = runCompanionJson(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--json",
+        ],
+        { env: { ...testEnv.env, CLAUDE_FAKE_LIST_TOOLS_WARNING: "1" } }
+      );
+
+      assert.equal(payload.codex.status, "completed");
+      assert.equal(payload.codex.unresolvedParseErrors, 0);
+      assert.deepEqual(payload.codex.streamDiagnostics, [
+        { code: "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY" },
+      ]);
+      assert.equal(JSON.stringify(payload).includes("Client.listTools()"), false);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

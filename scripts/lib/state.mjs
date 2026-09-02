@@ -439,6 +439,7 @@ function normalizeStoredJob(job) {
       result: {
         ...job.result,
         contextWindow: job.result.contextWindow ?? null,
+        streamDiagnostics: job.result.streamDiagnostics ?? [],
       },
     };
   }
@@ -462,6 +463,7 @@ function normalizeStoredJob(job) {
       codex: {
         ...job.result.codex,
         contextWindow: job.result.codex.contextWindow ?? null,
+        streamDiagnostics: job.result.codex.streamDiagnostics ?? [],
       },
     },
   };

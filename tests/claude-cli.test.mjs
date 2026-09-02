@@ -1034,6 +1034,45 @@ describe("StreamParser", () => {
     assert.ok(parser.state.parseErrors[0].line.includes("not valid json"));
   });
 
+  it("classifies only the exact list-tools capability warning without retaining its text", () => {
+    const parser = new StreamParser();
+    const warning = "Client.listTools() called but server does not advertise tools capability - returning empty list";
+
+    parser.feed(warning + "\n");
+
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+    assert.deepEqual(parser.state.streamDiagnostics, [
+      { code: "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY" },
+    ]);
+    assert.equal(JSON.stringify(parser.state.streamDiagnostics).includes(warning), false);
+  });
+
+  it("keeps near matches and unknown invalid JSON fail-closed", () => {
+    const parser = new StreamParser();
+
+    parser.feed("Client.listTools() called but server does not advertise tools capability - returning empty lists\n");
+    parser.feed("not valid json\n");
+
+    assert.equal(parser.state.unresolvedParseErrors, 2);
+    assert.deepEqual(parser.state.streamDiagnostics, []);
+    assert.equal(parser.state.parseErrors.length, 2);
+  });
+
+  it("caps stable stream diagnostics at fifty entries", () => {
+    const parser = new StreamParser();
+    const warning = "Client.listTools() called but server does not advertise tools capability - returning empty list";
+
+    for (let index = 0; index < 59; index++) {
+      parser.feed(warning + "\n");
+    }
+
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+    assert.equal(parser.state.streamDiagnostics.length, 50);
+    assert.deepEqual(parser.state.streamDiagnostics[0], {
+      code: "CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY",
+    });
+  });
+
   it("caps stored parse error samples while keeping the total unresolved count", () => {
     const parser = new StreamParser();
 
