@@ -15,6 +15,20 @@ const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
 const COMPANION = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
 const cleanup = [];
 
+function writeMissingSchemaPreload(rootDir) {
+  const filePath = path.join(rootDir, "missing-schema-preload.cjs");
+  fs.writeFileSync(filePath, `const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+if (process.argv[1] === process.env.CC_TEST_COMPANION_PATH) {
+  const unavailablePath = process.env.CC_TEST_UNAVAILABLE_SCHEMA;
+  const existsSync = fs.existsSync;
+  fs.existsSync = (candidate) => candidate === unavailablePath ? false : existsSync(candidate);
+  syncBuiltinESMExports();
+}
+`, "utf8");
+  return filePath;
+}
+
 function runGit(cwd, args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -459,25 +473,25 @@ describe("peer companion with fake Claude", () => {
   it("fails closed before spawning Claude when its output schema is missing", () => {
     const testEnv = createEnvironment();
     const schemaPath = path.join(PROJECT_ROOT, "schemas", "peer-design-output.schema.json");
-    const missingPath = `${schemaPath}.missing-for-test`;
-    fs.renameSync(schemaPath, missingPath);
-    try {
-      const created = createPeer(testEnv);
-      const claudeLease = planLease(created, "_claude_");
-      const failed = run(testEnv, [
-        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-        "--brief-hash", created.workflow.briefHash,
-        "--epoch", String(created.workflow.epoch), "--json",
-      ], {
-        input: attemptInput(claudeLease),
-        env: { FAKE_CLAUDE_SANDBOX_UNAVAILABLE: "1" },
-      });
-      assert.notEqual(failed.status, 0);
-      assert.match(failed.stderr, /PEER_OUTPUT_SCHEMA_UNAVAILABLE/);
-      assert.equal(fs.existsSync(testEnv.claudeLog), false);
-    } finally {
-      fs.renameSync(missingPath, schemaPath);
-    }
+    const preloadPath = writeMissingSchemaPreload(testEnv.rootDir);
+    const created = createPeer(testEnv);
+    const claudeLease = planLease(created, "_claude_");
+    const failed = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: {
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${preloadPath}`.trim(),
+        CC_TEST_COMPANION_PATH: COMPANION,
+        CC_TEST_UNAVAILABLE_SCHEMA: schemaPath,
+        FAKE_CLAUDE_SANDBOX_UNAVAILABLE: "1",
+      },
+    });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /PEER_OUTPUT_SCHEMA_UNAVAILABLE/);
+    assert.equal(fs.existsSync(testEnv.claudeLog), false);
   });
 
   it("uses native structured output when final text is invalid JSON", () => {
