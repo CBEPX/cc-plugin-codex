@@ -105,6 +105,33 @@ describe("StreamParser", () => {
     assert.equal(parser.state.finalMessage, "");
   });
 
+  it("clears terminal structured output when a later result omits it", () => {
+    const parser = new StreamParser();
+    parser.feed(JSON.stringify({
+      type: "result",
+      subtype: "error",
+      structured_output: { answer: "stale" },
+    }) + "\n");
+    parser.feed(JSON.stringify({
+      type: "result",
+      subtype: "success",
+    }) + "\n");
+
+    assert.equal(parser.state.terminalSubtype, "success");
+    assert.equal(parser.state.structuredOutput, null);
+  });
+
+  it("captures the terminal result subtype", () => {
+    const parser = new StreamParser();
+    parser.feed(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "done",
+    }) + "\n");
+
+    assert.equal(parser.state.terminalSubtype, "success");
+  });
+
   it("ignores Claude synthetic error model ids", () => {
     const parser = new StreamParser();
     const resultEvent = JSON.stringify({
@@ -1399,6 +1426,26 @@ describe("classifyClaudeFailure", () => {
 });
 
 describe("runClaudeTurn", () => {
+  it("returns the terminal result subtype internally", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-subtype-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `const out = JSON.stringify({ type: "result", subtype: "success", result: "done", session_id: "sess-subtype" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "prompt");
+
+      assert.equal(result.status, "completed");
+      assert.equal(result.terminalSubtype, "success");
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns bounded parser diagnostics when read-only output has a valid terminal event", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-parse-"));
     const oldPath = process.env.PATH ?? "";

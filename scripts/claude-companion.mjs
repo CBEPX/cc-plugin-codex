@@ -3405,15 +3405,14 @@ function submitPeerTargetOneShot(cwd, workflowId, options) {
 }
 
 function parsePeerClaudePayload(result, label) {
-  if (result.structuredOutput != null) {
-    if (typeof result.structuredOutput === "object" && !Array.isArray(result.structuredOutput)) {
-      return result.structuredOutput;
-    }
-  } else {
-    try {
-      const parsed = JSON.parse(String(result.finalMessage ?? "").trim());
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-    } catch {}
+  if (
+    result.terminalSubtype === "success" &&
+    result.structuredOutput &&
+    typeof result.structuredOutput === "object" &&
+    !Array.isArray(result.structuredOutput) &&
+    Object.getPrototypeOf(result.structuredOutput) === Object.prototype
+  ) {
+    return result.structuredOutput;
   }
   throw Object.assign(
     new Error(`EVIDENCE_INCOMPLETE: ${label} did not return one structured JSON object.`),

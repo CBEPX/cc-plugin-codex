@@ -596,6 +596,7 @@ export class StreamParser {
       sessionId: null,
       finalMessage: "",
       structuredOutput: null,
+      terminalSubtype: null,
       receivedTerminalEvent: false,
       unknownEvents: [],
       parseErrors: [],
@@ -685,6 +686,8 @@ export class StreamParser {
           return this._handleSystemEvent(event);
         case "result":
           this.state.receivedTerminalEvent = true;
+          this.state.terminalSubtype =
+            typeof event.subtype === "string" ? event.subtype : null;
           {
             const terminalModel = normalizeObservedModel(
               extractRawObservedModel(event)
@@ -710,9 +713,7 @@ export class StreamParser {
               this.state.hasTerminalLimitSignal = true;
             }
           }
-          if (Object.prototype.hasOwnProperty.call(event, "structured_output")) {
-            this.state.structuredOutput = event.structured_output ?? null;
-          }
+          this.state.structuredOutput = event.structured_output ?? null;
           if (event.session_id) this.state.sessionId = event.session_id;
           return { kind: "result", data: event };
         default:
@@ -1429,7 +1430,7 @@ export function buildArgs(prompt, options = {}) {
 
 /**
  * Execute a Claude Code turn with streaming progress.
- * Returns { status, sessionId, finalMessage, toolUses, touchedFiles, stderr, pid, pidIdentity }
+ * Returns { status, sessionId, finalMessage, structuredOutput, terminalSubtype, toolUses, touchedFiles, stderr, pid, pidIdentity }
  */
 export async function runClaudeTurn(cwd, prompt, options = {}) {
   const args = buildArgs(prompt, {
@@ -1445,6 +1446,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       sessionId: null,
       finalMessage: "",
       structuredOutput: null,
+      terminalSubtype: null,
       toolUses: [],
       touchedFiles: [],
       requestedModel,
@@ -1586,6 +1588,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         sessionId: parser.state.sessionId,
         finalMessage: parser.state.finalMessage,
         structuredOutput: parser.state.structuredOutput,
+        terminalSubtype: parser.state.terminalSubtype,
         toolUses: parser.state.toolUses,
         touchedFiles: parser.state.touchedFiles,
         requestedModel,
@@ -1609,6 +1612,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         sessionId: null,
         finalMessage: "",
         structuredOutput: null,
+        terminalSubtype: null,
         toolUses: [],
         touchedFiles: [],
         requestedModel,
