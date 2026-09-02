@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Peer research output",
+  "description": "Strict output contract for an initial peer research memo.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["content", "repoCitations", "webCitations"],
+  "properties": {
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findings", "sourceQuality", "contradictions", "confidence", "gaps"],
+      "properties": {
+        "findings": { "type": "array", "items": { "type": "string" } },
+        "sourceQuality": { "type": "string" },
+        "contradictions": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "string" },
+        "gaps": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "repoCitations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line"],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": "integer" }
+        }
+      }
+    },
+    "webCitations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line"],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

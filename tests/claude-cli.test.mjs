@@ -578,21 +578,21 @@ describe("StreamParser", () => {
     assert.deepEqual(parser.state, parentState);
   });
 
-  it("parses a tool_use content_block_start event", () => {
+  it("preserves a full MCP tool name from content_block_start", () => {
     const parser = new StreamParser();
     const evt = JSON.stringify({
       type: "stream_event",
       event: {
         type: "content_block_start",
-        content_block: { type: "tool_use", name: "Read", input: { path: "/a" } },
+        content_block: { type: "tool_use", name: "mcp__docs__search", input: { path: "/a" } },
       },
     });
     const events = parser.feed(evt + "\n");
     assert.equal(events.length, 1);
     assert.equal(events[0].kind, "tool_use");
-    assert.equal(events[0].tool, "Read");
+    assert.equal(events[0].tool, "mcp__docs__search");
     assert.deepEqual(events[0].input, { path: "/a" });
-    assert.equal(events[0].message, "Using tool: Read");
+    assert.equal(events[0].message, "Using tool: mcp__docs__search");
     assert.equal(events[0].phase, "tool");
     assert.equal(parser.state.toolUses.length, 1);
   });

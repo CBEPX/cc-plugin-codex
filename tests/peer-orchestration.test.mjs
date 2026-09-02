@@ -282,6 +282,74 @@ describe("fake built-in agent orchestration", () => {
 });
 
 describe("peer evidence validation", () => {
+  it("accepts built-ins and only selected audited Brave web tool events", () => {
+    const workspaceRoot = fs.realpathSync.native(
+      fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-brave-evidence-"))
+    );
+    try {
+      const source = path.join(workspaceRoot, "source.mjs");
+      fs.writeFileSync(source, "export const value = 1;\n", "utf8");
+      const base = {
+        content: { finding: "validated" },
+        repoCitations: [{ path: source, line: 1 }],
+        webCitations: ["https://example.test/reference"],
+      };
+      for (const toolEvents of [
+        [{ tool: "Read" }, { tool: "WebSearch" }],
+        [{ tool: "Read" }, { tool: "WebFetch" }],
+      ]) {
+        assert.deepEqual(
+          validatePeerMemo({ workspaceRoot }, base, { role: "claude", toolEvents }).toolEvents,
+          toolEvents
+        );
+      }
+      for (const tool of [
+        "mcp__brave-search__brave_web_search",
+        "mcp__brave-search__brave_llm_context",
+      ]) {
+        const toolEvents = [{ tool: "Read" }, { tool }];
+        assert.deepEqual(validatePeerMemo({
+          workspaceRoot,
+          toolManifest: [{ toolId: tool }],
+        }, base, { role: "claude", toolEvents }).toolEvents, toolEvents);
+      }
+      const workflow = {
+        workspaceRoot,
+        toolManifest: [{ toolId: "mcp__brave-search__brave_web_search" }],
+      };
+      for (const tool of [
+        "mcp__brave-search__brave_llm_context",
+        "mcp__brave-search__brave_news_search",
+        "mcp__context7__query-docs",
+      ]) {
+        assert.throws(
+          () => validatePeerMemo(workflow, base, {
+            role: "claude", toolEvents: [{ tool: "Read" }, { tool }],
+          }),
+          (error) => {
+            const failure = /** @type {Error & {code?: string, failureDetail?: string}} */ (error);
+            return failure.code === "EVIDENCE_INCOMPLETE" &&
+              failure.failureDetail === "WEB_TOOL_EVENT_REQUIRED";
+          }
+        );
+      }
+      const lookalike = "mcp__brave-search__brave_web_search_extra";
+      assert.throws(
+        () => validatePeerMemo({
+          workspaceRoot,
+          toolManifest: [{ toolId: lookalike }],
+        }, base, { role: "claude", toolEvents: [{ tool: "Read" }, { tool: lookalike }] }),
+        (error) => {
+          const failure = /** @type {Error & {code?: string, failureDetail?: string}} */ (error);
+          return failure.code === "EVIDENCE_INCOMPLETE" &&
+            failure.failureDetail === "WEB_TOOL_EVENT_REQUIRED";
+        }
+      );
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("accepts only regular in-workspace files with positive lines and credential-free HTTPS URLs", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-evidence-"));
     try {

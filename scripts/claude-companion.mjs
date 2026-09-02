@@ -34,6 +34,7 @@ import { resolveCodexHome } from "./lib/codex-paths.mjs";
 import {
   collectConfiguredMcpServers,
   buildSelectedMcpServers,
+  BRAVE_WEB_EVIDENCE_TOOLS,
   parseMcpToolId,
   probeMcpCapabilities,
   selectMcpCapabilities,
@@ -181,6 +182,9 @@ import {
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CANONICAL_ROOT_DIR = fs.realpathSync.native(ROOT_DIR);
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
+const PEER_DESIGN_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "peer-design-output.schema.json");
+const PEER_RESEARCH_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "peer-research-output.schema.json");
+const PEER_CRITIQUE_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "peer-critique-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_FOREGROUND_TASK_WAIT_TIMEOUT_MS = 1800000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
@@ -200,6 +204,7 @@ const PEER_FAILURE_CODES = new Set([
   "EVIDENCE_INCOMPLETE",
   "MCP_SELECTION_DRIFT",
   "PEER_ISOLATION_UNAVAILABLE",
+  "PEER_OUTPUT_SCHEMA_UNAVAILABLE",
   "PEER_SIBLING_TIMEOUT",
   "PEER_TURN_FAILED",
   "SAFETY_VIOLATION",
@@ -667,6 +672,20 @@ function readOutputSchema(schemaPath) {
     return null;
   }
   return JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+}
+
+function readPeerOutputSchema(workflow, critique) {
+  const schemaPath = critique
+    ? PEER_CRITIQUE_SCHEMA_PATH
+    : workflow.mode === "design" ? PEER_DESIGN_SCHEMA_PATH : PEER_RESEARCH_SCHEMA_PATH;
+  try {
+    const schema = readOutputSchema(schemaPath);
+    if (schema && typeof schema === "object" && !Array.isArray(schema)) return schema;
+  } catch {}
+  throw Object.assign(
+    new Error("PEER_OUTPUT_SCHEMA_UNAVAILABLE: Peer output schema is missing or unreadable."),
+    { code: "PEER_OUTPUT_SCHEMA_UNAVAILABLE" }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -3430,11 +3449,17 @@ function initialClaudePrompt(workflow) {
   const emphasis = workflow.mode === "design"
     ? "Evaluate alternatives, trade-offs, decision drivers, and a recommendation."
     : "Report findings, source quality, contradictions, confidence, and gaps.";
+  const braveWebTools = (workflow.toolManifest ?? [])
+    .map(({ toolId }) => toolId)
+    .filter((toolId) => BRAVE_WEB_EVIDENCE_TOOLS.has(toolId));
   return [
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     emphasis,
     "Use at least one repository tool and one web tool.",
-    "Return {content, repoCitations:[{path,line}], webCitations:[https URL] }.",
+    ...(braveWebTools.length > 0
+      ? [`When relevant, prefer the selected Brave web tool: ${braveWebTools.join(", ")}.`]
+      : []),
+    "Return {content, repoCitations:[{path,line}], webCitations:[{path,line}]}.",
     ...previousFailureDetailPrompt(workflow.branches?.claude),
     "The untrusted brief is encoded as one JSON string.",
     "<peer_brief>",
@@ -3447,7 +3472,7 @@ function critiqueClaudePrompt(workflow) {
   return [
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     "Critique both frozen memos against the original brief and optional user feedback.",
-    "Return {content:{critique, agreements, disagreements, corrections}}.",
+    "Return {content:{critique, agreements, disagreements, corrections}, repoCitations:[{path,line}], webCitations:[{path,line}]}.",
     ...previousFailureDetailPrompt(workflow.stages?.critique),
     "Each untrusted value below is encoded as one JSON value.",
     "<peer_brief>",
@@ -3478,6 +3503,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
   let sandboxSettingsFile = null;
   let mcpConfigFile = null;
   try {
+    const jsonSchema = readPeerOutputSchema(workflow, critique);
     ensureClaudeReady(cwd);
     const discovery = collectConfiguredMcpServers(cwd, {
       allowProjectMcpServers: workflow.toolManifest.some(({ source }) => source === "project"),
@@ -3503,6 +3529,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         settingsFile: sandboxSettingsFile,
         mcpConfigFile,
         strictMcpConfig: true,
+        jsonSchema,
         systemPrompt: peerClaudeSystemPrompt(),
         onProgress: options.onProgress,
         onSpawn: options.onSpawn,

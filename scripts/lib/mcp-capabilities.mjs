@@ -18,9 +18,23 @@ const PROBE_TERMINATION_GRACE_MS = 100;
 const SENSITIVE_NAME_PATTERN = /(?:token|secret|password|authorization|api.?key|cookie)/iu;
 const probeCacheSalt = randomBytes(32);
 const probeCache = new Map();
+const braveWebEvidenceToolIds = new Set([
+  "mcp__brave-search__brave_web_search",
+  "mcp__brave-search__brave_llm_context",
+]);
+export const BRAVE_WEB_EVIDENCE_TOOLS = Object.freeze({
+  /** @param {string} toolId */
+  has(toolId) {
+    return braveWebEvidenceToolIds.has(toolId);
+  },
+  [Symbol.iterator]() {
+    return braveWebEvidenceToolIds.values();
+  },
+});
 export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = new Set([
   "mcp__context7__query-docs",
   "mcp__context7__resolve-library-id",
+  ...BRAVE_WEB_EVIDENCE_TOOLS,
 ]);
 
 function stableJson(value) {
@@ -281,7 +295,7 @@ function stdioProbe(config, timeoutMs) {
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "cc-plugin-codex", version: "1.7.1" },
+        clientInfo: { name: "cc-plugin-codex", version: "1.7.2" },
       },
     });
   });
@@ -370,7 +384,7 @@ async function httpProbe(config, timeoutMs) {
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "cc-plugin-codex", version: "1.7.1" },
+        clientInfo: { name: "cc-plugin-codex", version: "1.7.2" },
       },
     }, null, deadline);
     if (initialized.statusCode === 401 || initialized.statusCode === 403) {

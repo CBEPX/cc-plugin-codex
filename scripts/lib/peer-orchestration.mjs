@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseArgs } from "./args.mjs";
+import { BRAVE_WEB_EVIDENCE_TOOLS } from "./mcp-capabilities.mjs";
 import { normalizeWorkflowFailureDetail } from "./workflows.mjs";
 
 const USER_MCP_TOOL_RE = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/u;
@@ -428,7 +429,7 @@ export function validatePeerMemo(workflow, memo, options = {}) {
     );
   }
   const webCitations = (Array.isArray(memo.webCitations) ? memo.webCitations : [])
-    .map(directHttps)
+    .map((citation) => directHttps(isPlainObject(citation) ? citation.path : citation))
     .filter(Boolean);
   if (webCitations.length === 0) {
     throw peerError(
@@ -452,7 +453,10 @@ export function validatePeerMemo(workflow, memo, options = {}) {
         "REPOSITORY_TOOL_EVENT_REQUIRED"
       );
     }
-    if (!toolEvents.some(({ tool }) => ["WebSearch", "WebFetch"].includes(tool))) {
+    if (!toolEvents.some(({ tool }) => ["WebSearch", "WebFetch"].includes(tool) ||
+      (BRAVE_WEB_EVIDENCE_TOOLS.has(tool) && workflow.toolManifest?.some(
+        ({ toolId }) => toolId === tool
+      )))) {
       throw peerError(
         "EVIDENCE_INCOMPLETE",
         "Claude memo requires an actual web tool event.",

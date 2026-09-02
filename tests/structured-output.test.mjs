@@ -38,6 +38,83 @@ describe("review output schema", () => {
   });
 });
 
+describe("peer output schemas", () => {
+  const schemaCases = [
+    {
+      file: "peer-design-output.schema.json",
+      content: {
+        alternatives: { type: "array", items: { type: "string" } },
+        tradeoffs: { type: "array", items: { type: "string" } },
+        decisionDrivers: { type: "array", items: { type: "string" } },
+        recommendation: { type: "string" },
+        gaps: { type: "array", items: { type: "string" } },
+      },
+    },
+    {
+      file: "peer-research-output.schema.json",
+      content: {
+        findings: { type: "array", items: { type: "string" } },
+        sourceQuality: { type: "string" },
+        contradictions: { type: "array", items: { type: "string" } },
+        confidence: { type: "string" },
+        gaps: { type: "array", items: { type: "string" } },
+      },
+    },
+    {
+      file: "peer-critique-output.schema.json",
+      content: {
+        critique: { type: "string" },
+        agreements: { type: "array", items: { type: "string" } },
+        disagreements: { type: "array", items: { type: "string" } },
+        corrections: { type: "array", items: { type: "string" } },
+      },
+    },
+  ];
+
+  it("uses strict documented Draft-07 contracts for every peer phase", () => {
+    const unsupportedLimits = new Set(["minItems", "minLength", "minimum", "maximum"]);
+    const visit = (value) => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        assert.equal(unsupportedLimits.has(key), false, `${key} is not part of the peer contract`);
+        visit(child);
+      }
+    };
+
+    for (const { file, content } of schemaCases) {
+      const schema = JSON.parse(fs.readFileSync(
+        new URL(`../schemas/${file}`, import.meta.url),
+        "utf8"
+      ));
+      assert.equal(schema.$schema, "http://json-schema.org/draft-07/schema#");
+      assert.equal(schema.type, "object");
+      assert.equal(schema.additionalProperties, false);
+      assert.deepEqual(schema.required, ["content", "repoCitations", "webCitations"]);
+      assert.deepEqual(schema.properties.content, {
+        type: "object",
+        additionalProperties: false,
+        required: Object.keys(content),
+        properties: content,
+      });
+      for (const field of ["repoCitations", "webCitations"]) {
+        assert.deepEqual(schema.properties[field], {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["path", "line"],
+            properties: {
+              path: { type: "string" },
+              line: { type: "integer" },
+            },
+          },
+        });
+      }
+      visit(schema);
+    }
+  });
+});
+
 describe("extractFirstJsonObject", () => {
   it("extracts a JSON object after prose", () => {
     const extracted = extractFirstJsonObject(
