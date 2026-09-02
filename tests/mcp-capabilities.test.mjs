@@ -390,6 +390,20 @@ describe("MCP capability discovery", () => {
       "mcp__brave-search__brave_web_search",
       "mcp__brave-search__brave_llm_context",
     ]);
+    const mutable = /** @type {{add(value: string): unknown, delete(value: string): unknown, clear(): unknown}} */ (
+      /** @type {unknown} */ (mcp.BRAVE_WEB_EVIDENCE_TOOLS)
+    );
+    for (const mutate of [
+      () => mutable.add("mcp__context7__query-docs"),
+      () => mutable.delete("mcp__brave-search__brave_web_search"),
+      () => mutable.clear(),
+    ]) {
+      assert.throws(mutate, TypeError);
+    }
+    assert.deepEqual([...mcp.BRAVE_WEB_EVIDENCE_TOOLS], [
+      "mcp__brave-search__brave_web_search",
+      "mcp__brave-search__brave_llm_context",
+    ]);
     await withTempHome(async ({ homeDir, cwd }) => {
       const serverPath = writeStdioServer(homeDir, {
         initialize: {

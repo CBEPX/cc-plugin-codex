@@ -333,6 +333,18 @@ describe("peer evidence validation", () => {
           }
         );
       }
+      const lookalike = "mcp__brave-search__brave_web_search_extra";
+      assert.throws(
+        () => validatePeerMemo({
+          workspaceRoot,
+          toolManifest: [{ toolId: lookalike }],
+        }, base, { role: "claude", toolEvents: [{ tool: "Read" }, { tool: lookalike }] }),
+        (error) => {
+          const failure = /** @type {Error & {code?: string, failureDetail?: string}} */ (error);
+          return failure.code === "EVIDENCE_INCOMPLETE" &&
+            failure.failureDetail === "WEB_TOOL_EVENT_REQUIRED";
+        }
+      );
     } finally {
       fs.rmSync(workspaceRoot, { recursive: true, force: true });
     }

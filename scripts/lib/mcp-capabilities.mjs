@@ -18,10 +18,19 @@ const PROBE_TERMINATION_GRACE_MS = 100;
 const SENSITIVE_NAME_PATTERN = /(?:token|secret|password|authorization|api.?key|cookie)/iu;
 const probeCacheSalt = randomBytes(32);
 const probeCache = new Map();
-export const BRAVE_WEB_EVIDENCE_TOOLS = Object.freeze(new Set([
+const braveWebEvidenceToolIds = new Set([
   "mcp__brave-search__brave_web_search",
   "mcp__brave-search__brave_llm_context",
-]));
+]);
+export const BRAVE_WEB_EVIDENCE_TOOLS = Object.freeze({
+  /** @param {string} toolId */
+  has(toolId) {
+    return braveWebEvidenceToolIds.has(toolId);
+  },
+  [Symbol.iterator]() {
+    return braveWebEvidenceToolIds.values();
+  },
+});
 export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = new Set([
   "mcp__context7__query-docs",
   "mcp__context7__resolve-library-id",
