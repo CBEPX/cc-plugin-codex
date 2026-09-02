@@ -23,7 +23,7 @@ import {
   createJobRecord,
   runTrackedJob,
 } from "../scripts/lib/tracked-jobs.mjs";
-import { clearCurrentSession, ensureStateDir, readJobFile, resolveJobFile, resolveJobLogFile, setCurrentSession, writeJobFile } from "../scripts/lib/state.mjs";
+import { clearCurrentSession, ensureStateDir, readJobFile, resolveJobFile, resolveJobLogFile, setCurrentSession, transitionJob, writeJobFile } from "../scripts/lib/state.mjs";
 
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -869,6 +869,72 @@ describe("runTrackedJob", () => {
       assert.equal(finalJob.errorMessage, "independent failure");
       assert.equal(finalJob.result, undefined);
     } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not overwrite a failed writer between reaper readback and terminal CAS", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-reaper-replacement-race-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "reaper replacement race",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    const originalLinkSync = fs.linkSync;
+    let terminalAttempts = 0;
+    let injectWriter = false;
+    writeJobFile(repoDir, job.id, job);
+
+    Reflect.set(fs, "linkSync", (existingPath, newPath) => {
+      if (injectWriter && String(newPath).endsWith(`${job.id}.json.lock`)) {
+        terminalAttempts += 1;
+        if (terminalAttempts === 2) {
+          injectWriter = false;
+          const writer = transitionJob(repoDir, job.id, ["failed"], "failed", {
+            errorMessage: "independent failed writer",
+            reapedBy: null,
+            reapReason: null,
+            reapedUnverifiable: false,
+          });
+          assert.equal(writer.transitioned, true);
+        }
+      }
+      return originalLinkSync(existingPath, newPath);
+    });
+    syncBuiltinESMExports();
+
+    try {
+      await runTrackedJob(job, async () => {
+        const running = readJobFile(repoDir, job.id);
+        writeJobFile(repoDir, job.id, {
+          ...running,
+          status: "failed",
+          errorMessage: "identity remained unverifiable",
+          reapedBy: "status-reaper",
+          reapReason: "identity-unverifiable",
+          reapedUnverifiable: true,
+          updatedAt: nowIso(),
+        });
+        injectWriter = true;
+        return {
+          exitStatus: 0,
+          payload: { answer: 44 },
+          rendered: "finished after reaper",
+          summary: "finished after reaper",
+        };
+      });
+
+      const finalJob = readJobFile(repoDir, job.id);
+      assert.equal(terminalAttempts, 2);
+      assert.equal(finalJob.status, "failed");
+      assert.equal(finalJob.errorMessage, "independent failed writer");
+      assert.equal(finalJob.result, undefined);
+    } finally {
+      Reflect.set(fs, "linkSync", originalLinkSync);
+      syncBuiltinESMExports();
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
   });

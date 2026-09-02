@@ -42,6 +42,13 @@ function transitionTrackedJob(...args) {
   }
 }
 
+function isUnverifiableStatusReaperFailure(job) {
+  return (
+    job?.reapedBy === "status-reaper" &&
+    job?.reapedUnverifiable === true
+  );
+}
+
 function transitionTrackedJobTerminal(workspaceRoot, jobId, status, terminalData) {
   let transitioned = transitionTrackedJob(
     workspaceRoot,
@@ -53,8 +60,7 @@ function transitionTrackedJobTerminal(workspaceRoot, jobId, status, terminalData
   if (
     !transitioned.transitioned &&
     transitioned.previousStatus === "failed" &&
-    transitioned.job?.reapedBy === "status-reaper" &&
-    transitioned.job?.reapedUnverifiable === true
+    isUnverifiableStatusReaperFailure(transitioned.job)
   ) {
     transitioned = transitionTrackedJob(
       workspaceRoot,
@@ -67,7 +73,8 @@ function transitionTrackedJobTerminal(workspaceRoot, jobId, status, terminalData
         reapedBy: null,
         reapReason: null,
         reapedUnverifiable: false,
-      }
+      },
+      { predicate: isUnverifiableStatusReaperFailure }
     );
   }
   return transitioned;
