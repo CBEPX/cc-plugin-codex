@@ -681,6 +681,8 @@ describe("runTrackedJob", () => {
           ...running,
           status: "failed",
           errorMessage: "identity remained unverifiable",
+          reapedBy: "status-reaper",
+          reapReason: "identity-unverifiable",
           reapedUnverifiable: true,
           pid: 12345,
           pidIdentity: "stored-identity",
@@ -705,6 +707,8 @@ describe("runTrackedJob", () => {
       assert.equal(finalJob.rendered, "finished");
       assert.deepEqual(finalJob.result, { answer: 42 });
       assert.equal(finalJob.errorMessage, null);
+      assert.equal(finalJob.reapedBy, null);
+      assert.equal(finalJob.reapReason, null);
       assert.equal(finalJob.reapedUnverifiable, false);
       assert.equal(finalJob.pid, null);
     } finally {
@@ -712,7 +716,7 @@ describe("runTrackedJob", () => {
     }
   });
 
-  it("persists a late result after an ordinary status reaper failure", async () => {
+  it("does not overwrite an ordinary status reaper failure without an unverifiable marker", async () => {
     const repoDir = createTempGitRepo();
     const job = {
       id: "tracked-ordinary-reaper-result-job",
@@ -745,11 +749,11 @@ describe("runTrackedJob", () => {
       });
 
       const finalJob = readJobFile(repoDir, job.id);
-      assert.equal(finalJob.status, "completed");
-      assert.deepEqual(finalJob.result, { answer: 43 });
-      assert.equal(finalJob.errorMessage, null);
-      assert.equal(finalJob.reapedBy, null);
-      assert.equal(finalJob.reapReason, null);
+      assert.equal(finalJob.status, "failed");
+      assert.equal(finalJob.result, undefined);
+      assert.equal(finalJob.errorMessage, "Worker died without completing. Auto-reaped.");
+      assert.equal(finalJob.reapedBy, "status-reaper");
+      assert.equal(finalJob.reapReason, "process-missing");
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
@@ -782,6 +786,50 @@ describe("runTrackedJob", () => {
       assert.equal(finalJob.pid, null);
       assert.equal(finalJob.pidIdentity, null);
       assert.ok(finalJob.completedAt);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("makes a runner error primary after an unverifiable status reaper failure", async () => {
+    const repoDir = createTempGitRepo();
+    const job = {
+      id: "tracked-reaper-error-job",
+      workspaceRoot: repoDir,
+      status: "queued",
+      title: "late runner error",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    writeJobFile(repoDir, job.id, job);
+
+    try {
+      await assert.rejects(
+        runTrackedJob(job, async () => {
+          const running = readJobFile(repoDir, job.id);
+          writeJobFile(repoDir, job.id, {
+            ...running,
+            status: "failed",
+            errorMessage: "identity remained unverifiable",
+            reapedBy: "status-reaper",
+            reapReason: "identity-unverifiable",
+            reapedUnverifiable: true,
+            updatedAt: nowIso(),
+          });
+          throw new Error("runner exploded after reaper");
+        }),
+        /runner exploded after reaper/
+      );
+
+      const finalJob = readJobFile(repoDir, job.id);
+      assert.equal(finalJob.status, "failed");
+      assert.equal(finalJob.errorMessage, "runner exploded after reaper");
+      assert.equal(finalJob.reapedBy, null);
+      assert.equal(finalJob.reapReason, null);
+      assert.equal(finalJob.reapedUnverifiable, false);
+      assert.equal(finalJob.phase, "failed");
+      assert.equal(finalJob.pid, null);
+      assert.equal(finalJob.pidIdentity, null);
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
