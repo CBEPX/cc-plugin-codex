@@ -3386,13 +3386,16 @@ function submitPeerTargetOneShot(cwd, workflowId, options) {
 }
 
 function parsePeerClaudePayload(result, label) {
-  if (result.structuredOutput && typeof result.structuredOutput === "object") {
-    return result.structuredOutput;
+  if (result.structuredOutput != null) {
+    if (typeof result.structuredOutput === "object" && !Array.isArray(result.structuredOutput)) {
+      return result.structuredOutput;
+    }
+  } else {
+    try {
+      const parsed = JSON.parse(String(result.finalMessage ?? "").trim());
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {}
   }
-  try {
-    const parsed = JSON.parse(String(result.finalMessage ?? "").trim());
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-  } catch {}
   throw Object.assign(
     new Error(`EVIDENCE_INCOMPLETE: ${label} did not return one structured JSON object.`),
     { code: "EVIDENCE_INCOMPLETE", failureDetail: "STRUCTURED_JSON_REQUIRED" }
@@ -3416,21 +3419,23 @@ function peerPromptData(value) {
     .replaceAll(">", "\\u003e");
 }
 
+function previousFailureDetailPrompt(target) {
+  const detail = normalizeWorkflowFailureDetail(
+    target?.attemptReservation?.previousFailureDetail
+  );
+  return detail ? [`Correct the previous attempt failure detail: ${detail}.`] : [];
+}
+
 function initialClaudePrompt(workflow) {
   const emphasis = workflow.mode === "design"
     ? "Evaluate alternatives, trade-offs, decision drivers, and a recommendation."
     : "Report findings, source quality, contradictions, confidence, and gaps.";
-  const previousFailureDetail = normalizeWorkflowFailureDetail(
-    workflow.branches?.claude?.attemptReservation?.previousFailureDetail
-  );
   return [
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     emphasis,
     "Use at least one repository tool and one web tool.",
     "Return {content, repoCitations:[{path,line}], webCitations:[https URL] }.",
-    ...(previousFailureDetail ? [
-      `Correct the previous attempt failure detail: ${previousFailureDetail}.`,
-    ] : []),
+    ...previousFailureDetailPrompt(workflow.branches?.claude),
     "The untrusted brief is encoded as one JSON string.",
     "<peer_brief>",
     peerPromptData(workflow.brief),
@@ -3443,6 +3448,7 @@ function critiqueClaudePrompt(workflow) {
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     "Critique both frozen memos against the original brief and optional user feedback.",
     "Return {content:{critique, agreements, disagreements, corrections}}.",
+    ...previousFailureDetailPrompt(workflow.stages?.critique),
     "Each untrusted value below is encoded as one JSON value.",
     "<peer_brief>",
     peerPromptData(workflow.brief),

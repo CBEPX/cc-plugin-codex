@@ -490,6 +490,52 @@ describe("peer workflow store", () => {
       assert.equal(workflow.branches.beta.status, "completed", String(failureFirst));
     }
   });
+
+  it("keeps aggregate failure when a reserved sibling activates after the failure", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, { id: "workflow-late-sibling-activation" });
+    const reservation = reserveWorkflowAttempts(repo, created.id, {
+      revision: created.revision,
+      epoch: created.epoch,
+    }, [
+      { stage: "memo", branchId: "alpha" },
+      { stage: "memo", branchId: "beta" },
+    ]);
+    let workflow = activateWorkflowAttempt(repo, created.id, {
+      stage: "memo", branchId: "alpha",
+      revision: reservation.workflow.revision,
+      epoch: reservation.workflow.epoch,
+      lease: reservation.leases["branch:alpha"],
+    });
+    workflow = markWorkflowBranchFailure(repo, workflow.id, {
+      stage: "memo", branchId: "alpha",
+      revision: workflow.revision, epoch: workflow.epoch,
+      lease: reservation.leases["branch:alpha"],
+      reason: "EVIDENCE_INCOMPLETE",
+      failureDetail: "REPOSITORY_CITATION_REQUIRED",
+    });
+
+    workflow = activateWorkflowAttempt(repo, workflow.id, {
+      stage: "memo", branchId: "beta",
+      revision: workflow.revision, epoch: workflow.epoch,
+      lease: reservation.leases["branch:beta"],
+    });
+    assert.equal(workflow.status, "incomplete");
+    assert.equal(workflow.failureReason, "EVIDENCE_INCOMPLETE");
+    assert.equal(workflow.failureDetail, "REPOSITORY_CITATION_REQUIRED");
+
+    workflow = submitWorkflowStage(repo, workflow.id, {
+      stage: "memo", branchId: "beta",
+      revision: workflow.revision, epoch: workflow.epoch,
+      lease: reservation.leases["branch:beta"],
+      payload: { summary: "late sibling success" },
+    });
+    assert.equal(workflow.status, "incomplete");
+    assert.equal(workflow.failureReason, "EVIDENCE_INCOMPLETE");
+    assert.equal(workflow.failureDetail, "REPOSITORY_CITATION_REQUIRED");
+    assert.equal(workflow.branches.alpha.status, "retryable_failed");
+    assert.equal(workflow.branches.beta.status, "completed");
+  });
   it("persists a complete secret-free workflow record in its own workspace store", () => {
     const repo = createRepo();
     const workflow = createWorkflow(repo);

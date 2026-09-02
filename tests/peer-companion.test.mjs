@@ -129,6 +129,9 @@ async function main() {
   const emitResult = () => process.stdout.write(JSON.stringify({
       type: "result",
       session_id: sessionId,
+      ...(process.env.FAKE_CLAUDE_STRUCTURED_ARRAY === "1"
+        ? { structured_output: [payload] }
+        : {}),
       result: process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
         ? "not structured JSON"
         : JSON.stringify(payload),
@@ -825,6 +828,26 @@ describe("peer companion with fake Claude", () => {
     assert.equal(stored.branches.claude.failureDetail, "STRUCTURED_JSON_REQUIRED");
   });
 
+  it("rejects a native structured output array as not one JSON object", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const claudeLease = planLease(created, "_claude_");
+    const failed = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: { FAKE_CLAUDE_STRUCTURED_ARRAY: "1" },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(stored.failureDetail, "STRUCTURED_JSON_REQUIRED");
+    assert.equal(stored.branches.claude.failureDetail, "STRUCTURED_JSON_REQUIRED");
+  });
+
   it("marks missing Claude web evidence incomplete without replacing a successful sibling memo", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);
@@ -1080,5 +1103,14 @@ describe("peer companion with fake Claude", () => {
       { kind: "stage", id: "critique" },
       { kind: "stage", id: "synthesis" },
     ]);
+    const retryCritiqueLease = planLease(retry, "_critique_");
+    runJson(testEnv, [
+      "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(retry.workflow.epoch), "--json",
+    ], { input: attemptInput(retryCritiqueLease) });
+    const retryInvocation = fs.readFileSync(testEnv.claudeLog, "utf8").trim()
+      .split("\n").map((line) => JSON.parse(line)).at(-1);
+    assert.match(retryInvocation.prompt, /NON_EMPTY_CONTENT_REQUIRED/u);
   });
 });

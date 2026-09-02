@@ -687,12 +687,21 @@ export function activateWorkflowAttempt(cwd, workflowId, options) {
       startFingerprint: currentFingerprint,
       commitment: null,
     };
+    const otherTargetFailed = [
+      ...Object.entries(workflow.branches ?? {}).map(([key, state]) => ["branches", key, state]),
+      ...Object.entries(workflow.stages ?? {}).map(([key, state]) => ["stages", key, state]),
+    ].some(([collection, key, state]) =>
+      (collection !== target.collection || key !== target.key) &&
+      ["retryable_failed", "cancel_failed"].includes(state.status)
+    );
+    const preserveAggregateFailure = workflow.status === "incomplete" &&
+      (target.state.status !== "retryable_failed" || otherTargetFailed);
     return {
       ...updateTarget(workflow, target, startedState),
-      status: "running",
-      phase: target.stage,
-      failureReason: null,
-      failureDetail: null,
+      status: preserveAggregateFailure ? workflow.status : "running",
+      phase: preserveAggregateFailure ? workflow.phase : target.stage,
+      failureReason: preserveAggregateFailure ? workflow.failureReason : null,
+      failureDetail: preserveAggregateFailure ? workflow.failureDetail ?? null : null,
       startedAt: workflow.startedAt ?? timestamp,
       branchAttempts: appendBranchAttempt(
         workflow,
