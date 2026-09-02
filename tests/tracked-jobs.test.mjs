@@ -716,7 +716,7 @@ describe("runTrackedJob", () => {
     }
   });
 
-  it("does not overwrite an ordinary status reaper failure without an unverifiable marker", async () => {
+  it("replaces an ordinary status reaper failure with the late runner success", async () => {
     const repoDir = createTempGitRepo();
     const job = {
       id: "tracked-ordinary-reaper-result-job",
@@ -749,11 +749,12 @@ describe("runTrackedJob", () => {
       });
 
       const finalJob = readJobFile(repoDir, job.id);
-      assert.equal(finalJob.status, "failed");
-      assert.equal(finalJob.result, undefined);
-      assert.equal(finalJob.errorMessage, "Worker died without completing. Auto-reaped.");
-      assert.equal(finalJob.reapedBy, "status-reaper");
-      assert.equal(finalJob.reapReason, "process-missing");
+      assert.equal(finalJob.status, "completed");
+      assert.deepEqual(finalJob.result, { answer: 43 });
+      assert.equal(finalJob.errorMessage, null);
+      assert.equal(finalJob.reapedBy, null);
+      assert.equal(finalJob.reapReason, null);
+      assert.equal(finalJob.reapedUnverifiable, false);
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
@@ -791,7 +792,7 @@ describe("runTrackedJob", () => {
     }
   });
 
-  it("makes a runner error primary after an unverifiable status reaper failure", async () => {
+  it("makes a runner error primary after an identity-mismatch status reaper failure", async () => {
     const repoDir = createTempGitRepo();
     const job = {
       id: "tracked-reaper-error-job",
@@ -810,10 +811,9 @@ describe("runTrackedJob", () => {
           writeJobFile(repoDir, job.id, {
             ...running,
             status: "failed",
-            errorMessage: "identity remained unverifiable",
+            errorMessage: "Worker identity no longer matches. Auto-reaped.",
             reapedBy: "status-reaper",
-            reapReason: "identity-unverifiable",
-            reapedUnverifiable: true,
+            reapReason: "identity-mismatch",
             updatedAt: nowIso(),
           });
           throw new Error("runner exploded after reaper");

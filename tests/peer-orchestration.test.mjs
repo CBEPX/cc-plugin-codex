@@ -136,6 +136,7 @@ describe("fake built-in agent orchestration", () => {
     assert.match(calls[0].message, /peer-checkpoint/u);
     assertOneShotCheckpointInstructions(calls[0].message);
     assert.match(calls[1].message, /peer-claude-turn/u);
+    assert.doesNotMatch(calls[0].message, /Correct the previous attempt failure detail:/u);
     assert.doesNotMatch(calls[1].message, /codex exec|nohup|\s&\s/);
     assert.match(calls[0].message, new RegExp("c{64}"));
     assert.match(calls[0].message, new RegExp("f{64}"));
@@ -164,6 +165,50 @@ describe("fake built-in agent orchestration", () => {
 
     assert.match(worker.task_name, /_checkpoint_/u);
     assertOneShotCheckpointInstructions(worker.message);
+  });
+
+  it("gives a retrying Codex worker only its allowlisted previous failure detail", () => {
+    const workflow = {
+      id: "workflow-codex-retry-detail",
+      mode: "research",
+      epoch: 3,
+      workspaceRoot: "/workspace/repo",
+      brief: "Recheck the evidence.",
+      briefHash: "a".repeat(64),
+      branches: {
+        codex: {
+          attemptReservation: {
+            previousFailureDetail: "REPOSITORY_CITATION_REQUIRED",
+          },
+        },
+      },
+    };
+    const options = {
+      companionPath: "/plugin/scripts/claude-companion.mjs",
+      leases: {
+        "branch:codex": "c".repeat(64),
+        "stage:checkpoint": "f".repeat(64),
+      },
+    };
+
+    const [worker] = buildRetryAgentPlan(
+      workflow,
+      [{ stage: "memo", branchId: "codex" }],
+      options
+    );
+    assert.match(
+      worker.message,
+      /Correct the previous attempt failure detail: REPOSITORY_CITATION_REQUIRED\./u
+    );
+
+    workflow.branches.codex.attemptReservation.previousFailureDetail =
+      "REPOSITORY_CITATION_REQUIRED: raw-model-output";
+    const [invalid] = buildRetryAgentPlan(
+      workflow,
+      [{ stage: "memo", branchId: "codex" }],
+      options
+    );
+    assert.doesNotMatch(invalid.message, /raw-model-output|Correct the previous attempt failure detail:/u);
   });
 
   it("keeps shell-hostile prompt delimiters inside the frozen brief data boundary", () => {

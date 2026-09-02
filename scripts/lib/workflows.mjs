@@ -434,6 +434,21 @@ function hasUnfinishedAttempt(state) {
   return state?.status === "running" || Boolean(state?.attemptReservation);
 }
 
+function hasUnactivatedRetryReservation(state) {
+  return state?.status === "retryable_failed" && Boolean(state.attemptReservation);
+}
+
+function shouldPreserveAggregateFailure(workflow, target) {
+  if (workflow.status !== "incomplete") return false;
+  return [
+    ...Object.entries(workflow.branches ?? {}).map(([key, state]) => ["branches", key, state]),
+    ...Object.entries(workflow.stages ?? {}).map(([key, state]) => ["stages", key, state]),
+  ].some(([collection, key, state]) =>
+    (collection !== target.collection || key !== target.key) &&
+    ["retryable_failed", "cancel_failed"].includes(state.status)
+  );
+}
+
 function assertNoActiveAttemptLeaseReflection(workflow, payload) {
   const activeDigests = new Set([
     ...Object.values(workflow.branches ?? {}),
@@ -687,15 +702,7 @@ export function activateWorkflowAttempt(cwd, workflowId, options) {
       startFingerprint: currentFingerprint,
       commitment: null,
     };
-    const otherTargetFailed = [
-      ...Object.entries(workflow.branches ?? {}).map(([key, state]) => ["branches", key, state]),
-      ...Object.entries(workflow.stages ?? {}).map(([key, state]) => ["stages", key, state]),
-    ].some(([collection, key, state]) =>
-      (collection !== target.collection || key !== target.key) &&
-      ["retryable_failed", "cancel_failed"].includes(state.status)
-    );
-    const preserveAggregateFailure = workflow.status === "incomplete" &&
-      (target.state.status !== "retryable_failed" || otherTargetFailed);
+    const preserveAggregateFailure = shouldPreserveAggregateFailure(workflow, target);
     return {
       ...updateTarget(workflow, target, startedState),
       status: preserveAggregateFailure ? workflow.status : "running",
@@ -782,7 +789,7 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
     });
     const requestedStatus = options.status ??
       (options.field === "finalResult" ? "completed" : "running");
-    const preserveAggregateFailure = workflow.status === "incomplete";
+    const preserveAggregateFailure = shouldPreserveAggregateFailure(workflow, target);
     const status = preserveAggregateFailure ? workflow.status : requestedStatus;
     const phase = preserveAggregateFailure
       ? workflow.phase
@@ -1120,14 +1127,18 @@ export function rebindWorkflowOwner(cwd, workflowId, options) {
       throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
     }
     let invalidated = false;
+    let onlyUnactivatedRetries = true;
     const invalidate = (items) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
       if (!hasUnfinishedAttempt(item)) return [key, item];
       invalidated = true;
+      const preserveFailure = hasUnactivatedRetryReservation(item);
+      onlyUnactivatedRetries &&= preserveFailure;
       return [key, invalidatedTargetState(
         item,
         "retryable_failed",
-        "OWNER_REBOUND",
-        timestamp
+        preserveFailure ? item.failureReason : "OWNER_REBOUND",
+        timestamp,
+        preserveFailure ? item.failureDetail : null
       )];
     }));
     return {
@@ -1138,8 +1149,10 @@ export function rebindWorkflowOwner(cwd, workflowId, options) {
       stages: invalidate(workflow.stages),
       ...(invalidated ? {
         status: "incomplete",
-        failureReason: "OWNER_REBOUND",
-        failureDetail: null,
+        failureReason: onlyUnactivatedRetries ? workflow.failureReason : "OWNER_REBOUND",
+        failureDetail: onlyUnactivatedRetries
+          ? normalizeWorkflowFailureDetail(workflow.failureDetail)
+          : null,
         ...enterIncomplete(workflow),
       } : {}),
     };
@@ -1220,16 +1233,22 @@ export function completeWorkflowSessionEnd(cwd, workflowId, options) {
     }
     let changed = false;
     let cancellationFailed = false;
+    let onlyUnactivatedRetries = true;
     const finalize = (items, kind) => Object.fromEntries(Object.entries(items ?? {}).map(([key, item]) => {
       if (!hasUnfinishedAttempt(item)) return [key, item];
       changed = true;
       const failed = cancelFailedTargets.has(`${kind}:${key}`);
       cancellationFailed ||= failed;
+      const preserveFailure = !failed && hasUnactivatedRetryReservation(item);
+      onlyUnactivatedRetries &&= preserveFailure;
       return [key, invalidatedTargetState(
         item,
         failed ? "cancel_failed" : "retryable_failed",
-        failed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
-        timestamp
+        failed
+          ? "SESSION_END_CANCEL_FAILED"
+          : preserveFailure ? item.failureReason : "SESSION_ENDED",
+        timestamp,
+        preserveFailure ? item.failureDetail : null
       )];
     }));
     return {
@@ -1239,8 +1258,12 @@ export function completeWorkflowSessionEnd(cwd, workflowId, options) {
       ...(changed ? {
         status: cancellationFailed ? "cancel_failed" : "incomplete",
         phase: cancellationFailed ? "cancel_failed" : workflow.phase,
-        failureReason: cancellationFailed ? "SESSION_END_CANCEL_FAILED" : "SESSION_ENDED",
-        failureDetail: null,
+        failureReason: cancellationFailed
+          ? "SESSION_END_CANCEL_FAILED"
+          : onlyUnactivatedRetries ? workflow.failureReason : "SESSION_ENDED",
+        failureDetail: cancellationFailed || !onlyUnactivatedRetries
+          ? null
+          : normalizeWorkflowFailureDetail(workflow.failureDetail),
         ...(cancellationFailed ? {} : enterIncomplete(workflow)),
       } : {}),
       cancellation: {

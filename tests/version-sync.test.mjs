@@ -15,7 +15,7 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function createTempRepo({ packageVersion, pluginVersion }) {
+function createTempRepo({ packageVersion, pluginVersion, mcpVersions = [packageVersion, packageVersion] }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-version-sync-"));
   writeJson(path.join(dir, "package.json"), {
     name: "cc-plugin-codex",
@@ -25,6 +25,17 @@ function createTempRepo({ packageVersion, pluginVersion }) {
     name: "cc",
     version: pluginVersion,
   });
+  const [firstVersion, secondVersion] = mcpVersions;
+  fs.mkdirSync(path.join(dir, "scripts", "lib"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "scripts", "lib", "mcp-capabilities.mjs"),
+    [
+      `const first = { clientInfo: { name: "cc-plugin-codex", version: "${firstVersion}" } };`,
+      `const second = { clientInfo: { name: "cc-plugin-codex", version: "${secondVersion}" } };`,
+      "",
+    ].join("\n"),
+    "utf8"
+  );
   return dir;
 }
 
@@ -43,6 +54,22 @@ describe("version sync", () => {
       assert.throws(
         () => assertVersionsMatch(dir),
         /Version mismatch: package\.json is 1\.2\.3 but \.codex-plugin\/plugin\.json is 1\.2\.2\./
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects either stale MCP clientInfo version literal", () => {
+    const dir = createTempRepo({
+      packageVersion: "1.2.3",
+      pluginVersion: "1.2.3",
+      mcpVersions: ["1.2.3", "1.2.2"],
+    });
+    try {
+      assert.throws(
+        () => assertVersionsMatch(dir),
+        /MCP clientInfo versions must both match package version 1\.2\.3/u
       );
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

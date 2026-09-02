@@ -15,6 +15,7 @@ import {
   activateWorkflowAttempt,
   commitWorkflowStage,
   completeWorkflowCancellation,
+  completeWorkflowSessionEnd,
   getWorkflowRetryContext,
   listWorkflows,
   markWorkflowBranchFailure,
@@ -535,6 +536,143 @@ describe("peer workflow store", () => {
     assert.equal(workflow.failureDetail, "REPOSITORY_CITATION_REQUIRED");
     assert.equal(workflow.branches.alpha.status, "retryable_failed");
     assert.equal(workflow.branches.beta.status, "completed");
+  });
+
+  it("clears aggregate failure when the only retryable target completes one-shot", () => {
+    const repo = createRepo();
+    let workflow = createWorkflow(repo, {
+      id: "workflow-one-shot-recovery",
+      stages: ["final"],
+      branches: [],
+    });
+    workflow = markWorkflowBranchFailure(repo, workflow.id, {
+      stage: "final",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      oneShot: true,
+      reason: "EVIDENCE_INCOMPLETE",
+      failureDetail: "NON_EMPTY_CONTENT_REQUIRED",
+    });
+
+    workflow = submitWorkflowStage(repo, workflow.id, {
+      stage: "final",
+      revision: workflow.revision,
+      epoch: workflow.epoch,
+      oneShot: true,
+      payload: { answer: "recovered" },
+      field: "finalResult",
+      status: "completed",
+      phase: "done",
+    });
+
+    assert.equal(workflow.status, "completed");
+    assert.equal(workflow.phase, "done");
+    assert.equal(workflow.failureReason, null);
+    assert.equal(workflow.failureDetail, null);
+    assert.equal(workflow.stages.final.status, "completed");
+  });
+
+  it("clears stale-workspace aggregate failure when its pending reservation activates", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, {
+      id: "workflow-stale-pending-recovery",
+      stages: ["memo"],
+      branches: [],
+    });
+    const reservation = reserveWorkflowAttempts(repo, created.id, {
+      revision: created.revision,
+      epoch: created.epoch,
+    }, [{ stage: "memo" }]);
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "changed before activation\n", "utf8");
+
+    assert.equal(errorCode(() => activateWorkflowAttempt(repo, created.id, {
+      stage: "memo",
+      revision: reservation.workflow.revision,
+      epoch: reservation.workflow.epoch,
+      lease: reservation.leases["stage:memo"],
+    })), "STALE_WORKSPACE");
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    const stale = readWorkflow(repo, created.id);
+    const recovered = activateWorkflowAttempt(repo, created.id, {
+      stage: "memo",
+      revision: stale.revision,
+      epoch: stale.epoch,
+      lease: reservation.leases["stage:memo"],
+    });
+    assert.equal(recovered.status, "running");
+    assert.equal(recovered.failureReason, null);
+    assert.equal(recovered.failureDetail, null);
+    assert.equal(recovered.stages.memo.status, "running");
+  });
+
+  it("preserves reserved retry failure detail across owner and SessionEnd rotation", () => {
+    for (const action of ["rebind", "session-end"]) {
+      const repo = createRepo();
+      let workflow = createWorkflow(repo, {
+        id: `workflow-reserved-detail-${action}`,
+        stages: [],
+        branches: ["alpha"],
+      });
+      workflow = casStartWorkflowStage(repo, workflow.id, {
+        stage: "memo",
+        branchId: "alpha",
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+      });
+      workflow = markWorkflowBranchFailure(repo, workflow.id, {
+        stage: "memo",
+        branchId: "alpha",
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+        lease: workflow.attemptLease,
+        reason: "EVIDENCE_INCOMPLETE",
+        failureDetail: "REPOSITORY_TOOL_EVENT_REQUIRED",
+      });
+      const firstReservation = reserveWorkflowAttempts(repo, workflow.id, {
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+      }, [{ stage: "memo", branchId: "alpha" }]);
+
+      if (action === "rebind") {
+        workflow = rebindWorkflowOwner(repo, workflow.id, {
+          revision: firstReservation.workflow.revision,
+          epoch: firstReservation.workflow.epoch,
+          currentOwnerSessionId: "owner-b",
+        });
+      } else {
+        const cancellation = reserveWorkflowCancellation(repo, workflow.id, {
+          revision: firstReservation.workflow.revision,
+          epoch: firstReservation.workflow.epoch,
+        });
+        workflow = completeWorkflowSessionEnd(repo, workflow.id, {
+          revision: cancellation.workflow.revision,
+          epoch: cancellation.workflow.epoch,
+          lease: cancellation.lease,
+          cancelFailedTargets: [],
+        });
+      }
+
+      assert.equal(workflow.failureReason, "EVIDENCE_INCOMPLETE", action);
+      assert.equal(workflow.failureDetail, "REPOSITORY_TOOL_EVENT_REQUIRED", action);
+      assert.equal(workflow.branches.alpha.failureReason, "EVIDENCE_INCOMPLETE", action);
+      assert.equal(
+        workflow.branches.alpha.failureDetail,
+        "REPOSITORY_TOOL_EVENT_REQUIRED",
+        action
+      );
+      assert.equal(Object.hasOwn(workflow.branches.alpha, "attemptReservation"), false, action);
+
+      const nextReservation = reserveWorkflowAttempts(repo, workflow.id, {
+        revision: workflow.revision,
+        epoch: workflow.epoch,
+      }, [{ stage: "memo", branchId: "alpha" }]);
+      assert.equal(
+        nextReservation.workflow.branches.alpha.attemptReservation.previousFailureDetail,
+        "REPOSITORY_TOOL_EVENT_REQUIRED",
+        action
+      );
+    }
   });
   it("persists a complete secret-free workflow record in its own workspace store", () => {
     const repo = createRepo();

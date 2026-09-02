@@ -9,6 +9,7 @@ export function resolveVersionSyncPaths(rootDir = ROOT_DIR) {
     rootDir,
     packageJsonPath: path.join(rootDir, "package.json"),
     pluginJsonPath: path.join(rootDir, ".codex-plugin", "plugin.json"),
+    mcpCapabilitiesPath: path.join(rootDir, "scripts", "lib", "mcp-capabilities.mjs"),
   };
 }
 
@@ -42,6 +43,15 @@ export function assertVersionsMatch(rootDir = ROOT_DIR) {
   if (packageVersion !== pluginVersion) {
     throw new Error(
       `Version mismatch: package.json is ${packageVersion} but .codex-plugin/plugin.json is ${pluginVersion}.`
+    );
+  }
+  const { mcpCapabilitiesPath } = resolveVersionSyncPaths(rootDir);
+  const mcpVersions = [...fs.readFileSync(mcpCapabilitiesPath, "utf8").matchAll(
+    /clientInfo:\s*\{\s*name:\s*"cc-plugin-codex",\s*version:\s*"([^"]+)"\s*\}/gu
+  )].map((match) => match[1]);
+  if (mcpVersions.length !== 2 || mcpVersions.some((version) => version !== packageVersion)) {
+    throw new Error(
+      `MCP clientInfo versions must both match package version ${packageVersion}.`
     );
   }
   return packageVersion;
