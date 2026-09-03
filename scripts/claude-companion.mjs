@@ -223,6 +223,7 @@ const PEER_FAILURE_CODES = new Set([
 ]);
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
+const SUBCOMMAND_HELP_REQUESTED = Symbol("subcommand help requested");
 // ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
@@ -436,13 +437,33 @@ function normalizeArgv(argv) {
 }
 
 function parseCommandInput(argv, config = {}) {
-  return parseArgs(normalizeArgv(argv), {
+  const normalizedArgv = normalizeArgv(argv);
+  const normalizedConfig = {
     ...config,
     aliasMap: {
       C: "cwd",
       ...(config.aliasMap ?? {})
     }
-  });
+  };
+  const literalSeparator = normalizedArgv.indexOf("--");
+  const helpPositionals = parseArgs(
+    normalizedArgv.slice(
+      0,
+      literalSeparator < 0 ? normalizedArgv.length : literalSeparator
+    ),
+    normalizedConfig
+  ).positionals;
+  const localHelpPositionals = config.helpAfterPromptIsLiteral
+    ? helpPositionals.slice(0, 1)
+    : helpPositionals;
+  if (
+    localHelpPositionals.some(
+      (positional) => positional === "-h" || positional === "--help"
+    )
+  ) {
+    throw SUBCOMMAND_HELP_REQUESTED;
+  }
+  return parseArgs(normalizedArgv, normalizedConfig);
 }
 
 function resolveCommandCwd(options = {}) {
@@ -2580,6 +2601,7 @@ async function resolveLatestResumableSession(cwd, options = {}) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
+    helpAfterPromptIsLiteral: true,
     valueOptions: [
       "base",
       "scope",
@@ -2740,6 +2762,7 @@ async function handleMcpDiagnose(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
+    helpAfterPromptIsLiteral: true,
     valueOptions: [
       "model",
       "effort",
@@ -3633,6 +3656,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
 
 async function handlePeerCreate(argv) {
   const { options, positionals } = parseCommandInput(argv, {
+    helpAfterPromptIsLiteral: true,
     valueOptions: [
       "cwd", "mode", "owner-session-id", "model", "fallback-model", "effort",
       "codex-model", "codex-effort", "user-mcp-tool", "auto-mcp-tool", "brief-file",
@@ -4464,13 +4488,18 @@ async function main() {
   }
 }
 
-async function handleMcpGit(_argv) {
+async function handleMcpGit(argv) {
+  parseCommandInput(argv);
   const { runMcpGitServer } = await import("./lib/mcp-git.mjs");
   const exitCode = await runMcpGitServer();
   process.exit(exitCode ?? 0);
 }
 
 main().catch((error) => {
+  if (error === SUBCOMMAND_HELP_REQUESTED) {
+    printUsage();
+    return;
+  }
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`${message}\n`);
   process.exitCode = 1;
