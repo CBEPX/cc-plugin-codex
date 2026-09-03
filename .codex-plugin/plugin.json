@@ -1,6 +1,6 @@
 {
   "name": "cc",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "Claude Code Plugin for Codex. Run reviews, tracked tasks, and independent Codex-Claude design or research workflows.",
   "author": {
     "name": "CBEPX",

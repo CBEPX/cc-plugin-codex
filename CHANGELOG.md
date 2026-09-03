@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## v1.7.3
+
+### Fixed
+
+- Require peer memo and critique phases to return successful native structured output, rejecting JSON text fallbacks (#31).
+- Handle subcommand `--help` and `-h` locally before dispatch without changing literal prompts after `--` (#29).
+
 ## v1.7.2
 
 ### Added

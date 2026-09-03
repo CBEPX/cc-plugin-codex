@@ -182,20 +182,35 @@ async function main() {
             },
         ...citations,
       };
-  const emitResult = () => process.stdout.write(JSON.stringify({
+  const emitResult = () => {
+    if (process.env.FAKE_CLAUDE_STALE_STRUCTURED_OUTPUT === "1") {
+      process.stdout.write(JSON.stringify({
+        type: "result",
+        session_id: sessionId,
+        subtype: "error",
+        structured_output: payload,
+        result: "failed",
+      }) + "\\n");
+    }
+    process.stdout.write(JSON.stringify({
       type: "result",
       session_id: sessionId,
       ...(process.env.FAKE_CLAUDE_STRUCTURED_ARRAY === "1"
         ? { structured_output: [payload] }
-        : process.env.FAKE_CLAUDE_NATIVE_STRUCTURED === "1"
-          ? { structured_output: payload }
-          : {}),
+        : process.env.FAKE_CLAUDE_OMIT_NATIVE_STRUCTURED === "1" || (
+          process.env.FAKE_CLAUDE_UNSTRUCTURED === "1" &&
+          process.env.FAKE_CLAUDE_NATIVE_STRUCTURED !== "1"
+        )
+          ? {}
+          : { structured_output: payload }),
+      subtype: process.env.FAKE_CLAUDE_TERMINAL_SUBTYPE || "success",
       result: process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
         ? "not structured JSON"
         : JSON.stringify(payload),
       model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5-1",
       modelUsage: { "claude-fable-5-1": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
     }) + "\\n");
+  };
   if (process.env.FAKE_CLAUDE_RESULT_ON_TERM === "1") {
     process.on("SIGTERM", () => {
       emitResult();
@@ -517,6 +532,63 @@ describe("peer companion with fake Claude", () => {
     });
 
     assert.equal(result.memo.content.recommendation, "The repository and primary source agree.");
+  });
+
+  it("rejects a memo with JSON text but no native structured output", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    submitCodexMemo(testEnv, created);
+    const claudeLease = planLease(created, "_claude_");
+    const failed = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: { FAKE_CLAUDE_OMIT_NATIVE_STRUCTURED: "1" },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
+  });
+
+  it("rejects a memo with a non-success terminal subtype", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    submitCodexMemo(testEnv, created);
+    const claudeLease = planLease(created, "_claude_");
+    const failed = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: { FAKE_CLAUDE_TERMINAL_SUBTYPE: "error" },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
+  });
+
+  it("rejects a success result without native output after failed native output", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    submitCodexMemo(testEnv, created);
+    const claudeLease = planLease(created, "_claude_");
+    const failed = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(claudeLease),
+      env: {
+        FAKE_CLAUDE_STALE_STRUCTURED_OUTPUT: "1",
+        FAKE_CLAUDE_OMIT_NATIVE_STRUCTURED: "1",
+      },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
   });
 
   it("rejects a memo that reflects its live checkpoint lease without mutation or exposure", () => {
@@ -1201,6 +1273,55 @@ describe("peer companion with fake Claude", () => {
       "--mode", "design", "--retry", "--owner-session-id", "owner-b", "--json",
     ]);
     assert.deepEqual(retry.work, [{ kind: "stage", id: "synthesis" }]);
+  });
+
+  it("rejects a critique with JSON text but no native structured output", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const memo = (who) => ({
+      content: { findings: [`${who} memo`] },
+      repoCitations: [{ path: testEnv.repoFile, line: 1 }],
+      webCitations: [`https://example.test/${who}`],
+      toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    });
+    const codexLease = planLease(created, "_codex_", "memo");
+    activate(testEnv, created, "memo", "codex", codexLease);
+    runJson(testEnv, [
+      "peer-submit-memo", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--branch", "codex", "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(codexLease, memo("codex")) });
+    const claudeLease = planLease(created, "_claude_");
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease) });
+    const checkpointLease = planLease(created, "_codex_", "checkpoint");
+    activate(testEnv, created, "checkpoint", null, checkpointLease);
+    runJson(testEnv, [
+      "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(checkpointLease, {
+      agreements: [], disagreements: [], decisionsNeeded: [],
+    }) });
+    const continuation = runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--continue", "--owner-session-id", "owner-b", "--json",
+    ], { input: JSON.stringify({ feedback: "Check both memos." }) });
+    const critiqueLease = planLease(continuation, "_critique_");
+    const failed = run(testEnv, [
+      "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(continuation.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(critiqueLease),
+      env: { FAKE_CLAUDE_OMIT_NATIVE_STRUCTURED: "1" },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
   });
 
   it("fails closed with the stable isolation error when Claude cannot start its sandbox", () => {

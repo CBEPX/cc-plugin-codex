@@ -73,6 +73,14 @@ function sanitize(value) {
 }
 
 async function main() {
+  if (process.env.CLAUDE_INVOCATION_LOG) {
+    require("node:fs").appendFileSync(
+      process.env.CLAUDE_INVOCATION_LOG,
+      JSON.stringify(args) + "\\n",
+      "utf8"
+    );
+  }
+
   if (args[0] === "--version") {
     process.stdout.write("2.1.90 (Claude Code)\\n");
     return;
@@ -869,6 +877,198 @@ describe("claude-companion integration", () => {
     assert.match(result.stdout, /--owner-session-id <session-id>/);
     assert.match(result.stdout, /--view-state <on-terminal\|defer>/);
     assert.match(result.stdout, /status \[job-id\].*--wait.*--wait-timeout-ms <ms>/);
+  });
+
+  for (const { label, argsFor } of [
+    {
+      label: "--help",
+      argsFor: (testEnv) => ["task", "--cwd", testEnv.workspaceDir, "--help"],
+    },
+    {
+      label: "-h",
+      argsFor: (testEnv) => ["task", "--cwd", testEnv.workspaceDir, "-h"],
+    },
+    {
+      label: "a normalized raw invocation",
+      argsFor: (testEnv) => [
+        "task",
+        `--cwd ${JSON.stringify(testEnv.workspaceDir)} --help`,
+      ],
+    },
+  ]) {
+    it(`prints global usage for task ${label} without Claude or state`, () => {
+      const testEnv = createTestEnvironment();
+      const invocationLog = path.join(testEnv.rootDir, "claude-invocations.ndjson");
+
+      try {
+        const result = runCompanion(argsFor(testEnv), {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_LOG: invocationLog,
+          },
+        });
+
+        assert.match(result.stdout, /^Usage:/m);
+        assert.equal(fs.existsSync(invocationLog), false);
+        assert.equal(fs.existsSync(stateDirFor(testEnv)), false);
+        assert.deepEqual(listStoredJobs(testEnv), []);
+      } finally {
+        cleanupTestEnvironment(testEnv);
+      }
+    });
+  }
+
+  it("keeps task help after a literal separator as the Claude prompt", () => {
+    const testEnv = createTestEnvironment();
+    const invocationFile = path.join(testEnv.rootDir, "literal-help-invocation.json");
+
+    try {
+      const result = runCompanion(
+        ["task", "--cwd", testEnv.workspaceDir, "--", "--help"],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        }
+      );
+
+      assert.match(result.stdout, /completed:--help/);
+      assert.equal(JSON.parse(fs.readFileSync(invocationFile, "utf8")).prompt, "--help");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not cancel a running job when trailing --help requests usage", async () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const launch = await runCompanionAsyncJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "cancel-help delay=1000",
+        ],
+        { env: testEnv.env }
+      );
+      const result = runCompanion(
+        ["cancel", "--cwd", testEnv.workspaceDir, launch.jobId, "--help"],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stdout, /^Usage:/m);
+      assert.equal(
+        (await waitForTerminalResult(testEnv, launch.jobId, testEnv.env)).job.status,
+        "completed"
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("prints mcp-git usage without processing server input", () => {
+    const testEnv = createTestEnvironment();
+    const result = spawnSync(
+      process.execPath,
+      [COMPANION_SCRIPT, "mcp-git", "--help"],
+      {
+        cwd: PROJECT_ROOT,
+        env: { ...testEnv.env, CC_GIT_ROOT: testEnv.workspaceDir },
+        input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\n",
+        encoding: "utf8",
+      }
+    );
+
+    try {
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^Usage:/m);
+      assert.doesNotMatch(result.stdout, /serverInfo/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  for (const { label, args, prompt } of [
+    {
+      label: "a quoted raw --help prompt",
+      args: ["task", 'explain "--help"'],
+      prompt: "explain --help",
+    },
+    {
+      label: "a multi-token --help prompt",
+      args: ["task", "explain", "--help"],
+      prompt: "explain --help",
+    },
+    {
+      label: "a quoted raw -h prompt",
+      args: ["task", 'explain "-h"'],
+      prompt: "explain -h",
+    },
+    {
+      label: "a multi-token -h prompt",
+      args: ["task", "explain", "-h"],
+      prompt: "explain -h",
+    },
+  ]) {
+    it(`forwards ${label} to Claude`, () => {
+      const testEnv = createTestEnvironment();
+      const invocationFile = path.join(testEnv.rootDir, "prompt-help-invocation.json");
+
+      try {
+        runCompanion(args, {
+          env: {
+            ...testEnv.env,
+            CLAUDE_INVOCATION_FILE: invocationFile,
+          },
+        });
+
+        assert.equal(fs.existsSync(invocationFile), true);
+        assert.equal(JSON.parse(fs.readFileSync(invocationFile, "utf8")).prompt, prompt);
+      } finally {
+        cleanupTestEnvironment(testEnv);
+      }
+    });
+  }
+
+  it("forwards adversarial review focus containing --help", () => {
+    const testEnv = createTestEnvironment();
+    const invocationFile = path.join(testEnv.rootDir, "adversarial-help-invocation.json");
+
+    try {
+      runCompanion(["adversarial-review", "--scope", "working-tree", "focus", "--help"], {
+        env: {
+          ...testEnv.env,
+          CLAUDE_INVOCATION_FILE: invocationFile,
+        },
+      });
+
+      assert.equal(fs.existsSync(invocationFile), true);
+      assert.match(JSON.parse(fs.readFileSync(invocationFile, "utf8")).prompt, /focus --help/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("preserves literal quotes in a one-string raw task prompt", () => {
+    const testEnv = createTestEnvironment();
+    const invocationFile = path.join(testEnv.rootDir, "raw-quote-invocation.json");
+
+    try {
+      runCompanion(["task", 'say\\"hi\\"'], {
+        env: {
+          ...testEnv.env,
+          CLAUDE_INVOCATION_FILE: invocationFile,
+        },
+      });
+
+      assert.equal(JSON.parse(fs.readFileSync(invocationFile, "utf8")).prompt, 'say"hi"');
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
   });
 
   it("setup toggles the review gate on and off for the current workspace", () => {
