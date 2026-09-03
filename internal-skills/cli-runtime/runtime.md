@@ -23,7 +23,8 @@ Command selection:
 - The caller's background or foreground choice changes only subagent execution. It does not change the companion command you build.
 
 Routing controls:
-- Treat `--cwd`, `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Treat `--cwd`, `--guest`, `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Preserve `--guest` when present. Default guest is `claude`; `--guest grok` runs Grok instead of Claude Code. `$cc:design` and `$cc:research` stay Claude-only.
 - Preserve the parent helper's exact non-empty `workspaceRoot` as `--cwd "<workspaceRoot>"`; never substitute the plugin root or the child's default working directory.
 - Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku and fable.
 - `--view-state on-terminal` means the user will see this companion result in the current turn, so the companion may mark any terminal outcome viewed.

@@ -16,6 +16,7 @@ Execution boundary:
 
 Foreground contract:
 - Strip `--wait` and `--background` before building the companion command.
+- Preserve `--guest` when present. Default guest is `claude`; `--guest grok` runs Grok instead of Claude Code.
 - Keep the shell tool in the active user workspace; do not set its working directory to the plugin path.
 - Foreground command:
   - `review --view-state on-terminal ...`

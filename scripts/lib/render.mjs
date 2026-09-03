@@ -353,6 +353,12 @@ export function renderSetupReport(report) {
     `- node: ${report.node.detail}`,
     `- claude: ${report.claude.detail}`,
     `- auth: ${report.auth.detail}`,
+    ...(report.guest === "grok" && report.grok && report.grokAuth
+      ? [
+          `- grok: ${report.grok.detail}`,
+          `- grok auth: ${report.grokAuth.detail}`,
+        ]
+      : []),
     `- hooks: ${report.hooks.detail}`,
     ...(report.hookTrust ? [`- hook trust: ${report.hookTrust.detail}`] : []),
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
@@ -425,6 +431,14 @@ export function renderTaskResult(parsedResult) {
     return [
       "Claude Code authentication failed. Run `claude auth login` and retry.",
       original ? `\nOriginal Claude message:\n${original}` : "",
+      "",
+    ].join("\n");
+  }
+  if (parsedResult?.failure?.kind === "grok_auth") {
+    const original = String(parsedResult.failure.message ?? "").trim();
+    return [
+      "Grok authentication failed. Run `grok login` and retry.",
+      original ? `\nOriginal Grok message:\n${original}` : "",
       "",
     ].join("\n");
   }
