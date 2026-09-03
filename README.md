@@ -138,9 +138,11 @@ $cc:review --model opus --effort high   # opus with a lighter effort
 $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 ```
 
-**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
+**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--guest <claude|grok>`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
 **Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version; for older pinned IDs, pass `--effort` explicitly instead of inheriting a current-family default.
+
+`--guest` selects the companion runtime. The default is `claude`. Pass `--guest grok` (or set `CC_GUEST=grok`) to run Grok headless instead of Claude Code. Grok does not inherit Claude aliases such as `opus`; omit `--model` to use Grok's default, or pass a Grok model ID such as `grok-4.6`. `--user-mcp-tool` and `--allow-project-mcp-servers` remain Claude-only. `$cc:design` and `$cc:research` stay Claude-only.
 
 Fable 5.1 (`claude-fable-5-1`) has a native 1M context window and requires Claude Code 2.1.257 or newer. The bare `fable` alias remains floating and may still resolve to Fable 5 behind Claude Apps Gateway; use the full model ID when Fable 5.1 is required. No `[1m]` suffix or hidden Fable effort default is added. See Claude Code's [model configuration](https://code.claude.com/docs/en/model-config).
 
@@ -227,7 +229,8 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--resume-last` | Alias for `--resume` |
 | `--fresh` | Force a new task (don't resume) |
 | `--write` | Allow file edits (default) |
-| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`). Aliases are resolved by Claude Code; a full ID pins a version. |
+| `--guest <claude\|grok>` | Guest runtime (default `claude`). `grok` spawns `grok --prompt-file` instead of `claude -p`. Not used by `$cc:design` / `$cc:research`. |
+| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`). Aliases are resolved by Claude Code; a full ID pins a version. For `--guest grok`, pass a Grok model ID or omit `--model`. |
 | `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable) |
 | `--prompt-file <path>` | Read task description from a file |
 | `--view-state on-terminal` | Mark the foreground terminal outcome as viewed |

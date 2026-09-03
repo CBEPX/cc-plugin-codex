@@ -1,6 +1,6 @@
 ---
 name: adversarial-review
-description: 'Run a design-challenging Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --user-mcp-tool <mcp__server__tool>, --allow-project-mcp-servers, [focus text]. Defaults to opus + xhigh effort. Use only when the user wants stronger scrutiny than a normal review, such as explicit tradeoff challenge, risky-change review, or custom focus text.'
+description: 'Run a design-challenging Claude Code review of local git changes in this repository. Args: --wait, --background, --guest <claude|grok>, --base <ref>, --scope <auto|working-tree|branch>, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --user-mcp-tool <mcp__server__tool>, --allow-project-mcp-servers, [focus text]. Defaults to opus + xhigh effort. Default guest is claude. Use only when the user wants stronger scrutiny than a normal review, such as explicit tradeoff challenge, risky-change review, or custom focus text.'
 ---
 
 # Claude Code Adversarial Review
@@ -16,7 +16,7 @@ Unlike `$cc:review`, this skill accepts custom focus text after the flags. The m
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Parent and foreground commands use that shell's current directory directly:
 `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review ...`
 
-Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`, plus optional focus text after the flags (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku and fable have no effort)
+Supported arguments: `--wait`, `--background`, `--guest <claude|grok>`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`, plus optional focus text after the flags (defaults: guest=claude, model=opus, effort=xhigh; sonnet defaults to high; haiku and fable have no effort)
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -24,7 +24,7 @@ Raw slash-command arguments:
 Rules:
 - This skill is review-only. Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Before launching the review, stay in read-only inspection mode: inspect git status and diff stats only, then ask at most one user question about whether to wait or run in background.
-- Preserve the user's scope flags, explicit `--user-mcp-tool <mcp__server__tool>` and `--allow-project-mcp-servers` flags, and custom focus text exactly.
+- Preserve the user's scope flags, explicit `--guest <claude|grok>`, `--user-mcp-tool <mcp__server__tool>` and `--allow-project-mcp-servers` flags, and custom focus text exactly. Do not add `--guest grok` unless the user asked for Grok.
 - Do not add user MCP tools unless the user asked for them.
 - Use the same review target selection as `$cc:review`.
 

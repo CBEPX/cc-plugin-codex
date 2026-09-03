@@ -1,6 +1,6 @@
 ---
 name: setup
-description: 'Check whether Claude Code CLI is ready in this environment and optionally repair setup or toggle the stop-time review gate. Args: --check, --enable-review-gate, --disable-review-gate. Use for installation, authentication, or review-gate setup requests.'
+description: 'Check whether Claude Code CLI is ready in this environment and optionally repair setup or toggle the stop-time review gate. Args: --check, --guest <claude|grok>, --enable-review-gate, --disable-review-gate. Default guest is claude. Use for installation, authentication, or review-gate setup requests.'
 ---
 
 # Claude Code Setup
@@ -11,6 +11,7 @@ Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the 
 
 Supported arguments:
 - `--check` (read-only; do not combine with review-gate changes)
+- `--guest <claude|grok>` (default guest is claude; `--guest grok` checks Grok CLI auth instead of Claude)
 - `--enable-review-gate`
 - `--disable-review-gate`
 
