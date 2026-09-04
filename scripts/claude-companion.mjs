@@ -621,6 +621,23 @@ function formatClaudeFailureSummary(failure, fallback) {
     : "Claude usage limit reached.";
 }
 
+function renderBoundedClaudeReviewFailure(result) {
+  if (
+    result?.status !== "failed" ||
+    result.exitCode !== 0 ||
+    result.receivedTerminalEvent !== true
+  ) {
+    return null;
+  }
+  if (result.failure?.kind === "claude_auth") {
+    return "Claude Code authentication failed; run `claude auth login`.\n";
+  }
+  if (result.failure?.kind === "claude_rate_limit") {
+    return "Claude usage limit reached.\n";
+  }
+  return `${formatClaudeFailureSummary(result.failure, "Claude Code turn failed.")}\n`;
+}
+
 function normalizeModelFallbacks(events) {
   if (!Array.isArray(events)) {
     return [];
@@ -1420,9 +1437,6 @@ async function executeReviewRun(request) {
         stderr: result.stderr,
         failure: result.failure ?? null,
         stdout: result.result,
-        terminalSubtype: result.terminalSubtype ?? null,
-        terminalReason: result.terminalReason ?? null,
-        terminalIsError: result.terminalIsError ?? null,
         requestedModel: result.requestedModel ?? null,
         finalModel: result.finalModel ?? null,
         contextWindow: result.contextWindow ?? null,
@@ -1432,9 +1446,10 @@ async function executeReviewRun(request) {
         streamDiagnostics: result.streamDiagnostics ?? []
       }
     };
+    const boundedFailure = renderBoundedClaudeReviewFailure(result);
     const rendered = appendModelFallbackSummary(
-      result.failure?.terminalCategory
-        ? renderTaskResult({ failure: result.failure })
+      boundedFailure
+        ? boundedFailure
         : [
             `# Claude Code ${reviewName}`,
             "",
@@ -1452,13 +1467,15 @@ async function executeReviewRun(request) {
       turnId: null,
       payload,
       rendered,
-      summary: formatClaudeFailureSummary(
-        result.failure,
-        firstMeaningfulLine(
-          typeof result.result === "string" ? result.result : "",
-          `${reviewName} completed.`
-        )
-      ),
+      summary:
+        boundedFailure?.trim() ??
+        formatClaudeFailureSummary(
+          result.failure,
+          firstMeaningfulLine(
+            typeof result.result === "string" ? result.result : "",
+            `${reviewName} completed.`
+          )
+        ),
       jobTitle: `Claude Code ${reviewName}`,
       jobClass: "review",
       targetLabel: target.label
@@ -1536,9 +1553,6 @@ async function executeReviewRun(request) {
       stderr: result.stderr,
       failure: result.failure ?? null,
       stdout: typeof result.result === "string" ? result.result : JSON.stringify(result.result),
-      terminalSubtype: result.terminalSubtype ?? null,
-      terminalReason: result.terminalReason ?? null,
-      terminalIsError: result.terminalIsError ?? null,
       requestedModel: result.requestedModel ?? null,
       finalModel: result.finalModel ?? null,
       contextWindow: result.contextWindow ?? null,
@@ -1552,14 +1566,15 @@ async function executeReviewRun(request) {
     parseError: parsed.parseError
   };
 
+  const boundedFailure = renderBoundedClaudeReviewFailure(result);
   return {
     exitStatus: resolveClaudeExitStatus(result),
     threadId: result.sessionId,
     turnId: null,
     payload,
     rendered: appendModelFallbackSummary(
-      result.failure?.terminalCategory
-        ? renderTaskResult({ failure: result.failure })
+      boundedFailure
+        ? boundedFailure
         : renderReviewResult(parsed, {
             reviewLabel: reviewName,
             targetLabel: context.target.label,
@@ -1567,13 +1582,15 @@ async function executeReviewRun(request) {
           }),
       modelFallbacks
     ),
-    summary: formatClaudeFailureSummary(
-      result.failure,
-      parsed.parsed?.summary ??
-        firstMeaningfulLine(
-          typeof result.result === "string" ? result.result : "",
-          parsed.parseError ?? `${reviewName} finished.`
-        )
+    summary:
+      boundedFailure?.trim() ??
+      formatClaudeFailureSummary(
+        result.failure,
+        parsed.parsed?.summary ??
+          firstMeaningfulLine(
+            typeof result.result === "string" ? result.result : "",
+            parsed.parseError ?? `${reviewName} finished.`
+          )
       ),
     jobTitle: `Claude Code ${reviewName}`,
     jobClass: "review",
@@ -1677,9 +1694,6 @@ async function executeTaskRun(request) {
     contextWindow: result.contextWindow ?? null,
     modelFallbacks,
     failure: result.failure ?? null,
-    terminalSubtype: result.terminalSubtype ?? null,
-    terminalReason: result.terminalReason ?? null,
-    terminalIsError: result.terminalIsError ?? null,
     parseErrors: result.parseErrors ?? [],
     unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
     streamDiagnostics: result.streamDiagnostics ?? [],

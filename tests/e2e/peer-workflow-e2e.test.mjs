@@ -114,7 +114,7 @@ async function main() {
         webCitations: process.env.FAKE_CLAUDE_SPARSE === "1" ? [] : ["https://example.test/primary"],
       };
   const resultLine = () => JSON.stringify({
-    type: "result", session_id: sessionId, subtype: "success",
+    type: "result", session_id: sessionId, subtype: "success", is_error: false,
     structured_output: payload, result: JSON.stringify(payload),
     model: "claude-opus-5",
     modelUsage: { "claude-opus-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },

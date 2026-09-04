@@ -978,19 +978,19 @@ function classifyClaudeTerminal(state) {
   const subtype = state.terminalSubtype;
   const reason = state.terminalReason;
   const isError = state.terminalIsError;
+  if (typeof isError !== "boolean") {
+    return terminalFailure("UNKNOWN_TERMINAL");
+  }
   const reasonCategory = reason == null ? null : CLAUDE_REASON_CATEGORIES.get(reason);
 
   if (subtype === "success") {
-    if ((reason == null || reason === "completed") && isError !== true) {
+    if ((reason == null || reason === "completed") && isError === false) {
       return null;
     }
     if ((reason == null || reasonCategory === "API_ERROR") && isError === true) {
       return terminalFailure("API_ERROR");
     }
-    if (reasonCategory === "API_ERROR" && isError !== false) {
-      return terminalFailure("API_ERROR");
-    }
-    if (reasonCategory === "ABORTED" && isError !== true) {
+    if (reasonCategory === "ABORTED" && isError === false) {
       return terminalFailure("ABORTED");
     }
     return terminalFailure("UNKNOWN_TERMINAL");
@@ -999,7 +999,7 @@ function classifyClaudeTerminal(state) {
   const subtypeCategory = CLAUDE_SUBTYPE_CATEGORIES.get(subtype);
   if (
     subtypeCategory &&
-    isError !== false &&
+    isError === true &&
     (reason == null || reasonCategory === subtypeCategory)
   ) {
     return terminalFailure(subtypeCategory);
@@ -1535,7 +1535,7 @@ export function buildArgs(prompt, options = {}) {
 
 /**
  * Execute a Claude Code turn with streaming progress.
- * Returns { status, sessionId, finalMessage, structuredOutput, terminalSubtype, terminalReason, terminalIsError, toolUses, touchedFiles, stderr, pid, pidIdentity }
+ * Returns { status, sessionId, finalMessage, structuredOutput, receivedTerminalEvent, terminalSubtype, terminalReason, terminalIsError, toolUses, touchedFiles, stderr, pid, pidIdentity }
  */
 export async function runClaudeTurn(cwd, prompt, options = {}) {
   const args = buildArgs(prompt, {
@@ -1551,6 +1551,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       sessionId: null,
       finalMessage: "",
       structuredOutput: null,
+      receivedTerminalEvent: false,
       terminalSubtype: null,
       terminalReason: null,
       terminalIsError: null,
@@ -1696,6 +1697,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         sessionId: parser.state.sessionId,
         finalMessage: parser.state.finalMessage,
         structuredOutput: parser.state.structuredOutput,
+        receivedTerminalEvent: parser.state.receivedTerminalEvent,
         terminalSubtype: parser.state.terminalSubtype,
         terminalReason: parser.state.terminalReason,
         terminalIsError: parser.state.terminalIsError,
@@ -1722,6 +1724,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         sessionId: null,
         finalMessage: "",
         structuredOutput: null,
+        receivedTerminalEvent: false,
         terminalSubtype: null,
         terminalReason: null,
         terminalIsError: null,
@@ -1775,6 +1778,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     warning: result.warning,
     result: result.finalMessage,
     structuredOutput: result.structuredOutput ?? null,
+    receivedTerminalEvent: result.receivedTerminalEvent,
     sessionId: result.sessionId,
     requestedModel: result.requestedModel,
     finalModel: result.finalModel,

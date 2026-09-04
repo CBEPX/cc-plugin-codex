@@ -261,7 +261,10 @@ async function main() {
       subtype: terminalSubtype,
       terminal_reason: terminalReason,
       is_error: terminalIsError,
-      result: structuredResult ? "" : resultText,
+      result:
+        structuredResult && process.env.CLAUDE_FAKE_FORCE_RESULT_TEXT !== "1"
+          ? ""
+          : resultText,
       ...(terminalModel || terminalModelFallback || emitModelFallback
         ? { model: terminalModel || "claude-sonnet-5" }
         : {}),
@@ -2067,15 +2070,28 @@ describe("claude-companion integration", () => {
       assert.equal(payload.status, "failed");
       assert.equal(payload.failure.kind, "claude_max_turns");
       assert.equal(payload.failure.terminalCategory, "CLAUDE_MAX_TURNS");
-      assert.equal(payload.terminalSubtype, "error_max_turns");
-      assert.equal(payload.terminalReason, "max_turns");
-      assert.equal(payload.terminalIsError, true);
+      for (const field of [
+        "receivedTerminalEvent",
+        "terminalSubtype",
+        "terminalReason",
+        "terminalIsError",
+      ]) {
+        assert.equal(Object.hasOwn(payload, field), false);
+      }
       assert.equal(payload.rawOutput, marker);
 
       const [job] = listStoredJobs(testEnv);
       assert.equal(job.status, "failed");
       assert.equal(job.summary, "Claude Code turn failed: CLAUDE_MAX_TURNS.");
       assert.equal(job.rendered, "Claude Code turn failed: CLAUDE_MAX_TURNS.\n");
+      for (const field of [
+        "receivedTerminalEvent",
+        "terminalSubtype",
+        "terminalReason",
+        "terminalIsError",
+      ]) {
+        assert.equal(Object.hasOwn(job.result, field), false);
+      }
       assert.doesNotMatch(job.summary, new RegExp(marker));
       assert.doesNotMatch(job.rendered, new RegExp(marker));
     } finally {
@@ -2127,9 +2143,14 @@ describe("claude-companion integration", () => {
           "CLAUDE_UNKNOWN_TERMINAL",
           testCase.command
         );
-        assert.equal(payload.codex.terminalSubtype, testCase.subtype, testCase.command);
-        assert.equal(payload.codex.terminalReason, testCase.reason, testCase.command);
-        assert.equal(payload.codex.terminalIsError, testCase.isError === "1", testCase.command);
+        for (const field of [
+          "receivedTerminalEvent",
+          "terminalSubtype",
+          "terminalReason",
+          "terminalIsError",
+        ]) {
+          assert.equal(Object.hasOwn(payload.codex, field), false, testCase.command);
+        }
 
         const [job] = listStoredJobs(testEnv);
         assert.equal(job.status, "failed", testCase.command);
@@ -2140,6 +2161,57 @@ describe("claude-companion integration", () => {
         assert.doesNotMatch(job.rendered, /Verdict: approve/);
         assert.doesNotMatch(job.summary, /provider_reason_MUST_NOT_PERSIST/);
         assert.doesNotMatch(job.rendered, /provider_reason_MUST_NOT_PERSIST/);
+        assert.doesNotMatch(JSON.stringify(job), /provider_reason_MUST_NOT_PERSIST/);
+        assert.doesNotMatch(JSON.stringify(job), /future_terminal/);
+        assert.doesNotMatch(
+          fs.readFileSync(path.join(stateDirFor(testEnv), "jobs", `${job.id}.log`), "utf8"),
+          /provider_reason_MUST_NOT_PERSIST/
+        );
+      } finally {
+        cleanupTestEnvironment(testEnv);
+      }
+    }
+  });
+
+  it("bounds auth and rate-limit rendering for exit-zero structured review failures", () => {
+    for (const testCase of [
+      { command: "review", signal: "auth", kind: "claude_auth" },
+      { command: "review", signal: "rate", kind: "claude_rate_limit" },
+      { command: "adversarial-review", signal: "auth", kind: "claude_auth" },
+      { command: "adversarial-review", signal: "rate", kind: "claude_rate_limit" },
+    ]) {
+      const testEnv = createTestEnvironment();
+      const marker = `${testCase.command}_${testCase.signal}_PARTIAL_MUST_NOT_RENDER`;
+      const signalText = testCase.signal === "auth"
+        ? "Not logged in. Run claude auth login to continue."
+        : "You've hit your session limit · resets 4:50pm (Europe/Moscow)";
+      try {
+        setupGitWorkspace(testEnv.workspaceDir);
+        seedWorkingTreeDiff(testEnv.workspaceDir);
+        const result = runCompanionExpectFailure(
+          [testCase.command, "--cwd", testEnv.workspaceDir, "--scope", "working-tree", "--json"],
+          {
+            env: {
+              ...testEnv.env,
+              CLAUDE_FAKE_TERMINAL_SUBTYPE: "error_max_turns",
+              CLAUDE_FAKE_TERMINAL_REASON: "max_turns",
+              CLAUDE_FAKE_TERMINAL_IS_ERROR: "1",
+              CLAUDE_FAKE_TERMINAL_MODEL: "<synthetic>",
+              CLAUDE_FAKE_FORCE_RESULT_TEXT: "1",
+              CLAUDE_FAKE_RESULT_TEXT: `${signalText} ${marker}`,
+              CLAUDE_FAKE_REVIEW_SUMMARY: marker,
+            },
+          }
+        );
+        const payload = JSON.parse(result.stdout);
+        assert.equal(payload.codex.status, "failed", `${testCase.command}/${testCase.signal}`);
+        assert.equal(payload.codex.failure.kind, testCase.kind, `${testCase.command}/${testCase.signal}`);
+
+        const [job] = listStoredJobs(testEnv);
+        assert.equal(job.status, "failed", `${testCase.command}/${testCase.signal}`);
+        assert.doesNotMatch(job.rendered, new RegExp(marker));
+        assert.doesNotMatch(job.rendered, /Verdict: approve/);
+        assert.doesNotMatch(job.summary, new RegExp(marker));
       } finally {
         cleanupTestEnvironment(testEnv);
       }

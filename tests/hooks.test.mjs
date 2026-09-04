@@ -60,6 +60,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
       type: "result",
       session_id: "hook-session-result",
       subtype: "success",
+      is_error: false,
       result: ""
     }) + "\\n");
     process.exit(0);
@@ -69,6 +70,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
       type: "result",
       session_id: "hook-session-result",
       subtype: "success",
+      is_error: false,
       result: "BLOCK: fix the failing regression"
     }) + "\\n");
     process.exit(0);
@@ -78,6 +80,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
       type: "result",
       session_id: "hook-session-result",
       subtype: "success",
+      is_error: false,
       result: "Review complete.\\nBLOCK: fix the failing regression"
     }) + "\\n");
     process.exit(0);
@@ -97,6 +100,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
       type: "result",
       session_id: "hook-session-result",
       subtype: "success",
+      is_error: false,
       result: "ALLOW: hook ok"
     }) + "\\n");
     process.exit(0);
@@ -106,6 +110,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
       type: "result",
       session_id: "hook-session-result",
       subtype: "success",
+      is_error: false,
       result: "MAYBE: hook unsure"
     }) + "\\n");
     process.exit(0);
@@ -127,6 +132,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
     type: "result",
     session_id: "hook-session-result",
     subtype: "success",
+    is_error: false,
     result: "ALLOW: hook ok"
   }) + "\\n");
   process.exit(0);
