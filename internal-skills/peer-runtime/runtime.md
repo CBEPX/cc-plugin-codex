@@ -63,7 +63,7 @@ Every initial memo needs non-empty structured content, a canonical in-workspace 
 
 Continue is foreground.
 
-1. Read the explicit workflow in the current canonical workspace. Run `peer-resume-plan <id> --continue --owner-session-id <current-id> --json`, sending optional feedback as JSON on stdin. This explicitly rebinds a cross-session owner and reserves critique plus synthesis before dispatch; never use generic rescue `--resume-last`.
+1. Read the explicit workflow in the current canonical workspace. Run `peer-resume-plan <id> --continue --owner-session-id <current-id> --json`. Empty or closed stdin means no optional feedback; non-empty feedback must be a JSON object on stdin. This explicitly rebinds a cross-session owner and reserves critique plus synthesis before dispatch; never use generic rescue `--resume-last`.
 2. Execute the returned plans sequentially. Spawn the pure Claude forwarder with `fork_turns: "none"`, inherited model, and medium effort. Its heredoc supplies the reserved critique lease to the one foreground `peer-claude-critique` command. Wait for it.
 3. The companion starts one fresh Claude turn with `--no-session-persistence`. Its stdin prompt contains the frozen brief, both frozen memos, and feedback; neither memo is rewritten.
 4. Spawn the returned Codex synthesizer with `fork_turns: "none"`, the workflow's Codex model choice, and Codex effort. It activates its supplied synthesis lease immediately before reading the frozen workflow, produces the mode-specific final answer, sends `{lease,payload}` as JSON on stdin to `peer-final`, and performs zero workspace writes. Wait for it and return the stored final answer.

@@ -3,12 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  buildContinuationAgentPlan,
   buildInitialAgentPlan,
   buildPeerCheckpoint,
   buildPeerWaitView,
@@ -16,6 +18,36 @@ import {
   parsePeerArguments,
   validatePeerMemo,
 } from "../scripts/lib/peer-orchestration.mjs";
+
+const STDIN_COMMANDS = new Set([
+  "peer-activate-attempt",
+  "peer-submit-memo",
+  "peer-claude-turn",
+  "peer-checkpoint",
+  "peer-claude-critique",
+  "peer-final",
+]);
+
+function commandName(line) {
+  return [...STDIN_COMMANDS].find((command) => line.includes(` ${command} `)) ?? null;
+}
+
+function extractHeredoc(message, marker) {
+  const lines = message.split("\n");
+  const start = lines.findIndex((line) => line.includes(`<<'${marker}'`));
+  const end = lines.indexOf(marker, start + 1);
+  assert.ok(start >= 0 && end > start, `missing ${marker} heredoc`);
+  return lines.slice(start, end + 1).join("\n");
+}
+
+function extractBase64Recipe(message, marker) {
+  const lines = message.split("\n");
+  const body = lines.findIndex((line) => line.includes(`<<'${marker}'`));
+  const start = lines.lastIndexOf("(", body);
+  const end = lines.indexOf(")", body + 1);
+  assert.ok(start >= 0 && end > body, `missing ${marker} base64 recipe`);
+  return lines.slice(start, end + 1).join("\n");
+}
 
 function assertOneShotCheckpointInstructions(message) {
   assert.match(
@@ -147,6 +179,125 @@ describe("fake built-in agent orchestration", () => {
       for (const line of child.message.split("\n").filter((line) => line.startsWith("node "))) {
         assert.doesNotMatch(line, /[cdf]{64}|--lease/u);
       }
+    }
+  });
+
+  it("generates complete stdin recipes for every initial, retry, and continuation worker", () => {
+    const workflow = {
+      id: "workflow-recipes",
+      mode: "design",
+      epoch: 4,
+      workspaceRoot: "/workspace/repo",
+      brief: "Compare queues and streams.",
+      briefHash: "a".repeat(64),
+    };
+    const options = {
+      companionPath: "/plugin/scripts/claude-companion.mjs",
+      leases: {
+        "branch:codex": "c".repeat(64),
+        "branch:claude": "d".repeat(64),
+        "stage:checkpoint": "e".repeat(64),
+        "stage:critique": "f".repeat(64),
+        "stage:synthesis": "9".repeat(64),
+      },
+    };
+    const initial = buildInitialAgentPlan(workflow, options);
+    const retry = buildRetryAgentPlan(workflow, [{ stage: "checkpoint" }], options);
+    const continuation = buildContinuationAgentPlan(workflow, options);
+    const messages = [...initial, ...retry, ...continuation].map(({ message }) => message);
+
+    for (const message of messages) {
+      for (const line of message.split("\n").filter((candidate) => candidate.startsWith("node "))) {
+        if (commandName(line)) {
+          assert.match(line, /(?:<<'CC_PEER_[A-Z_]+?'|< "\$CC_PEER_INPUT")/u, line);
+        }
+        assert.doesNotMatch(line, /[cdef9]{64}|--lease/u);
+      }
+    }
+
+    for (const [message, marker] of [
+      [initial[0].message, "MEMO"],
+      [initial[0].message, "CHECKPOINT"],
+      [retry[0].message, "CHECKPOINT"],
+      [continuation[1].message, "FINAL"],
+    ]) {
+      assert.match(message, new RegExp(`CC_PEER_${marker}_SUBMISSION`, "u"));
+      assert.match(message, new RegExp(`CC_PEER_${marker}_SUBMISSION_B64`, "u"));
+      assert.match(message, /wrapped base64/iu);
+    }
+  });
+
+  it("executes generated heredoc and wrapped-base64 recipes with parsed stdin", {
+    skip: process.platform === "win32",
+  }, () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-recipes-"));
+    try {
+      const companionPath = path.join(root, "fake companion.mjs");
+      const capturePath = path.join(root, "captured.ndjson");
+      fs.writeFileSync(companionPath, `import fs from "node:fs";
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+fs.appendFileSync(process.env.CC_PEER_CAPTURE, JSON.stringify({
+  argv: process.argv.slice(2), input,
+}) + "\\n");
+`, "utf8");
+      const workflow = {
+        id: "workflow-recipes",
+        mode: "research",
+        epoch: 7,
+        workspaceRoot: path.join(root, "workspace with spaces"),
+        brief: "Inspect recipe transport.",
+        briefHash: "a".repeat(64),
+      };
+      const leases = {
+        "branch:codex": "c".repeat(64),
+        "branch:claude": "d".repeat(64),
+        "stage:checkpoint": "e".repeat(64),
+        "stage:critique": "f".repeat(64),
+        "stage:synthesis": "9".repeat(64),
+      };
+      const initial = buildInitialAgentPlan(workflow, { companionPath, leases });
+      const continuation = buildContinuationAgentPlan(workflow, { companionPath, leases });
+      const smallPayload = { content: { finding: "quoted ' value" } };
+      const largePayload = { answer: "x".repeat(24_000) };
+      const largeAttempt = {
+        lease: leases["stage:synthesis"],
+        payload: largePayload,
+      };
+      const wrapped = Buffer.from(JSON.stringify(largeAttempt))
+        .toString("base64").match(/.{1,64}/gu).join("\n");
+      const recipes = [
+        extractHeredoc(initial[0].message, "CC_PEER_MEMO_ACTIVATION"),
+        extractHeredoc(initial[1].message, "CC_PEER_CLAUDE_ATTEMPT"),
+        extractHeredoc(initial[0].message, "CC_PEER_MEMO_SUBMISSION")
+          .replace("CC_PEER_PAYLOAD_JSON", JSON.stringify(smallPayload)),
+        extractBase64Recipe(continuation[1].message, "CC_PEER_FINAL_SUBMISSION_B64")
+          .replace("CC_PEER_WRAPPED_BASE64", wrapped),
+      ];
+
+      for (const recipe of recipes) {
+        assert.doesNotMatch(recipe, /CC_PEER_(?:PAYLOAD_JSON|WRAPPED_BASE64)/u);
+        assert.equal(recipe.split("\n").every((line) => line.length < 512), true);
+        const result = spawnSync("sh", ["-c", recipe], {
+          cwd: root,
+          env: { ...process.env, CC_PEER_CAPTURE: capturePath },
+          encoding: "utf8",
+        });
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+      }
+
+      const captured = fs.readFileSync(capturePath, "utf8").trim()
+        .split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(captured.map(({ input }) => input), [
+        { lease: leases["branch:codex"] },
+        { lease: leases["branch:claude"] },
+        { lease: leases["branch:codex"], payload: smallPayload },
+        largeAttempt,
+      ]);
+      assert.equal(captured.every(({ argv }) =>
+        !argv.some((value) => Object.values(leases).includes(value))), true);
+      assert.equal(wrapped.split("\n").every((line) => line.length <= 64), true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 

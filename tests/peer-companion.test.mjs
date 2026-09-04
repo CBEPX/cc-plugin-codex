@@ -1275,6 +1275,58 @@ describe("peer companion with fake Claude", () => {
     assert.deepEqual(retry.work, [{ kind: "stage", id: "synthesis" }]);
   });
 
+  it("continues without optional feedback on closed stdin but rejects malformed JSON", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    submitCodexMemo(testEnv, created);
+    const claudeLease = planLease(created, "_claude_");
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease) });
+    const checkpointLease = planLease(created, "_codex_", "checkpoint");
+    activate(testEnv, created, "checkpoint", null, checkpointLease);
+    runJson(testEnv, [
+      "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(checkpointLease, {
+      agreements: [], disagreements: [], decisionsNeeded: [],
+    }) });
+
+    const before = readWorkflow(testEnv, created.workflow.id);
+    const malformed = run(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--continue", "--owner-session-id", "owner-a", "--json",
+    ], { input: "{" });
+    assert.notEqual(malformed.status, 0);
+    assert.match(malformed.stderr, /Continuation feedback is not valid JSON/u);
+    assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
+
+    const continuation = runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--continue", "--owner-session-id", "owner-a", "--json",
+    ]);
+    assert.deepEqual(continuation.workflow.feedback, {});
+    assert.deepEqual(continuation.work, [
+      { kind: "stage", id: "critique" },
+      { kind: "stage", id: "synthesis" },
+    ]);
+    assert.equal(continuation.spawnPlan.length, 2);
+
+    const rawLeases = [
+      planLease(created, "_codex_", "memo"),
+      claudeLease,
+      checkpointLease,
+      planLease(continuation, "_critique_"),
+      planLease(continuation, "_synthesis_", "synthesis"),
+    ];
+    for (const lease of rawLeases) {
+      assert.doesNotMatch(readManagedStateText(testEnv), new RegExp(lease));
+    }
+  });
+
   it("rejects a critique with JSON text but no native structured output", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);

@@ -515,9 +515,10 @@ function requireWorkflowId(positionals) {
   return sanitizeId(value, "workflow ID");
 }
 
-function readJsonStdin(label) {
+function readJsonStdin(label, allowEmpty = false) {
   const source = readStdinIfPiped().trim();
   if (!source) {
+    if (allowEmpty) return {};
     throw new Error(`${label} must be provided as JSON on stdin.`);
   }
   let value;
@@ -3933,7 +3934,7 @@ function handlePeerResumePlan(argv) {
       workflow.stages.checkpoint.status !== "completed") {
     throw new Error("WORKFLOW_NOT_READY: Complete or retry the initial checkpoint first.");
   }
-  const feedback = readJsonStdin("Continuation feedback");
+  const feedback = readJsonStdin("Continuation feedback", true);
   workflow = submitPeerTargetOneShot(cwd, workflowId, {
     stage: "feedback",
     payload: feedback,
