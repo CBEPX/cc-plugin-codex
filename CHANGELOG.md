@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## v1.7.4
+
+### Added
+
+- Freeze the audited annotationless MCP registry so only the reviewed public tool IDs are eligible (#26).
+- Generate complete stdin-safe continuation and activation recipes, including buffered payloads for larger or PTY inputs (#33).
+
+### Changed
+
+- Add deterministic Claude-attempt preflight and bounded mutation receipts while preserving compact workflow state output (#41, #42).
+- Classify structured Claude terminal failures at the boundary and retain actionable failure categories in rendered results (#32).
+- Document exact-ref qualification steps and their manual gate (#35).
+
+### Fixed
+
+- Preserve blocking reads for piped stdin and cover delayed-chunk regressions; empty continuation stdin now means no optional feedback (#33).
+- Refresh development dependency lock data and clear transitive audit findings (#40, #41, #42, #43, #44).
+
 ## v1.7.3
 
 ### Fixed
