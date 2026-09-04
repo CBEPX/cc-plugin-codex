@@ -35,6 +35,12 @@ export const BRANCH_STATUSES = new Set([
   "cancel_failed",
 ]);
 const WORKFLOW_FAILURE_DETAILS = new Set([
+  "CLAUDE_API_ERROR",
+  "CLAUDE_MAX_TURNS",
+  "CLAUDE_MAX_BUDGET",
+  "CLAUDE_STRUCTURED_OUTPUT_RETRIES",
+  "CLAUDE_ABORTED",
+  "CLAUDE_UNKNOWN_TERMINAL",
   "STRUCTURED_JSON_REQUIRED",
   "NON_EMPTY_CONTENT_REQUIRED",
   "REPOSITORY_CITATION_REQUIRED",
@@ -270,10 +276,14 @@ function assertCas(workflow, options) {
       `Expected revision ${options.revision}, found ${workflow.revision}.`
     );
   }
-  if (workflow.epoch !== options.epoch) {
+  assertWorkflowEpoch(workflow, options.epoch);
+}
+
+function assertWorkflowEpoch(workflow, expectedEpoch) {
+  if (workflow.epoch !== expectedEpoch) {
     throw workflowError(
       "STALE_EPOCH",
-      `Expected epoch ${options.epoch}, found ${workflow.epoch}.`
+      `Expected epoch ${expectedEpoch}, found ${workflow.epoch}.`
     );
   }
 }
@@ -297,7 +307,22 @@ function assertAttemptFence(workflow, target, options) {
   }
 }
 
-function payloadCommitment(payload) {
+function attemptActivationTarget(workflow, options) {
+  if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+    throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+  }
+  const target = targetState(workflow, options.stage, options.branchId);
+  if (target.state.status === "completed") {
+    throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
+  }
+  if (target.state.status === "running") {
+    throw workflowError("DUPLICATE_CONTINUE", `${target.key} is already running.`);
+  }
+  assertAttemptFence(workflow, target, options);
+  return target;
+}
+
+export function workflowPayloadSha256(payload) {
   return createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
 }
 
@@ -664,21 +689,23 @@ export function reserveWorkflowAttempts(cwd, workflowId, options, targets) {
   return { workflow, leases };
 }
 
+export function preflightWorkflowAttempt(cwd, workflowId, options) {
+  const workflow = readWorkflow(cwd, workflowId, {
+    ...(options.mode ? { mode: options.mode } : {}),
+  });
+  if (!workflow) {
+    throw workflowError("WORKFLOW_NOT_FOUND", `No workflow found for ${workflowId}.`);
+  }
+  assertWorkflowEpoch(workflow, options.epoch);
+  attemptActivationTarget(workflow, options);
+  return workflow;
+}
+
 export function activateWorkflowAttempt(cwd, workflowId, options) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
   let drifted = false;
   const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
-    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
-      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
-    }
-    const target = targetState(workflow, options.stage, options.branchId);
-    if (target.state.status === "completed") {
-      throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
-    }
-    if (target.state.status === "running") {
-      throw workflowError("DUPLICATE_CONTINUE", `${target.key} is already running.`);
-    }
-    assertAttemptFence(workflow, target, options);
+    const target = attemptActivationTarget(workflow, options);
     if (!sameFingerprint(workflow.fingerprint, currentFingerprint)) {
       drifted = true;
       return {
@@ -753,7 +780,7 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
     }
     if (!options.oneShot) assertAttemptFence(workflow, target, options);
     if (reveal) {
-      if (!target.state.commitment || target.state.commitment !== payloadCommitment(payload)) {
+      if (!target.state.commitment || target.state.commitment !== workflowPayloadSha256(payload)) {
         throw workflowError("COMMITMENT_MISMATCH", `${target.key} payload does not match its commitment.`);
       }
     } else if (target.state.commitment) {
@@ -865,7 +892,7 @@ export function commitWorkflowStage(cwd, workflowId, options) {
     return {
       ...updateTarget(workflow, target, {
         ...target.state,
-        commitment: payloadCommitment(payload),
+        commitment: workflowPayloadSha256(payload),
         committedAt: timestamp,
       }),
       ...(options.claudeSessionId ? { claudeSessionId: options.claudeSessionId } : {}),

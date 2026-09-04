@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.3
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.3 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.3/cc-plugin-codex-1.7.3.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -152,7 +152,7 @@ In foreground, review returns the result directly. In background, the plugin use
 
 If the diff is too large to inline safely, the review prompt falls back to concise status/stat context and tells Claude to inspect the diff directly with read-only `git diff` commands instead of failing the run.
 
-By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted tools when reviewing untrusted diffs. Eligibility is based on the server's `readOnlyHint` declaration or the plugin's audited read-only registry; it is not an OS-enforced sandbox. A `destructiveHint` declaration is always vetoed. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
+By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted tools when reviewing untrusted diffs. Eligibility is based on the server's `readOnlyHint` declaration or the immutable four-ID audited annotationless registry: Context7 `mcp__context7__query-docs` and `mcp__context7__resolve-library-id`, plus Brave `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`. It is not an OS-enforced sandbox. A `destructiveHint` declaration is always vetoed. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
 
 ### `$cc:mcp-diagnose`
 
@@ -180,7 +180,7 @@ $cc:design --retry <workflow-id>
 
 New workflows default to Claude `fable` with `opus` fallback and inherited Codex model at `xhigh` effort. Use `--model`, `--fallback-model`, `--effort`, `--codex-model`, or `--codex-effort` to override them. Repeat `--user-mcp-tool <mcp__server__tool>` for explicitly trusted eligible tools; automatic selection is limited to the smallest relevant eligible set exposed to the active Codex turn. Eligibility records whether trust came from `readOnlyHint` or the audited registry, but does not independently enforce server behavior. Project MCP servers still require `--allow-project-mcp-servers`.
 
-The audited annotationless Brave allowlist contains exactly `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`; other Brave IDs are not eligible through it. A Brave event counts as Claude web evidence only when that exact ID is also in the workflow's frozen selected-tool manifest. The manifest records the selected ID and trust basis, not the provider's behavior: an `@latest` Brave server can still change a tool behind the same ID. Pin a server version when that drift is unacceptable.
+Only the two Brave IDs in that four-ID registry — `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context` — are Brave web-evidence tools; other Brave IDs are not eligible through the registry. A Brave event counts as Claude web evidence only when that exact ID is also in the workflow's frozen selected-tool manifest. The manifest records the selected ID and trust basis, not the provider's behavior: an `@latest` Brave server can still change a tool behind the same ID. Pin a server version when that drift is unacceptable.
 
 Selected Brave MCP servers are external trusted processes/services, not an OS sandbox. Their query or context input can disclose the brief and research terms to the provider; do not send secrets or sensitive material through either tool. The workflow never persists raw MCP configuration or credentials, but that does not remove this upstream disclosure risk.
 
@@ -373,7 +373,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.3
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
 codex plugin add cc@cbepx
 ```
 
@@ -394,8 +394,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.3 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.3/cc-plugin-codex-1.7.3.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
 ```
 
 After install, run:
@@ -422,12 +422,31 @@ $cc:setup
 
 ### Update
 
-Re-run the fork marketplace install flow, pinned to the release you want:
+Codex rejects re-adding an existing marketplace name when the pinned source/ref changes. Replace the existing marketplace and plugin, then install the exact release ref:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.3
+codex plugin remove cc@cbepx
+codex plugin marketplace remove cbepx
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
 codex plugin add cc@cbepx
 ```
+
+Restart Codex so the newly installed plugin is loaded, then run `$cc:setup` and `$cc:setup --check`. The latter is the existing read-only doctor-equivalent; there is no `$cc:doctor` command.
+
+### Maintainer release qualification (#27)
+
+This is an opt-in, credential-gated manual check against the installed exact `v1.7.4` tag and artifact. It is separate from hermetic CI and was not run as part of this documentation task. Record each result without printing secrets:
+
+- [ ] Record the exact tag, commit, artifact basename, byte size, and SHA-256; confirm the installed marketplace/plugin ref and cache metadata match.
+- [ ] Restart Codex, run `$cc:setup`, then run `$cc:setup --check`; record the read-only readiness result and confirm no `$cc:doctor` command is required.
+- [ ] With authenticated Claude and the approved model setup, run real `$cc:design`, `$cc:research`, and critique/continuation flows; verify each returns its mode-specific structured schema, non-empty content, and required repository evidence.
+- [ ] Exercise both exact Brave tools, `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`; verify direct `https://` citations and that each event is present in the frozen selected-tool manifest.
+- [ ] Verify negative evidence: an unselected Brave tool and a lookalike/non-registry Brave ID do not count as web evidence.
+- [ ] Record requested/final model, context window, fallback events, and failure metadata; verify fallback and incomplete outcomes remain bounded and truthful.
+- [ ] Confirm the repository worktree and touched-files snapshot are unchanged, no active jobs remain, and the exact result is retrievable without cleanup side effects.
+- [ ] Review rendered output and logs for redaction: no credentials, raw leases, raw MCP configuration, headers, prompts, queries marked sensitive, or unrestricted provider output.
+
+Do not treat CI as proof of these live provider, model, citation, or credential-dependent gates. Store only redacted evidence and keep live qualification approval separate from source, CI, and artifact readiness.
 
 ### Uninstall
 

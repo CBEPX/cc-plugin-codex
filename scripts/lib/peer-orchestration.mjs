@@ -184,6 +184,28 @@ function heredoc(command, value, marker) {
   return `${command} <<'${marker}'\n${promptData(value)}\n${marker}`;
 }
 
+function submissionRecipes(command, lease, marker) {
+  return [
+    "For a small payload, replace CC_PEER_PAYLOAD_JSON with the payload object and run:",
+    `${command} <<'${marker}'`,
+    `{"lease":${promptData(lease ?? null)},"payload":CC_PEER_PAYLOAD_JSON}`,
+    marker,
+    "For a large payload or PTY, encode the same complete JSON attempt object as wrapped base64, replace CC_PEER_WRAPPED_BASE64, and run:",
+    "(",
+    "CC_PEER_INPUT=$(mktemp) || exit",
+    "trap 'rm -f \"$CC_PEER_INPUT\"' EXIT",
+    "node -e '",
+    "const fs = require(\"node:fs\");",
+    "const text = fs.readFileSync(0, \"utf8\").replace(/\\s/g, \"\");",
+    "fs.writeFileSync(process.argv[1], Buffer.from(text, \"base64\"));",
+    `' "$CC_PEER_INPUT" <<'${marker}_B64'`,
+    "CC_PEER_WRAPPED_BASE64",
+    `${marker}_B64`,
+    `${command} < "$CC_PEER_INPUT"`,
+    ")",
+  ].join("\n");
+}
+
 function checkpointReadInstructions(readCommand) {
   return [
     "Make separate short foreground peer-wait calls; wait for each call to exit before starting another.",
@@ -234,15 +256,27 @@ export function buildInitialAgentPlan(workflow, options) {
       "The attempt leases below belong only to this worker. Never persist, render, log, or pass them on argv.",
       attemptBlock({ memo: codexLease, checkpoint: checkpointLease }),
       "Before research, send {lease:<memo lease>} as JSON stdin to this activation command:",
-      activationCommand(workflow, companionPath, "memo", "codex"),
+      heredoc(
+        activationCommand(workflow, companionPath, "memo", "codex"),
+        { lease: codexLease },
+        "CC_PEER_MEMO_ACTIVATION"
+      ),
       "Submit {lease:<memo lease>,payload:<structured memo>} as JSON stdin to this command:",
-      submitMemoCommand,
+      submissionRecipes(submitMemoCommand, codexLease, "CC_PEER_MEMO_SUBMISSION"),
       "After submission, read the peer state with these one-shot instructions:",
       ...checkpointReadInstructions(readCommand),
       "When both memos completed, activate checkpoint with {lease:<checkpoint lease>} on JSON stdin immediately before comparison:",
-      activationCommand(workflow, companionPath, "checkpoint"),
+      heredoc(
+        activationCommand(workflow, companionPath, "checkpoint"),
+        { lease: checkpointLease },
+        "CC_PEER_CHECKPOINT_ACTIVATION"
+      ),
       "Then compare the frozen payloads and submit {lease:<checkpoint lease>,payload:{agreements,disagreements,decisionsNeeded}} as JSON stdin to peer-checkpoint.",
-      checkpointCommand,
+      submissionRecipes(
+        checkpointCommand,
+        checkpointLease,
+        "CC_PEER_CHECKPOINT_SUBMISSION"
+      ),
       "If the workflow is incomplete, do not synthesize or replace either memo.",
     ].join("\n\n"),
   };
@@ -253,10 +287,10 @@ export function buildInitialAgentPlan(workflow, options) {
     message: [
       "You are a pure Claude forwarder for an independent peer workflow.",
       common,
-      "Run exactly one shell command in the foreground and return stdout unchanged.",
+      "Run exactly one shell command in the foreground and return its bounded receipt stdout unchanged.",
       "Do not inspect the repository, research, reinterpret the brief, or add commentary.",
       "Never use shell backgrounding. If the shell yields a session, poll only that session until it exits.",
-      "Exit code 0 is success; otherwise return the raw stdout or failure diagnostic.",
+      "Exit code 0 is success; otherwise return the failure diagnostic.",
       heredoc(baseCommand, { lease: claudeLease }, "CC_PEER_CLAUDE_ATTEMPT"),
     ].join("\n\n"),
   };
@@ -276,7 +310,7 @@ export function buildContinuationAgentPlan(workflow, options) {
       reasoning_effort: "medium",
       message: [
         "You are a pure Claude forwarder for a peer continuation.",
-        "Run exactly one shell command in the foreground and return stdout unchanged.",
+        "Run exactly one shell command in the foreground and return its bounded receipt stdout unchanged.",
         heredoc(critiqueCommand, { lease: critiqueLease }, "CC_PEER_CRITIQUE_ATTEMPT"),
       ].join("\n\n"),
     },
@@ -292,9 +326,13 @@ export function buildContinuationAgentPlan(workflow, options) {
         "Wait until the critique is completed, then activate immediately before synthesis.",
         "The attempt lease below belongs only to this worker. Never persist, render, log, or pass it on argv.",
         attemptBlock({ synthesis: synthesisLease }),
-        activationCommand(workflow, companionPath, "synthesis"),
+        heredoc(
+          activationCommand(workflow, companionPath, "synthesis"),
+          { lease: synthesisLease },
+          "CC_PEER_SYNTHESIS_ACTIVATION"
+        ),
         "Read the frozen workflow, synthesize the final answer without workspace writes, and submit {lease,payload} as JSON stdin:",
-        finalCommand,
+        submissionRecipes(finalCommand, synthesisLease, "CC_PEER_FINAL_SUBMISSION"),
       ].join("\n\n"),
     },
   ];
@@ -323,9 +361,17 @@ export function buildRetryAgentPlan(workflow, retryTargets, options) {
         "You are the Codex checkpoint waiter for a peer retry.",
         ...checkpointReadInstructions(waitCommand),
         attemptBlock({ checkpoint: options.leases?.["stage:checkpoint"] }),
-        activationCommand(workflow, options.companionPath, "checkpoint"),
+        heredoc(
+          activationCommand(workflow, options.companionPath, "checkpoint"),
+          { lease: options.leases?.["stage:checkpoint"] },
+          "CC_PEER_CHECKPOINT_ACTIVATION"
+        ),
         "Submit {lease,payload:{agreements,disagreements,decisionsNeeded}} as JSON stdin:",
-        peerCommand(workflow, options.companionPath, "peer-checkpoint"),
+        submissionRecipes(
+          peerCommand(workflow, options.companionPath, "peer-checkpoint"),
+          options.leases?.["stage:checkpoint"],
+          "CC_PEER_CHECKPOINT_SUBMISSION"
+        ),
       ].join("\n\n"),
     });
   }

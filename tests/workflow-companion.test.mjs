@@ -48,7 +48,7 @@ if (args[0] === "--version") {
   if (process.env.CLAUDE_INVOCATION_FILE) {
     fs.writeFileSync(process.env.CLAUDE_INVOCATION_FILE, JSON.stringify({ args, sessionId }) + "\\n");
   }
-  process.stdout.write(JSON.stringify({ type: "result", session_id: sessionId, result: "done" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", session_id: sessionId, subtype: "success", terminal_reason: "completed", is_error: false, result: "done" }) + "\\n");
 }
 `,
     "utf8"

@@ -384,6 +384,83 @@ describe("MCP capability discovery", () => {
     });
   });
 
+  it("keeps the audited registry immutable while preserving exact default and injected eligibility", async () => {
+    assert.equal(Object.isFrozen(mcp.AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS), true);
+    assert.deepEqual([...mcp.AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS], [
+      "mcp__context7__query-docs",
+      "mcp__context7__resolve-library-id",
+      "mcp__brave-search__brave_web_search",
+      "mcp__brave-search__brave_llm_context",
+    ]);
+    const mutable = /** @type {{add(value: string): unknown, delete(value: string): unknown, clear(): unknown}} */ (
+      /** @type {unknown} */ (mcp.AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS)
+    );
+    for (const mutate of [
+      () => mutable.add("mcp__context7__unlisted"),
+      () => mutable.delete("mcp__context7__query-docs"),
+      () => mutable.clear(),
+    ]) {
+      assert.throws(mutate, TypeError);
+    }
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const serverPath = writeStdioServer(homeDir, {
+        initialize: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "context7", version: "1" },
+        },
+        "tools/list": {
+          tools: [
+            {
+              name: "query-docs",
+              description: "Query documentation",
+              annotations: { destructiveHint: true },
+            },
+            { name: "unlisted", description: "Unlisted documentation" },
+          ],
+        },
+      });
+      fs.writeFileSync(
+        path.join(homeDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: { context7: { command: process.execPath, args: [serverPath] } },
+        }),
+        "utf8"
+      );
+      const discovery = mcp.collectConfiguredMcpServers(cwd, { homeDir });
+
+      const defaultResult = await mcp.probeMcpCapabilities(discovery);
+      assert.deepEqual(defaultResult.catalog.map(({ toolId, safety }) => ({ toolId, safety })), [
+        {
+          toolId: "mcp__context7__query-docs",
+          safety: { eligible: false, decision: "blocked", reason: "destructive_annotation" },
+        },
+        {
+          toolId: "mcp__context7__unlisted",
+          safety: { eligible: false, decision: "blocked", reason: "read_only_unverified" },
+        },
+      ]);
+
+      const injectedResult = await mcp.probeMcpCapabilities(discovery, {
+        auditedTools: new Set(["mcp__context7__unlisted"]),
+      });
+      assert.deepEqual(injectedResult.catalog.map(({ toolId, safety }) => ({ toolId, safety })), [
+        {
+          toolId: "mcp__context7__query-docs",
+          safety: { eligible: false, decision: "blocked", reason: "destructive_annotation" },
+        },
+        {
+          toolId: "mcp__context7__unlisted",
+          safety: {
+            eligible: true,
+            decision: "eligible",
+            reason: "audited_read_only_registry",
+          },
+        },
+      ]);
+    });
+  });
+
   it("allows only the audited Brave web tools and keeps the destructive veto first", async () => {
     assert.equal(Object.isFrozen(mcp.BRAVE_WEB_EVIDENCE_TOOLS), true);
     assert.deepEqual([...mcp.BRAVE_WEB_EVIDENCE_TOOLS], [

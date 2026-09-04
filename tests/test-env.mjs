@@ -14,6 +14,8 @@ const testCodexHome = fs.mkdtempSync(
   path.join(os.tmpdir(), "cc-plugin-codex-test-")
 );
 process.env.CODEX_HOME = testCodexHome;
+delete process.env.CLAUDECODE;
+delete process.env.CLAUDE_CODE_ENTRYPOINT;
 
 process.once("exit", () => {
   fs.rmSync(testCodexHome, { recursive: true, force: true });

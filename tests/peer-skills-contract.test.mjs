@@ -66,7 +66,7 @@ test("peer runtime keeps preflight live, initial children independent, and Claud
     "cannot read the sibling memo before submitting its own",
     "pure Claude forwarder",
     "run exactly one companion command",
-    "return stdout unchanged",
+    "return its bounded receipt stdout unchanged",
     "Never use shell backgrounding",
     "Never invoke `codex exec`",
     "Initial execution is always background",

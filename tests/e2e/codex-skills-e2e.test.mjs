@@ -143,6 +143,9 @@ async function main() {
     JSON.stringify({
       type: "result",
       session_id: sessionId,
+      subtype: "success",
+      terminal_reason: "completed",
+      is_error: false,
       result: resultText,
     }) + "\\n"
   );

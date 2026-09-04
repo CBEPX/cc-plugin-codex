@@ -1,6 +1,6 @@
 {
   "name": "cc-plugin-codex",
-  "version": "1.7.3",
+  "version": "1.7.4",
   "description": "Claude Code Plugin for Codex (CBEPX fork)",
   "type": "module",
   "author": {
@@ -108,7 +108,7 @@
   },
   "overrides": {
     "typed-rest-client": {
-      "qs": "6.15.3"
+      "qs": "6.16.0"
     }
   }
 }

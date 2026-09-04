@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## v1.7.4
+
+### Added
+
+- Freeze the audited annotationless MCP registry so only the reviewed public tool IDs are eligible (#26).
+
+### Changed
+
+- Classify structured Claude terminal failures at the boundary, keep trusted failures ahead of text heuristics, and retain actionable failure categories in rendered results (#32, #47, #48).
+- Generate complete stdin-safe continuation and activation recipes and consume delayed or large piped input without `EAGAIN` (#41).
+- Treat empty optional continuation feedback as no feedback (#42).
+- Return bounded mutation receipts for peer workflow commands (#43).
+- Preflight deterministic Claude attempts before dispatch to avoid junk jobs (#44).
+- Document exact-ref qualification steps (#35).
+
+### Fixed
+
+- Isolate inherited Claude host markers in the regression environment (#33).
+- Refresh dependency lock data to clear transitive audit findings (#40).
+
 ## v1.7.3
 
 ### Fixed

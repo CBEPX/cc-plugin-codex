@@ -114,7 +114,7 @@ async function main() {
         webCitations: process.env.FAKE_CLAUDE_SPARSE === "1" ? [] : ["https://example.test/primary"],
       };
   const resultLine = () => JSON.stringify({
-    type: "result", session_id: sessionId, subtype: "success",
+    type: "result", session_id: sessionId, subtype: "success", is_error: false,
     structured_output: payload, result: JSON.stringify(payload),
     model: "claude-opus-5",
     modelUsage: { "claude-opus-5": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
@@ -509,24 +509,25 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
 
     const lifecycle = createPeer(testEnv, "SessionEnd path.");
     const startedAt = new Date().toISOString();
+    const lifecycleWorkflow = readWorkflow(testEnv, lifecycle.workflow.id);
     writeWorkflow(testEnv, {
-      ...lifecycle.workflow,
+      ...lifecycleWorkflow,
       status: "running",
       phase: "memo",
-      revision: lifecycle.workflow.revision + 1,
+      revision: lifecycleWorkflow.revision + 1,
       startedAt,
       updatedAt: startedAt,
       branches: {
-        ...lifecycle.workflow.branches,
+        ...lifecycleWorkflow.branches,
         codex: {
-          ...lifecycle.workflow.branches.codex,
+          ...lifecycleWorkflow.branches.codex,
           status: "running",
           stage: "memo",
           attempts: 1,
           startedAt,
-          startFingerprint: lifecycle.workflow.fingerprint,
+          startFingerprint: lifecycleWorkflow.fingerprint,
           attemptReservation: {
-            epoch: lifecycle.workflow.epoch,
+            epoch: lifecycleWorkflow.epoch,
             leaseDigest: createHash("sha256").update("e2e-attempt").digest("hex"),
             reservedAt: startedAt,
           },

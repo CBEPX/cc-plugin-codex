@@ -436,6 +436,19 @@ describe("renderTaskResult", () => {
     assert.match(output, /Not logged in/);
   });
 
+  it("renders bounded structured terminal failures without partial provider text", () => {
+    const output = renderTaskResult({
+      rawOutput: "UNTRUSTED_PARTIAL_PROVIDER_MARKER",
+      failure: {
+        kind: "claude_max_turns",
+        terminalCategory: "CLAUDE_MAX_TURNS",
+      },
+    });
+
+    assert.equal(output, "Claude Code turn failed: CLAUDE_MAX_TURNS.\n");
+    assert.doesNotMatch(output, /UNTRUSTED_PARTIAL_PROVIDER_MARKER/);
+  });
+
   it("returns default message when nothing provided", () => {
     const output = renderTaskResult({});
     assert.ok(output.includes("did not return a final message"));

@@ -31,11 +31,21 @@ export const BRAVE_WEB_EVIDENCE_TOOLS = Object.freeze({
     return braveWebEvidenceToolIds.values();
   },
 });
-export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = new Set([
+const auditedAnnotationlessReadOnlyToolIds = new Set([
   "mcp__context7__query-docs",
   "mcp__context7__resolve-library-id",
-  ...BRAVE_WEB_EVIDENCE_TOOLS,
+  "mcp__brave-search__brave_web_search",
+  "mcp__brave-search__brave_llm_context",
 ]);
+export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = Object.freeze({
+  /** @param {string} toolId */
+  has(toolId) {
+    return auditedAnnotationlessReadOnlyToolIds.has(toolId);
+  },
+  [Symbol.iterator]() {
+    return auditedAnnotationlessReadOnlyToolIds.values();
+  },
+});
 
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -295,7 +305,7 @@ function stdioProbe(config, timeoutMs) {
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "cc-plugin-codex", version: "1.7.3" },
+        clientInfo: { name: "cc-plugin-codex", version: "1.7.4" },
       },
     });
   });
@@ -384,7 +394,7 @@ async function httpProbe(config, timeoutMs) {
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "cc-plugin-codex", version: "1.7.3" },
+        clientInfo: { name: "cc-plugin-codex", version: "1.7.4" },
       },
     }, null, deadline);
     if (initialized.statusCode === 401 || initialized.statusCode === 403) {
