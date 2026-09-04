@@ -149,6 +149,9 @@ async function main() {
     : process.env.CLAUDE_FAKE_TERMINAL_IS_ERROR === "0"
       ? false
       : terminalSubtype !== "success";
+  if (process.env.CLAUDE_FAKE_STDERR) {
+    process.stderr.write(process.env.CLAUDE_FAKE_STDERR + "\\n");
+  }
   const structuredResult = jsonSchema
     ? {
         verdict: "approve",
@@ -1939,8 +1942,12 @@ describe("claude-companion integration", () => {
     }
   });
 
-  it("does not classify completed output that mentions rate limiting as a Claude limit failure", () => {
+  it("renders completed output after Claude retries a 429 warning", () => {
     const testEnv = createTestEnvironment();
+    const env = {
+      ...testEnv.env,
+      CLAUDE_FAKE_STDERR: "HTTP 429 was retried successfully",
+    };
 
     try {
       const jsonPayload = runCompanionJson(
@@ -1952,7 +1959,7 @@ describe("claude-companion integration", () => {
           "--quiet-progress",
           "document rate limiting and 429 handling delay=20",
         ],
-        { env: testEnv.env }
+        { env }
       );
 
       assert.equal(jsonPayload.status, "completed");
@@ -1967,7 +1974,7 @@ describe("claude-companion integration", () => {
           "--quiet-progress",
           "document rate limiting and 429 handling delay=20",
         ],
-        { env: testEnv.env }
+        { env }
       );
       assert.equal(textResult.status, 0);
       assert.match(textResult.stdout, /completed:document rate limiting and 429 handling/);

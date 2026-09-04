@@ -375,7 +375,11 @@ export function classifyClaudeFailure(value = {}) {
       finalMessage &&
       CLAUDE_FINAL_MESSAGE_LIMIT_RE.test(finalMessage)
   );
-  const stderrLimit = Boolean(stderr && CLAUDE_ERROR_LIMIT_RE.test(stderr));
+  const stderrLimit = Boolean(
+    stderr &&
+      !(value.exitCode === 0 && value.receivedTerminalEvent === true) &&
+      CLAUDE_ERROR_LIMIT_RE.test(stderr)
+  );
   if (finalMessageLimit || stderrLimit) {
     const limitSource = finalMessageLimit ? finalMessage : stderr;
     const resetText = finalMessageLimit
@@ -1671,7 +1675,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       if (detectedFailure && validation.status !== "failed") {
         validation = { status: "failed" };
       }
-      const failure = detectedFailure ?? validation.failure ?? null;
+      const failure = validation.failure &&
+        !parser.state.hasTerminalLimitSignal &&
+        !parser.state.hasTerminalAuthSignal
+        ? validation.failure
+        : detectedFailure ?? validation.failure ?? null;
       if (
         requestedModel &&
         finalModel &&

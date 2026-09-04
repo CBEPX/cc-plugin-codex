@@ -185,6 +185,9 @@ async function main() {
             },
         ...citations,
       };
+  if (process.env.FAKE_CLAUDE_STDERR) {
+    process.stderr.write(process.env.FAKE_CLAUDE_STDERR + "\\n");
+  }
   const emitResult = () => {
     if (process.env.FAKE_CLAUDE_STALE_STRUCTURED_OUTPUT === "1") {
       process.stdout.write(JSON.stringify({
@@ -490,7 +493,7 @@ afterEach(() => {
 });
 
 describe("peer companion with fake Claude", () => {
-  it("returns exact bounded receipts for peer mutations and Claude forwarders", () => {
+  it("accepts a large piped memo and returns bounded peer receipts", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);
     assert.deepEqual(created.workflow, workflowHeader(readWorkflow(testEnv, created.workflow.id)));
@@ -843,21 +846,23 @@ describe("peer companion with fake Claude", () => {
         detail: "CLAUDE_UNKNOWN_TERMINAL",
       },
       {
-        name: "auth precedence",
+        name: "auth precedence over sandbox prose",
         env: {
           FAKE_CLAUDE_TERMINAL_SUBTYPE: "future_terminal",
           FAKE_CLAUDE_TERMINAL_REASON: "provider_reason_MUST_NOT_PERSIST",
           FAKE_CLAUDE_FAILURE_SIGNAL: "auth",
+          FAKE_CLAUDE_STDERR: "Sandbox cleanup failed after authentication",
         },
         code: "CLAUDE_AUTH",
         detail: null,
       },
       {
-        name: "rate precedence",
+        name: "rate precedence over sandbox prose",
         env: {
           FAKE_CLAUDE_TERMINAL_SUBTYPE: "future_terminal",
           FAKE_CLAUDE_TERMINAL_REASON: "provider_reason_MUST_NOT_PERSIST",
           FAKE_CLAUDE_FAILURE_SIGNAL: "rate",
+          FAKE_CLAUDE_STDERR: "Sandbox cleanup failed after rate limiting",
         },
         code: "CLAUDE_RATE_LIMIT",
         detail: null,

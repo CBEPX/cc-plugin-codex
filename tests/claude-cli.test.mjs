@@ -1475,6 +1475,50 @@ describe("runClaudeTurn", () => {
     }
   });
 
+  it("keeps a successful terminal completed after a retried 429 warning", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-success-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `process.stderr.write("HTTP 429 was retried successfully\\n");\nconst out = JSON.stringify({ type: "result", subtype: "success", terminal_reason: "completed", is_error: false, result: "done", session_id: "sess-success" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "prompt");
+
+      assert.equal(result.status, "completed");
+      assert.equal(result.failure, null);
+      assert.equal(result.finalMessage, "done");
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers a structured terminal failure over a loose 429 warning", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-failure-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `process.stderr.write("HTTP 429 was retried successfully\\n");\nconst out = JSON.stringify({ type: "result", subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: "partial", session_id: "sess-failure" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+
+      const result = await runClaudeTurn(process.cwd(), "prompt");
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(result.failure, {
+        kind: "claude_max_turns",
+        terminalCategory: "CLAUDE_MAX_TURNS",
+      });
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns bounded parser diagnostics when read-only output has a valid terminal event", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-parse-"));
     const oldPath = process.env.PATH ?? "";

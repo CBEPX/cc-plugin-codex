@@ -517,8 +517,8 @@ function requireWorkflowId(positionals) {
   return sanitizeId(value, "workflow ID");
 }
 
-function readJsonStdin(label, allowEmpty = false) {
-  const source = readStdinIfPiped().trim();
+async function readJsonStdin(label, allowEmpty = false) {
+  const source = (await readStdinIfPiped()).trim();
   if (!source) {
     if (allowEmpty) return {};
     throw new Error(`${label} must be provided as JSON on stdin.`);
@@ -535,8 +535,8 @@ function readJsonStdin(label, allowEmpty = false) {
   return value;
 }
 
-function readPeerAttemptInput(label, payloadRequired = false) {
-  const input = readJsonStdin(label);
+async function readPeerAttemptInput(label, payloadRequired = false) {
+  const input = await readJsonStdin(label);
   if (typeof input.lease !== "string" || !/^[a-f0-9]{64}$/u.test(input.lease)) {
     throw new Error(`${label} requires a valid attempt lease.`);
   }
@@ -2081,13 +2081,13 @@ async function executeTransfer(cwd, options = {}) {
   };
 }
 
-function readTaskPrompt(cwd, options, positionals) {
+async function readTaskPrompt(cwd, options, positionals) {
   if (options["prompt-file"]) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
   }
 
   const positionalPrompt = positionals.join(" ");
-  return positionalPrompt || readStdinIfPiped();
+  return positionalPrompt || await readStdinIfPiped();
 }
 
 function requireTaskRequest(prompt, resumeLast) {
@@ -2831,7 +2831,7 @@ async function handleTask(argv) {
   const model = resolveDefaultModel(requestedModel);
   const resolvedEffort = resolveDefaultEffort(model, options.effort);
   const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
-  const prompt = readTaskPrompt(cwd, options, positionals);
+  const prompt = await readTaskPrompt(cwd, options, positionals);
   const foregroundTimeoutMs = parseWaitTimeoutMilliseconds(options);
   const markViewedOnTerminal = resolveMarkViewedOnTerminal(
     options["view-state"],
@@ -3622,17 +3622,6 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       }
     );
     if (result.status !== "completed") {
-      const failureText = [result.failure?.message, result.warning, result.stderr]
-        .filter(Boolean)
-        .join("\n");
-      if (
-        /sandbox/iu.test(failureText) &&
-        /unavailable|not available|not supported|unsupported|failed|failure|could not|cannot|unable/iu.test(failureText)
-      ) {
-        throw new Error(
-          "PEER_ISOLATION_UNAVAILABLE: Claude could not provide the required filesystem sandbox."
-        );
-      }
       if (result.failure?.kind === "claude_auth") {
         throw Object.assign(new Error("CLAUDE_AUTH"), { code: "CLAUDE_AUTH" });
       }
@@ -3646,6 +3635,18 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
             code: "CLAUDE_TURN_FAILED",
             failureDetail: result.failure.terminalCategory,
           }
+        );
+      }
+      const failureText = [result.failure?.message, result.warning, result.stderr]
+        .filter(Boolean)
+        .join("\n");
+      if (
+        !result.receivedTerminalEvent &&
+        /sandbox/iu.test(failureText) &&
+        /unavailable|not available|not supported|unsupported|failed|failure|could not|cannot|unable/iu.test(failureText)
+      ) {
+        throw new Error(
+          "PEER_ISOLATION_UNAVAILABLE: Claude could not provide the required filesystem sandbox."
         );
       }
       throw new Error(result.failure?.kind ?? result.warning ?? "CLAUDE_TURN_FAILED");
@@ -3806,7 +3807,7 @@ async function handlePeerCreate(argv) {
   }, options.json);
 }
 
-function handlePeerActivateAttempt(argv) {
+async function handlePeerActivateAttempt(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "mode", "brief-hash", "epoch", "stage", "branch"],
     booleanOptions: ["json"],
@@ -3816,7 +3817,7 @@ function handlePeerActivateAttempt(argv) {
   const workflow = readPeerWorkflow(cwd, workflowId, options.mode, options["brief-hash"]);
   const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
   assertPeerEpoch(workflow, expectedEpoch);
-  const { lease } = readPeerAttemptInput("Peer activation");
+  const { lease } = await readPeerAttemptInput("Peer activation");
   const activated = activatePeerTarget(
     cwd,
     workflowId,
@@ -3832,7 +3833,7 @@ function handlePeerActivateAttempt(argv) {
   ), options.json);
 }
 
-function handlePeerSubmitMemo(argv) {
+async function handlePeerSubmitMemo(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "branch", "brief-hash", "epoch"],
     booleanOptions: ["json"],
@@ -3848,7 +3849,7 @@ function handlePeerSubmitMemo(argv) {
   }
   const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
   assertPeerEpoch(workflow, expectedEpoch);
-  const input = readPeerAttemptInput("Peer memo attempt", true);
+  const input = await readPeerAttemptInput("Peer memo attempt", true);
   const fence = { epoch: expectedEpoch, lease: input.lease };
   try {
     const memo = validatePeerMemo(workflow, input.payload, { role: branch });
@@ -3874,7 +3875,7 @@ async function handlePeerClaudeTurn(argv, critique = false) {
   const workflowId = requireWorkflowId(positionals);
   const workflow = readPeerWorkflow(cwd, workflowId, options.mode, options["brief-hash"]);
   const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
-  const { lease } = readPeerAttemptInput("Peer Claude attempt");
+  const { lease } = await readPeerAttemptInput("Peer Claude attempt");
   const workflowStage = critique ? "critique" : "memo";
   const workflowBranchId = critique ? null : "claude";
   preflightWorkflowAttempt(cwd, workflowId, {
@@ -3929,7 +3930,7 @@ async function handlePeerClaudeTurn(argv, critique = false) {
   );
 }
 
-function handlePeerCheckpoint(argv) {
+async function handlePeerCheckpoint(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "mode", "brief-hash", "epoch"],
     booleanOptions: ["json"],
@@ -3939,7 +3940,7 @@ function handlePeerCheckpoint(argv) {
   const workflow = readPeerWorkflow(cwd, workflowId, options.mode, options["brief-hash"]);
   const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
   assertPeerEpoch(workflow, expectedEpoch);
-  const input = readPeerAttemptInput("Checkpoint attempt", true);
+  const input = await readPeerAttemptInput("Checkpoint attempt", true);
   const fence = { epoch: expectedEpoch, lease: input.lease };
   try {
     const checkpoint = buildPeerCheckpoint(workflow, input.payload);
@@ -3958,7 +3959,7 @@ function handlePeerCheckpoint(argv) {
   }
 }
 
-function handlePeerResumePlan(argv) {
+async function handlePeerResumePlan(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "mode", "owner-session-id"],
     booleanOptions: ["json", "continue", "retry"],
@@ -3975,7 +3976,7 @@ function handlePeerResumePlan(argv) {
   );
   if (!ownerSessionId) throw new Error("PEER_OWNER_REQUIRED: An owner session is required.");
   const feedback = options.continue
-    ? readJsonStdin("Continuation feedback", true)
+    ? await readJsonStdin("Continuation feedback", true)
     : null;
   if (workflow.currentOwnerSessionId !== ownerSessionId) {
     workflow = rebindWorkflowOwner(cwd, workflowId, {
@@ -4049,7 +4050,7 @@ function handlePeerResumePlan(argv) {
   }, options.json);
 }
 
-function handlePeerFinal(argv) {
+async function handlePeerFinal(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "mode", "brief-hash", "epoch"],
     booleanOptions: ["json"],
@@ -4062,7 +4063,7 @@ function handlePeerFinal(argv) {
   if (workflow.stages.critique.status !== "completed") {
     throw new Error("CRITIQUE_INCOMPLETE: Claude critique must be frozen before synthesis.");
   }
-  const input = readPeerAttemptInput("Final synthesis attempt", true);
+  const input = await readPeerAttemptInput("Final synthesis attempt", true);
   const result = input.payload;
   const fence = { epoch: expectedEpoch, lease: input.lease };
   try {
@@ -4084,13 +4085,13 @@ function handlePeerFinal(argv) {
   }
 }
 
-function handleWorkflowCreate(argv) {
+async function handleWorkflowCreate(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
     booleanOptions: ["json"],
   });
   const cwd = resolveCommandCwd(options);
-  const input = readJsonStdin("Workflow definition");
+  const input = await readJsonStdin("Workflow definition");
   const workflow = reserveWorkflow(cwd, {
     ...input,
     originSessionId:
@@ -4164,7 +4165,7 @@ function rejectPublicPeerMutation(cwd, workflowId, options) {
   }
 }
 
-function handleWorkflowSubmitStage(argv) {
+async function handleWorkflowSubmitStage(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: [
       "cwd",
@@ -4182,7 +4183,7 @@ function handleWorkflowSubmitStage(argv) {
   });
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
-  const payload = readJsonStdin("Stage payload");
+  const payload = await readJsonStdin("Stage payload");
   rejectPublicPeerMutation(cwd, workflowId, options);
   const mutation = workflowMutationOptions(options);
   const workflow = submitWorkflowStage(
@@ -4514,7 +4515,7 @@ async function main() {
       break;
     case "workflow-create":
     case "workflow-reserve":
-      handleWorkflowCreate(argv);
+      await handleWorkflowCreate(argv);
       break;
     case "workflow-read":
       handleWorkflowRead(argv);
@@ -4523,7 +4524,7 @@ async function main() {
       handleWorkflowList(argv);
       break;
     case "workflow-submit-stage":
-      handleWorkflowSubmitStage(argv);
+      await handleWorkflowSubmitStage(argv);
       break;
     case "workflow-fail-branch":
       handleWorkflowBranchFailure(argv);
@@ -4541,10 +4542,10 @@ async function main() {
       await handlePeerCreate(argv);
       break;
     case "peer-activate-attempt":
-      handlePeerActivateAttempt(argv);
+      await handlePeerActivateAttempt(argv);
       break;
     case "peer-submit-memo":
-      handlePeerSubmitMemo(argv);
+      await handlePeerSubmitMemo(argv);
       break;
     case "peer-claude-turn":
       await handlePeerClaudeTurn(argv);
@@ -4553,16 +4554,16 @@ async function main() {
       handlePeerWait(argv);
       break;
     case "peer-checkpoint":
-      handlePeerCheckpoint(argv);
+      await handlePeerCheckpoint(argv);
       break;
     case "peer-resume-plan":
-      handlePeerResumePlan(argv);
+      await handlePeerResumePlan(argv);
       break;
     case "peer-claude-critique":
       await handlePeerClaudeTurn(argv, true);
       break;
     case "peer-final":
-      handlePeerFinal(argv);
+      await handlePeerFinal(argv);
       break;
     case "cancel":
       await handleCancel(argv);

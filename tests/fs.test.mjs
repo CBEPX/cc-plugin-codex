@@ -13,6 +13,7 @@ import { samePath } from "../scripts/lib/codex-paths.mjs";
 
 const readStdinProbe = `
   await new Promise((resolve) => setTimeout(resolve, Number(process.argv[1] || 0)));
+  if (process.argv[2] === "nonblocking") void process.stdin.isTTY;
   const { readStdinIfPiped } = await import(${JSON.stringify(
     new URL("../scripts/lib/fs.mjs", import.meta.url).href
   )});
@@ -21,7 +22,7 @@ const readStdinProbe = `
     await new Promise((resolve) => process.once("message", resolve));
     process.send("reading");
   }
-  process.stdout.end(readStdinIfPiped(), () => process.disconnect?.());
+  process.stdout.end(await readStdinIfPiped(), () => process.disconnect?.());
 `;
 
 // ---------------------------------------------------------------------------
@@ -64,10 +65,12 @@ describe("isProbablyText", () => {
 });
 
 describe("readStdinIfPiped", () => {
-  it("reads a delayed two-chunk pipe", async () => {
+  it("reads a delayed 24 KiB nonblocking pipe", async () => {
+    const first = "a".repeat(8 * 1024);
+    const second = "b".repeat(16 * 1024);
     const child = spawn(
       process.execPath,
-      ["--input-type=module", "-e", readStdinProbe, "150"],
+      ["--input-type=module", "-e", readStdinProbe, "150", "nonblocking"],
       { stdio: ["pipe", "pipe", "pipe", "ipc"] }
     );
     let stdout = "";
@@ -81,9 +84,9 @@ describe("readStdinIfPiped", () => {
     const result = await new Promise((resolve) => {
       child.on("message", (message) => {
         if (message === "ready") {
-          child.stdin.write("first-", () => child.send("go"));
+          child.stdin.write(first, () => child.send("go"));
         } else if (message === "reading") {
-          setTimeout(() => child.stdin.end("second"), 100);
+          setTimeout(() => child.stdin.end(second), 100);
         }
       });
       const timer = setTimeout(() => child.kill("SIGKILL"), 5_000);
@@ -94,7 +97,7 @@ describe("readStdinIfPiped", () => {
     });
 
     assert.equal(result.status, 0, stderr || `terminated by ${result.signal}`);
-    assert.equal(stdout, "first-second");
+    assert.equal(stdout, first + second);
   });
 
   it("returns promptly when stdin is ignored", () => {
