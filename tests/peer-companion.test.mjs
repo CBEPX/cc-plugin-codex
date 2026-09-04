@@ -1295,20 +1295,26 @@ describe("peer companion with fake Claude", () => {
       agreements: [], disagreements: [], decisionsNeeded: [],
     }) });
 
-    const before = readWorkflow(testEnv, created.workflow.id);
+    const workflowFile = path.join(
+      peerStateDir(testEnv), "workflows", `${created.workflow.id}.json`
+    );
+    const before = fs.readFileSync(workflowFile);
+    const beforeWorkflow = JSON.parse(before.toString("utf8"));
     const malformed = run(testEnv, [
       "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--mode", "design", "--continue", "--owner-session-id", "owner-a", "--json",
+      "--mode", "design", "--continue", "--owner-session-id", "owner-b", "--json",
     ], { input: "{" });
     assert.notEqual(malformed.status, 0);
     assert.match(malformed.stderr, /Continuation feedback is not valid JSON/u);
-    assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
+    assert.deepEqual(fs.readFileSync(workflowFile), before);
 
     const continuation = runJson(testEnv, [
       "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--mode", "design", "--continue", "--owner-session-id", "owner-a", "--json",
+      "--mode", "design", "--continue", "--owner-session-id", "owner-b", "--json",
     ]);
     assert.deepEqual(continuation.workflow.feedback, {});
+    assert.equal(continuation.workflow.currentOwnerSessionId, "owner-b");
+    assert.equal(continuation.workflow.epoch, beforeWorkflow.epoch + 1);
     assert.deepEqual(continuation.work, [
       { kind: "stage", id: "critique" },
       { kind: "stage", id: "synthesis" },

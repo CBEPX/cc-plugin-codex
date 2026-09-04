@@ -3891,6 +3891,9 @@ function handlePeerResumePlan(argv) {
     workflow.workspaceRoot
   );
   if (!ownerSessionId) throw new Error("PEER_OWNER_REQUIRED: An owner session is required.");
+  const feedback = options.continue
+    ? readJsonStdin("Continuation feedback", true)
+    : null;
   if (workflow.currentOwnerSessionId !== ownerSessionId) {
     workflow = rebindWorkflowOwner(cwd, workflowId, {
       revision: workflow.revision,
@@ -3934,7 +3937,6 @@ function handlePeerResumePlan(argv) {
       workflow.stages.checkpoint.status !== "completed") {
     throw new Error("WORKFLOW_NOT_READY: Complete or retry the initial checkpoint first.");
   }
-  const feedback = readJsonStdin("Continuation feedback", true);
   workflow = submitPeerTargetOneShot(cwd, workflowId, {
     stage: "feedback",
     payload: feedback,
