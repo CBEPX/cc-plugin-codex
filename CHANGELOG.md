@@ -10,8 +10,8 @@
 
 ### Changed
 
-- Classify structured Claude terminal failures at the boundary and retain actionable failure categories in rendered results (#32).
-- Generate complete stdin-safe continuation and activation recipes and preserve blocking reads for piped input (#41).
+- Classify structured Claude terminal failures at the boundary, keep trusted failures ahead of text heuristics, and retain actionable failure categories in rendered results (#32, #47, #48).
+- Generate complete stdin-safe continuation and activation recipes and consume delayed or large piped input without `EAGAIN` (#41).
 - Treat empty optional continuation feedback as no feedback (#42).
 - Return bounded mutation receipts for peer workflow commands (#43).
 - Preflight deterministic Claude attempts before dispatch to avoid junk jobs (#44).
