@@ -444,7 +444,7 @@ This is an opt-in, credential-gated manual check against the installed exact `v1
 - [ ] Verify negative evidence: an unselected Brave tool and a lookalike/non-registry Brave ID do not count as web evidence.
 - [ ] Record requested/final model, context window, fallback events, and failure metadata; verify fallback and incomplete outcomes remain bounded and truthful.
 - [ ] Confirm the repository worktree and touched-files snapshot are unchanged, no active jobs remain, and the exact result is retrievable without cleanup side effects.
-- [ ] Review rendered output and logs for redaction: no credentials, raw leases, raw MCP configuration, headers, prompts, or unrestricted provider output.
+- [ ] Review rendered output and logs for redaction: no credentials, raw leases, raw MCP configuration, headers, prompts, queries marked sensitive, or unrestricted provider output.
 
 Do not treat CI as proof of these live provider, model, citation, or credential-dependent gates. Store only redacted evidence and keep live qualification approval separate from source, CI, and artifact readiness.
 
