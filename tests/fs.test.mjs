@@ -4,11 +4,19 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 
 import {
   isProbablyText,
 } from "../scripts/lib/fs.mjs";
 import { samePath } from "../scripts/lib/codex-paths.mjs";
+
+const readStdinProbe = `
+  import { readStdinIfPiped } from ${JSON.stringify(
+    new URL("../scripts/lib/fs.mjs", import.meta.url).href
+  )};
+  process.stdout.write(readStdinIfPiped());
+`;
 
 // ---------------------------------------------------------------------------
 // isProbablyText
@@ -46,6 +54,47 @@ describe("isProbablyText", () => {
     textPart[4097 - 1] = 0; // null at position 4096 (beyond sample)
     // The function samples subarray(0, min(len, 4096)) = first 4096 bytes, all 'A'
     assert.equal(isProbablyText(textPart), true);
+  });
+});
+
+describe("readStdinIfPiped", () => {
+  it("reads a delayed two-chunk pipe", async () => {
+    const child = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", readStdinProbe],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdin.on("error", () => {});
+
+    child.stdin.write("first-");
+    setTimeout(() => child.stdin.end("second"), 100);
+    const result = await new Promise((resolve) => {
+      const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+      child.once("close", (status, signal) => {
+        clearTimeout(timer);
+        resolve({ status, signal });
+      });
+    });
+
+    assert.equal(result.status, 0, stderr || `terminated by ${result.signal}`);
+    assert.equal(stdout, "first-second");
+  });
+
+  it("returns promptly when stdin is ignored", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", readStdinProbe],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 2_000 }
+    );
+
+    assert.equal(result.status, 0, result.error?.message || result.stderr);
+    assert.equal(result.stdout, "");
   });
 });
 
