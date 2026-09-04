@@ -9,11 +9,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   resolveStateDir,
   saveConfig,
 } from "../scripts/lib/state.mjs";
+
+const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 it("routes state writes away from the original CODEX_HOME", () => {
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-test-env-repo-"));
@@ -41,4 +44,34 @@ it("routes state writes away from the original CODEX_HOME", () => {
   } finally {
     fs.rmSync(repoDir, { recursive: true, force: true });
   }
+});
+
+it("preload lets a Claude-hosted integration task terminate and reap its Claude child", () => {
+  /** @type {NodeJS.ProcessEnv} */
+  const env = {
+    ...process.env,
+    CLAUDECODE: "1",
+    CLAUDE_CODE_ENTRYPOINT: "cli",
+  };
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "./tests/test-env.mjs",
+      "--test",
+      "--test-name-pattern=reaps its Claude child after a foreground task",
+      "tests/integration/claude-companion.test.mjs",
+    ],
+    {
+      cwd: PROJECT_ROOT,
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /reaps its Claude child after a foreground task/);
+  assert.match(result.stdout, /pass 1/);
 });

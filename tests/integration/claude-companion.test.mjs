@@ -73,6 +73,14 @@ function sanitize(value) {
 }
 
 async function main() {
+  if (process.env.CLAUDE_CHILD_PID_FILE) {
+    require("node:fs").writeFileSync(
+      process.env.CLAUDE_CHILD_PID_FILE,
+      String(process.pid),
+      "utf8"
+    );
+  }
+
   if (process.env.CLAUDE_INVOCATION_LOG) {
     require("node:fs").appendFileSync(
       process.env.CLAUDE_INVOCATION_LOG,
@@ -1801,6 +1809,28 @@ describe("claude-companion integration", () => {
       assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
       assert.ok(!args.includes("--allowedTools"));
       assert.ok(!args.includes("--prompt-file"));
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reaps its Claude child after a foreground task", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const childPidFile = path.join(testEnv.rootDir, "claude-child.pid");
+      runCompanion(
+        ["task", "--cwd", testEnv.workspaceDir, "--quiet-progress", "child-reap delay=20"],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_CHILD_PID_FILE: childPidFile,
+          },
+        }
+      );
+
+      const childPid = Number(fs.readFileSync(childPidFile, "utf8"));
+      assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
     } finally {
       cleanupTestEnvironment(testEnv);
     }
