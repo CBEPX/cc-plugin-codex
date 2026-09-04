@@ -20,6 +20,7 @@ import {
   listWorkflows,
   markWorkflowBranchFailure,
   markWorkflowNotification,
+  preflightWorkflowAttempt,
   readWorkflow,
   rebindWorkflowOwner,
   reserveWorkflowCancellation,
@@ -785,6 +786,47 @@ describe("peer workflow store", () => {
     const stored = readWorkflow(repo, reservation.workflow.id);
     assert.equal(stored.revision, 2);
     assert.equal(stored.stages.memo.status, "running");
+  });
+
+  it("preflights attempts read-only without evaluating workspace drift", () => {
+    const repo = createRepo();
+    const created = createWorkflow(repo, {
+      id: "workflow-attempt-preflight",
+      stages: ["memo"],
+      branches: [],
+    });
+    const reservation = reserveWorkflowAttempts(repo, created.id, {
+      revision: created.revision,
+      epoch: created.epoch,
+    }, [{ stage: "memo" }]);
+    const options = {
+      stage: "memo",
+      epoch: reservation.workflow.epoch,
+      mode: reservation.workflow.mode,
+      lease: reservation.leases["stage:memo"],
+    };
+    const before = fs.readFileSync(resolveWorkflowFile(repo, created.id));
+
+    assert.deepEqual(
+      preflightWorkflowAttempt(repo, created.id, options),
+      reservation.workflow
+    );
+    assert.deepEqual(fs.readFileSync(resolveWorkflowFile(repo, created.id)), before);
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "drift before activation\n", "utf8");
+    assert.deepEqual(
+      preflightWorkflowAttempt(repo, created.id, options),
+      reservation.workflow
+    );
+    assert.deepEqual(fs.readFileSync(resolveWorkflowFile(repo, created.id)), before);
+
+    assert.equal(errorCode(() => activateWorkflowAttempt(repo, created.id, {
+      ...options,
+      revision: reservation.workflow.revision,
+    })), "STALE_WORKSPACE");
+    const stored = readWorkflow(repo, created.id);
+    assert.equal(stored.status, "incomplete");
+    assert.equal(stored.failureReason, "STALE_WORKSPACE");
+    assert.equal(stored.revision, reservation.workflow.revision + 1);
   });
 
   it("rejects branch activation through a stage other than the reserved stage", () => {

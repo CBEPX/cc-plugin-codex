@@ -270,10 +270,14 @@ function assertCas(workflow, options) {
       `Expected revision ${options.revision}, found ${workflow.revision}.`
     );
   }
-  if (workflow.epoch !== options.epoch) {
+  assertWorkflowEpoch(workflow, options.epoch);
+}
+
+function assertWorkflowEpoch(workflow, expectedEpoch) {
+  if (workflow.epoch !== expectedEpoch) {
     throw workflowError(
       "STALE_EPOCH",
-      `Expected epoch ${options.epoch}, found ${workflow.epoch}.`
+      `Expected epoch ${expectedEpoch}, found ${workflow.epoch}.`
     );
   }
 }
@@ -295,6 +299,21 @@ function assertAttemptFence(workflow, target, options) {
   ) {
     throw workflowError("STALE_ATTEMPT", `${target.key} attempt lease is stale.`);
   }
+}
+
+function attemptActivationTarget(workflow, options) {
+  if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
+    throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
+  }
+  const target = targetState(workflow, options.stage, options.branchId);
+  if (target.state.status === "completed") {
+    throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
+  }
+  if (target.state.status === "running") {
+    throw workflowError("DUPLICATE_CONTINUE", `${target.key} is already running.`);
+  }
+  assertAttemptFence(workflow, target, options);
+  return target;
 }
 
 export function workflowPayloadSha256(payload) {
@@ -664,21 +683,23 @@ export function reserveWorkflowAttempts(cwd, workflowId, options, targets) {
   return { workflow, leases };
 }
 
+export function preflightWorkflowAttempt(cwd, workflowId, options) {
+  const workflow = readWorkflow(cwd, workflowId, {
+    ...(options.mode ? { mode: options.mode } : {}),
+  });
+  if (!workflow) {
+    throw workflowError("WORKFLOW_NOT_FOUND", `No workflow found for ${workflowId}.`);
+  }
+  assertWorkflowEpoch(workflow, options.epoch);
+  attemptActivationTarget(workflow, options);
+  return workflow;
+}
+
 export function activateWorkflowAttempt(cwd, workflowId, options) {
   const currentFingerprint = getWorkingTreeFingerprint(cwd);
   let drifted = false;
   const next = mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
-    if (TERMINAL_WORKFLOW_STATUSES.has(workflow.status)) {
-      throw workflowError("WORKFLOW_TERMINAL", `Workflow ${workflow.id} is ${workflow.status}.`);
-    }
-    const target = targetState(workflow, options.stage, options.branchId);
-    if (target.state.status === "completed") {
-      throw workflowError("COMPLETED_STAGE_IMMUTABLE", `${target.key} is already completed.`);
-    }
-    if (target.state.status === "running") {
-      throw workflowError("DUPLICATE_CONTINUE", `${target.key} is already running.`);
-    }
-    assertAttemptFence(workflow, target, options);
+    const target = attemptActivationTarget(workflow, options);
     if (!sameFingerprint(workflow.fingerprint, currentFingerprint)) {
       drifted = true;
       return {

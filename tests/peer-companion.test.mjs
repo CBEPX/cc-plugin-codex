@@ -90,6 +90,9 @@ async function stdin() {
 async function main() {
   if (args[0] === "--version") return void process.stdout.write("2.1.90 (Claude Code)\\n");
   if (args[0] === "auth" && args[1] === "status") return void process.stdout.write("authenticated\\n");
+  if (process.env.FAKE_CLAUDE_TURN_LOG) {
+    fs.appendFileSync(process.env.FAKE_CLAUDE_TURN_LOG, "turn\\n");
+  }
   const prompt = await stdin();
   const resumed = value("--resume");
   const critique = prompt.includes("Critique both frozen memos");
@@ -264,6 +267,7 @@ function createEnvironment() {
     workspaceDir,
     repoFile,
     claudeLog: path.join(rootDir, "claude.ndjson"),
+    claudeTurnLog: path.join(rootDir, "claude-turns.log"),
     mcpRequestLog,
     env: {
       ...process.env,
@@ -274,6 +278,7 @@ function createEnvironment() {
       CLAUDE_COMPANION_SESSION_ID: "owner-a",
       FAKE_REPO_FILE: repoFile,
       FAKE_CLAUDE_LOG: path.join(rootDir, "claude.ndjson"),
+      FAKE_CLAUDE_TURN_LOG: path.join(rootDir, "claude-turns.log"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
@@ -351,6 +356,29 @@ function readWorkflow(testEnv, id) {
   return JSON.parse(fs.readFileSync(path.join(
     peerStateDir(testEnv), "workflows", `${id}.json`
   ), "utf8"));
+}
+
+function writeWorkflow(testEnv, workflow) {
+  fs.writeFileSync(
+    path.join(peerStateDir(testEnv), "workflows", workflow.id + ".json"),
+    JSON.stringify(workflow, null, 2) + "\n",
+    "utf8"
+  );
+}
+
+function readPeerJobArtifacts(testEnv) {
+  const jobsDir = path.join(peerStateDir(testEnv), "jobs");
+  if (!fs.existsSync(jobsDir)) return [];
+  return fs.readdirSync(jobsDir)
+    .filter((name) => name.endsWith(".json") || name.endsWith(".log"))
+    .sort()
+    .map((name) => [name, fs.readFileSync(path.join(jobsDir, name), "utf8")]);
+}
+
+function countClaudeTurns(testEnv) {
+  if (!fs.existsSync(testEnv.claudeTurnLog)) return 0;
+  return fs.readFileSync(testEnv.claudeTurnLog, "utf8")
+    .trim().split("\n").filter(Boolean).length;
 }
 
 function readPeerJobs(testEnv, workflowId) {
@@ -1202,6 +1230,110 @@ describe("peer companion with fake Claude", () => {
     assert.notEqual(stale.status, 0);
     assert.match(stale.stderr, /STALE_EPOCH/);
     assert.deepEqual(readWorkflow(testEnv, created.workflow.id), before);
+  });
+
+  it("rejects deterministic Claude attempts before creating jobs, logs, or child turns", () => {
+    const cases = [
+      ["terminal", "WORKFLOW_TERMINAL"],
+      ["completed", "COMPLETED_STAGE_IMMUTABLE"],
+      ["running", "DUPLICATE_CONTINUE"],
+      ["stale epoch", "STALE_EPOCH"],
+      ["stale lease", "STALE_ATTEMPT"],
+      ["missing reservation", "STALE_ATTEMPT"],
+    ];
+
+    for (const target of ["memo", "critique"]) {
+      for (const [scenario, errorCode] of cases) {
+        const testEnv = createEnvironment();
+        const created = createPeer(testEnv);
+        const workflow = readWorkflow(testEnv, created.workflow.id);
+        const branchId = target === "memo" ? "claude" : null;
+        const lease = branchId ? planLease(created, "_claude_") : "c".repeat(64);
+        const collection = branchId ? workflow.branches : workflow.stages;
+        const key = branchId ?? target;
+        const state = {
+          ...collection[key],
+          attemptReservation: {
+            leaseDigest: createHash("sha256").update(lease).digest("hex"),
+            epoch: workflow.epoch,
+            reservedAt: workflow.updatedAt,
+            previousFailureDetail: null,
+          },
+        };
+        const invocationEpoch = workflow.epoch;
+        let inputLease = lease;
+
+        if (scenario === "terminal") {
+          workflow.status = "cancelled";
+          workflow.phase = "cancelled";
+        } else if (scenario === "completed") {
+          state.status = "completed";
+          state.payload = { done: true };
+          delete state.attemptReservation;
+        } else if (scenario === "running") {
+          workflow.status = "running";
+          workflow.phase = target;
+          state.status = "running";
+        } else if (scenario === "stale epoch") {
+          workflow.epoch += 1;
+          state.attemptReservation.epoch = workflow.epoch;
+        } else if (scenario === "stale lease") {
+          inputLease = "f".repeat(64);
+        } else {
+          delete state.attemptReservation;
+        }
+        collection[key] = state;
+        writeWorkflow(testEnv, workflow);
+
+        const workflowFile = path.join(
+          peerStateDir(testEnv), "workflows", workflow.id + ".json"
+        );
+        const beforeWorkflow = fs.readFileSync(workflowFile);
+        const beforeArtifacts = readPeerJobArtifacts(testEnv);
+        const beforeTurns = countClaudeTurns(testEnv);
+        const result = run(testEnv, [
+          target === "memo" ? "peer-claude-turn" : "peer-claude-critique",
+          workflow.id,
+          "--cwd", testEnv.workspaceDir,
+          "--brief-hash", workflow.briefHash,
+          "--epoch", String(invocationEpoch),
+          "--json",
+        ], { input: attemptInput(inputLease) });
+        const label = target + "/" + scenario;
+
+        assert.notEqual(result.status, 0, label);
+        assert.match(result.stderr, new RegExp(errorCode), label);
+        assert.deepEqual(readPeerJobArtifacts(testEnv), beforeArtifacts, label);
+        assert.equal(countClaudeTurns(testEnv), beforeTurns, label);
+        assert.deepEqual(fs.readFileSync(workflowFile), beforeWorkflow, label);
+      }
+    }
+  });
+
+  it("keeps workspace drift in authoritative activation and records its rejected job", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    const claudeLease = planLease(created, "_claude_");
+    const beforeArtifacts = readPeerJobArtifacts(testEnv);
+    const beforeTurns = countClaudeTurns(testEnv);
+    fs.writeFileSync(testEnv.repoFile, "drift before activation\n", "utf8");
+
+    const result = run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease) });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /STALE_WORKSPACE/u);
+    assert.equal(readPeerJobArtifacts(testEnv).length, beforeArtifacts.length + 2);
+    assert.equal(countClaudeTurns(testEnv), beforeTurns);
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(stored.status, "incomplete");
+    assert.equal(stored.failureReason, "STALE_WORKSPACE");
+    const [job] = readPeerJobs(testEnv, created.workflow.id);
+    assert.equal(job.status, "failed");
+    assert.equal(job.errorMessage, "STALE_WORKSPACE: Workspace changed before continuation.");
   });
 
   it("creates a frozen workflow and runs Claude with exact strict read-only tools and fallback telemetry", () => {

@@ -157,6 +157,7 @@ import {
   markWorkflowNotification,
   markWorkflowBranchFailure,
   normalizeWorkflowFailureDetail,
+  preflightWorkflowAttempt,
   readWorkflow,
   reconcilePeerRetry,
   rebindWorkflowOwner,
@@ -3829,9 +3830,16 @@ async function handlePeerClaudeTurn(argv, critique = false) {
   const workflowId = requireWorkflowId(positionals);
   const workflow = readPeerWorkflow(cwd, workflowId, options.mode, options["brief-hash"]);
   const expectedEpoch = parseWorkflowCounter(options.epoch, "Workflow epoch");
-  assertPeerEpoch(workflow, expectedEpoch);
   const { lease } = readPeerAttemptInput("Peer Claude attempt");
   const workflowStage = critique ? "critique" : "memo";
+  const workflowBranchId = critique ? null : "claude";
+  preflightWorkflowAttempt(cwd, workflowId, {
+    stage: workflowStage,
+    branchId: workflowBranchId,
+    epoch: expectedEpoch,
+    mode: workflow.mode,
+    lease,
+  });
   const job = createCompanionJob({
     prefix: "peer",
     kind: "task",
