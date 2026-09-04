@@ -12,10 +12,16 @@ import {
 import { samePath } from "../scripts/lib/codex-paths.mjs";
 
 const readStdinProbe = `
-  import { readStdinIfPiped } from ${JSON.stringify(
+  await new Promise((resolve) => setTimeout(resolve, Number(process.argv[1] || 0)));
+  const { readStdinIfPiped } = await import(${JSON.stringify(
     new URL("../scripts/lib/fs.mjs", import.meta.url).href
-  )};
-  process.stdout.write(readStdinIfPiped());
+  )});
+  if (typeof process.send === "function") {
+    process.send("ready");
+    await new Promise((resolve) => process.once("message", resolve));
+    process.send("reading");
+  }
+  process.stdout.end(readStdinIfPiped(), () => process.disconnect?.());
 `;
 
 // ---------------------------------------------------------------------------
@@ -61,8 +67,8 @@ describe("readStdinIfPiped", () => {
   it("reads a delayed two-chunk pipe", async () => {
     const child = spawn(
       process.execPath,
-      ["--input-type=module", "-e", readStdinProbe],
-      { stdio: ["pipe", "pipe", "pipe"] }
+      ["--input-type=module", "-e", readStdinProbe, "150"],
+      { stdio: ["pipe", "pipe", "pipe", "ipc"] }
     );
     let stdout = "";
     let stderr = "";
@@ -72,10 +78,15 @@ describe("readStdinIfPiped", () => {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.stdin.on("error", () => {});
 
-    child.stdin.write("first-");
-    setTimeout(() => child.stdin.end("second"), 100);
     const result = await new Promise((resolve) => {
-      const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+      child.on("message", (message) => {
+        if (message === "ready") {
+          child.stdin.write("first-", () => child.send("go"));
+        } else if (message === "reading") {
+          setTimeout(() => child.stdin.end("second"), 100);
+        }
+      });
+      const timer = setTimeout(() => child.kill("SIGKILL"), 5_000);
       child.once("close", (status, signal) => {
         clearTimeout(timer);
         resolve({ status, signal });
