@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.3
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.3 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.3/cc-plugin-codex-1.7.3.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -373,7 +373,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.3
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
 codex plugin add cc@cbepx
 ```
 
@@ -394,8 +394,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.3 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.3/cc-plugin-codex-1.7.3.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
 ```
 
 After install, run:
@@ -422,12 +422,31 @@ $cc:setup
 
 ### Update
 
-Re-run the fork marketplace install flow, pinned to the release you want:
+Codex rejects re-adding an existing marketplace name when the pinned source/ref changes. Replace the existing marketplace and plugin, then install the exact release ref:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.3
+codex plugin remove cc@cbepx
+codex plugin marketplace remove cbepx
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
 codex plugin add cc@cbepx
 ```
+
+Restart Codex so the newly installed plugin is loaded, then run `$cc:setup` and `$cc:setup --check`. The latter is the existing read-only doctor-equivalent; there is no `$cc:doctor` command.
+
+### Maintainer release qualification (#27)
+
+This is an opt-in, credential-gated manual check against the installed exact `v1.7.4` tag and artifact. It is separate from hermetic CI and was not run as part of this documentation task. Record each result without printing secrets:
+
+- [ ] Record the exact tag, commit, artifact basename, byte size, and SHA-256; confirm the installed marketplace/plugin ref and cache metadata match.
+- [ ] Restart Codex, run `$cc:setup`, then run `$cc:setup --check`; record the read-only readiness result and confirm no `$cc:doctor` command is required.
+- [ ] With authenticated Claude and the approved model setup, run real `$cc:design`, `$cc:research`, and critique/continuation flows; verify each returns its mode-specific structured schema, non-empty content, and required repository evidence.
+- [ ] Exercise both exact Brave tools, `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`; verify direct `https://` citations and that each event is present in the frozen selected-tool manifest.
+- [ ] Verify negative evidence: an unselected Brave tool and a lookalike/non-registry Brave ID do not count as web evidence.
+- [ ] Record requested/final model, context window, fallback events, and failure metadata; verify fallback and incomplete outcomes remain bounded and truthful.
+- [ ] Confirm the repository worktree and touched-files snapshot are unchanged, no active jobs remain, and the exact result is retrievable without cleanup side effects.
+- [ ] Review rendered output and logs for redaction: no credentials, raw leases, raw MCP configuration, headers, prompts, or unrestricted provider output.
+
+Do not treat CI as proof of these live provider, model, citation, or credential-dependent gates. Store only redacted evidence and keep live qualification approval separate from source, CI, and artifact readiness.
 
 ### Uninstall
 
