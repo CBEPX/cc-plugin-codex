@@ -141,11 +141,18 @@ async function main() {
   const emitModelFallback =
     (!terminalModelFallback && /\\bmodel-fallback\\b/.test(prompt)) ||
     process.env.CLAUDE_FAKE_MODEL_FALLBACK === "1";
-  const resultText = \`completed:\${prompt}\`;
+  const resultText = process.env.CLAUDE_FAKE_RESULT_TEXT || \`completed:\${prompt}\`;
+  const terminalSubtype = process.env.CLAUDE_FAKE_TERMINAL_SUBTYPE || "success";
+  const terminalReason = process.env.CLAUDE_FAKE_TERMINAL_REASON || "completed";
+  const terminalIsError = process.env.CLAUDE_FAKE_TERMINAL_IS_ERROR === "1"
+    ? true
+    : process.env.CLAUDE_FAKE_TERMINAL_IS_ERROR === "0"
+      ? false
+      : terminalSubtype !== "success";
   const structuredResult = jsonSchema
     ? {
         verdict: "approve",
-        summary: "Structured output path works.",
+        summary: process.env.CLAUDE_FAKE_REVIEW_SUMMARY || "Structured output path works.",
         findings: [],
         next_steps: [],
       }
@@ -251,6 +258,9 @@ async function main() {
     JSON.stringify({
       type: "result",
       session_id: sessionId,
+      subtype: terminalSubtype,
+      terminal_reason: terminalReason,
+      is_error: terminalIsError,
       result: structuredResult ? "" : resultText,
       ...(terminalModel || terminalModelFallback || emitModelFallback
         ? { model: terminalModel || "claude-sonnet-5" }
@@ -2025,6 +2035,114 @@ describe("claude-companion integration", () => {
       assert.equal(jsonPayload.parseErrors.length, 1);
     } finally {
       cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("fails an exit-zero task on a known non-success terminal without rendering partial output", () => {
+    const testEnv = createTestEnvironment();
+    const marker = "TASK_PARTIAL_PROVIDER_MARKER_MUST_NOT_RENDER";
+
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--quiet-progress",
+          "known terminal delay=20",
+        ],
+        {
+          env: {
+            ...testEnv.env,
+            CLAUDE_FAKE_TERMINAL_SUBTYPE: "error_max_turns",
+            CLAUDE_FAKE_TERMINAL_REASON: "max_turns",
+            CLAUDE_FAKE_TERMINAL_IS_ERROR: "1",
+            CLAUDE_FAKE_RESULT_TEXT: marker,
+          },
+        }
+      );
+      const payload = JSON.parse(result.stdout);
+
+      assert.equal(payload.status, "failed");
+      assert.equal(payload.failure.kind, "claude_max_turns");
+      assert.equal(payload.failure.terminalCategory, "CLAUDE_MAX_TURNS");
+      assert.equal(payload.terminalSubtype, "error_max_turns");
+      assert.equal(payload.terminalReason, "max_turns");
+      assert.equal(payload.terminalIsError, true);
+      assert.equal(payload.rawOutput, marker);
+
+      const [job] = listStoredJobs(testEnv);
+      assert.equal(job.status, "failed");
+      assert.equal(job.summary, "Claude Code turn failed: CLAUDE_MAX_TURNS.");
+      assert.equal(job.rendered, "Claude Code turn failed: CLAUDE_MAX_TURNS.\n");
+      assert.doesNotMatch(job.summary, new RegExp(marker));
+      assert.doesNotMatch(job.rendered, new RegExp(marker));
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("fails standard and adversarial reviews on unknown/conflicting exit-zero terminals", () => {
+    for (const testCase of [
+      {
+        command: "review",
+        subtype: "future_terminal",
+        reason: "provider_reason_MUST_NOT_PERSIST",
+        isError: "1",
+        markerEnv: "CLAUDE_FAKE_RESULT_TEXT",
+        marker: "STANDARD_PARTIAL_PROVIDER_MARKER_MUST_NOT_RENDER",
+      },
+      {
+        command: "adversarial-review",
+        subtype: "success",
+        reason: "max_turns",
+        isError: "0",
+        markerEnv: "CLAUDE_FAKE_REVIEW_SUMMARY",
+        marker: "ADVERSARIAL_PARTIAL_PROVIDER_MARKER_MUST_NOT_RENDER",
+      },
+    ]) {
+      const testEnv = createTestEnvironment();
+      try {
+        setupGitWorkspace(testEnv.workspaceDir);
+        seedWorkingTreeDiff(testEnv.workspaceDir);
+        const result = runCompanionExpectFailure(
+          [testCase.command, "--cwd", testEnv.workspaceDir, "--scope", "working-tree", "--json"],
+          {
+            env: {
+              ...testEnv.env,
+              CLAUDE_FAKE_TERMINAL_SUBTYPE: testCase.subtype,
+              CLAUDE_FAKE_TERMINAL_REASON: testCase.reason,
+              CLAUDE_FAKE_TERMINAL_IS_ERROR: testCase.isError,
+              [testCase.markerEnv]: testCase.marker,
+            },
+          }
+        );
+        const payload = JSON.parse(result.stdout);
+
+        assert.equal(payload.codex.status, "failed", testCase.command);
+        assert.equal(payload.codex.failure.kind, "claude_unknown_terminal", testCase.command);
+        assert.equal(
+          payload.codex.failure.terminalCategory,
+          "CLAUDE_UNKNOWN_TERMINAL",
+          testCase.command
+        );
+        assert.equal(payload.codex.terminalSubtype, testCase.subtype, testCase.command);
+        assert.equal(payload.codex.terminalReason, testCase.reason, testCase.command);
+        assert.equal(payload.codex.terminalIsError, testCase.isError === "1", testCase.command);
+
+        const [job] = listStoredJobs(testEnv);
+        assert.equal(job.status, "failed", testCase.command);
+        assert.equal(job.summary, "Claude Code turn failed: CLAUDE_UNKNOWN_TERMINAL.");
+        assert.match(job.rendered, /CLAUDE_UNKNOWN_TERMINAL/);
+        assert.doesNotMatch(job.summary, new RegExp(testCase.marker));
+        assert.doesNotMatch(job.rendered, new RegExp(testCase.marker));
+        assert.doesNotMatch(job.rendered, /Verdict: approve/);
+        assert.doesNotMatch(job.summary, /provider_reason_MUST_NOT_PERSIST/);
+        assert.doesNotMatch(job.rendered, /provider_reason_MUST_NOT_PERSIST/);
+      } finally {
+        cleanupTestEnvironment(testEnv);
+      }
     }
   });
 

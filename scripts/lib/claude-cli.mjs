@@ -597,6 +597,8 @@ export class StreamParser {
       finalMessage: "",
       structuredOutput: null,
       terminalSubtype: null,
+      terminalReason: null,
+      terminalIsError: null,
       receivedTerminalEvent: false,
       unknownEvents: [],
       parseErrors: [],
@@ -688,6 +690,10 @@ export class StreamParser {
           this.state.receivedTerminalEvent = true;
           this.state.terminalSubtype =
             typeof event.subtype === "string" ? event.subtype : null;
+          this.state.terminalReason =
+            typeof event.terminal_reason === "string" ? event.terminal_reason : null;
+          this.state.terminalIsError =
+            typeof event.is_error === "boolean" ? event.is_error : null;
           {
             const terminalModel = normalizeObservedModel(
               extractRawObservedModel(event)
@@ -906,6 +912,101 @@ function mergeTerminalResultText(existingText, terminalText) {
 // Turn Completion Validation
 // ---------------------------------------------------------------------------
 
+const CLAUDE_TERMINAL_FAILURES = Object.freeze({
+  API_ERROR: Object.freeze({
+    kind: "claude_api_error",
+    terminalCategory: "CLAUDE_API_ERROR",
+  }),
+  MAX_TURNS: Object.freeze({
+    kind: "claude_max_turns",
+    terminalCategory: "CLAUDE_MAX_TURNS",
+  }),
+  MAX_BUDGET: Object.freeze({
+    kind: "claude_max_budget",
+    terminalCategory: "CLAUDE_MAX_BUDGET",
+  }),
+  STRUCTURED_OUTPUT_RETRIES: Object.freeze({
+    kind: "claude_structured_output_retries",
+    terminalCategory: "CLAUDE_STRUCTURED_OUTPUT_RETRIES",
+  }),
+  ABORTED: Object.freeze({
+    kind: "claude_aborted",
+    terminalCategory: "CLAUDE_ABORTED",
+  }),
+  UNKNOWN_TERMINAL: Object.freeze({
+    kind: "claude_unknown_terminal",
+    terminalCategory: "CLAUDE_UNKNOWN_TERMINAL",
+  }),
+});
+
+// Exact allowlist observed in Claude Code 2.1.260. Unknown values and
+// conflicting subtype/reason pairs fail closed instead of growing a hierarchy
+// from provider prose.
+const CLAUDE_SUBTYPE_CATEGORIES = new Map([
+  ["error_during_execution", "API_ERROR"],
+  ["error_max_turns", "MAX_TURNS"],
+  ["error_max_budget_usd", "MAX_BUDGET"],
+  ["error_max_structured_output_retries", "STRUCTURED_OUTPUT_RETRIES"],
+]);
+
+const CLAUDE_REASON_CATEGORIES = new Map([
+  ["blocking_limit", "API_ERROR"],
+  ["rapid_refill_breaker", "API_ERROR"],
+  ["prompt_too_long", "API_ERROR"],
+  ["image_error", "API_ERROR"],
+  ["model_error", "API_ERROR"],
+  ["api_error", "API_ERROR"],
+  ["malformed_tool_use_exhausted", "API_ERROR"],
+  ["tool_deferred_unavailable", "API_ERROR"],
+  ["turn_setup_failed", "API_ERROR"],
+  ["aborted_streaming", "ABORTED"],
+  ["aborted_tools", "ABORTED"],
+  ["stop_hook_prevented", "ABORTED"],
+  ["hook_stopped", "ABORTED"],
+  ["tool_deferred", "ABORTED"],
+  ["background_requested", "ABORTED"],
+  ["max_turns", "MAX_TURNS"],
+  ["budget_exhausted", "MAX_BUDGET"],
+  ["structured_output_retry_exhausted", "STRUCTURED_OUTPUT_RETRIES"],
+]);
+
+function terminalFailure(category) {
+  return { ...CLAUDE_TERMINAL_FAILURES[category] };
+}
+
+function classifyClaudeTerminal(state) {
+  const subtype = state.terminalSubtype;
+  const reason = state.terminalReason;
+  const isError = state.terminalIsError;
+  const reasonCategory = reason == null ? null : CLAUDE_REASON_CATEGORIES.get(reason);
+
+  if (subtype === "success") {
+    if ((reason == null || reason === "completed") && isError !== true) {
+      return null;
+    }
+    if ((reason == null || reasonCategory === "API_ERROR") && isError === true) {
+      return terminalFailure("API_ERROR");
+    }
+    if (reasonCategory === "API_ERROR" && isError !== false) {
+      return terminalFailure("API_ERROR");
+    }
+    if (reasonCategory === "ABORTED" && isError !== true) {
+      return terminalFailure("ABORTED");
+    }
+    return terminalFailure("UNKNOWN_TERMINAL");
+  }
+
+  const subtypeCategory = CLAUDE_SUBTYPE_CATEGORIES.get(subtype);
+  if (
+    subtypeCategory &&
+    isError !== false &&
+    (reason == null || reasonCategory === subtypeCategory)
+  ) {
+    return terminalFailure(subtypeCategory);
+  }
+  return terminalFailure("UNKNOWN_TERMINAL");
+}
+
 export function validateTurnCompletion(state, exitCode, options = {}) {
   if (exitCode !== 0) {
     return { status: "failed", exitCode };
@@ -915,6 +1016,10 @@ export function validateTurnCompletion(state, exitCode, options = {}) {
       status: "unknown",
       warning: "No terminal result event received despite exit code 0",
     };
+  }
+  const terminalFailureResult = classifyClaudeTerminal(state);
+  if (terminalFailureResult) {
+    return { status: "failed", failure: terminalFailureResult };
   }
   if (state.unresolvedParseErrors > 0) {
     const warning =
@@ -1430,7 +1535,7 @@ export function buildArgs(prompt, options = {}) {
 
 /**
  * Execute a Claude Code turn with streaming progress.
- * Returns { status, sessionId, finalMessage, structuredOutput, terminalSubtype, toolUses, touchedFiles, stderr, pid, pidIdentity }
+ * Returns { status, sessionId, finalMessage, structuredOutput, terminalSubtype, terminalReason, terminalIsError, toolUses, touchedFiles, stderr, pid, pidIdentity }
  */
 export async function runClaudeTurn(cwd, prompt, options = {}) {
   const args = buildArgs(prompt, {
@@ -1447,6 +1552,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       finalMessage: "",
       structuredOutput: null,
       terminalSubtype: null,
+      terminalReason: null,
+      terminalIsError: null,
       toolUses: [],
       touchedFiles: [],
       requestedModel,
@@ -1552,17 +1659,18 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       const modelEvents = [...parser.state.modelEvents];
       const finalModel = parser.state.finalModel;
       const contextWindow = parser.state.contextWindow;
-      const failure =
-        validation.status === "failed"
-          ? classifyClaudeFailure({
-              finalMessage: parser.state.finalMessage,
-              finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
-              finalMessageHasAuthSignal: parser.state.hasTerminalAuthSignal,
-              stderr,
-              exitCode: code ?? 1,
-              receivedTerminalEvent: parser.state.receivedTerminalEvent,
-            })
-          : null;
+      const detectedFailure = classifyClaudeFailure({
+        finalMessage: parser.state.finalMessage,
+        finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
+        finalMessageHasAuthSignal: parser.state.hasTerminalAuthSignal,
+        stderr,
+        exitCode: code ?? 1,
+        receivedTerminalEvent: parser.state.receivedTerminalEvent,
+      });
+      if (detectedFailure && validation.status !== "failed") {
+        validation = { status: "failed" };
+      }
+      const failure = detectedFailure ?? validation.failure ?? null;
       if (
         requestedModel &&
         finalModel &&
@@ -1589,6 +1697,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalMessage: parser.state.finalMessage,
         structuredOutput: parser.state.structuredOutput,
         terminalSubtype: parser.state.terminalSubtype,
+        terminalReason: parser.state.terminalReason,
+        terminalIsError: parser.state.terminalIsError,
         toolUses: parser.state.toolUses,
         touchedFiles: parser.state.touchedFiles,
         requestedModel,
@@ -1613,6 +1723,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalMessage: "",
         structuredOutput: null,
         terminalSubtype: null,
+        terminalReason: null,
+        terminalIsError: null,
         toolUses: [],
         touchedFiles: [],
         requestedModel,
@@ -1671,6 +1783,9 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     parseErrors: result.parseErrors,
     unresolvedParseErrors: result.unresolvedParseErrors,
     streamDiagnostics: result.streamDiagnostics,
+    terminalSubtype: result.terminalSubtype,
+    terminalReason: result.terminalReason,
+    terminalIsError: result.terminalIsError,
     failure: result.failure,
     stderr: result.stderr,
     pid: result.pid,

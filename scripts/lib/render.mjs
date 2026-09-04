@@ -439,6 +439,9 @@ export function renderTaskResult(parsedResult) {
       "",
     ].join("\n");
   }
+  if (parsedResult?.failure?.terminalCategory) {
+    return `Claude Code turn failed: ${parsedResult.failure.terminalCategory}.\n`;
+  }
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   if (rawOutput) return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Claude Code did not return a final message.";

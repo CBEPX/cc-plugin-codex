@@ -126,10 +126,14 @@ describe("StreamParser", () => {
     parser.feed(JSON.stringify({
       type: "result",
       subtype: "success",
+      terminal_reason: "completed",
+      is_error: false,
       result: "done",
     }) + "\n");
 
     assert.equal(parser.state.terminalSubtype, "success");
+    assert.equal(parser.state.terminalReason, "completed");
+    assert.equal(parser.state.terminalIsError, false);
   });
 
   it("ignores Claude synthetic error model ids", () => {
@@ -1426,13 +1430,13 @@ describe("classifyClaudeFailure", () => {
 });
 
 describe("runClaudeTurn", () => {
-  it("returns the terminal result subtype internally", async () => {
+  it("returns the structured terminal fields internally", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-subtype-"));
     const oldPath = process.env.PATH ?? "";
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `const out = JSON.stringify({ type: "result", subtype: "success", result: "done", session_id: "sess-subtype" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `const out = JSON.stringify({ type: "result", subtype: "success", terminal_reason: "completed", is_error: false, result: "done", session_id: "sess-subtype" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
 
@@ -1440,6 +1444,8 @@ describe("runClaudeTurn", () => {
 
       assert.equal(result.status, "completed");
       assert.equal(result.terminalSubtype, "success");
+      assert.equal(result.terminalReason, "completed");
+      assert.equal(result.terminalIsError, false);
     } finally {
       process.env.PATH = oldPath;
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1452,7 +1458,7 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `process.stdout.write("not-json\\n");\nconst out = JSON.stringify({ type: "result", result: "done", session_id: "sess-parse" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `process.stdout.write("not-json\\n");\nconst out = JSON.stringify({ type: "result", subtype: "success", result: "done", session_id: "sess-parse" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
 
@@ -1477,7 +1483,7 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `let prompt = "";\nprocess.stdin.setEncoding("utf8");\nprocess.stdin.on("data", (chunk) => { prompt += chunk; });\nprocess.stdin.on("end", () => {\n  const result = JSON.stringify({ argv: process.argv.slice(2), prompt });\n  const out = JSON.stringify({ type: "result", result, session_id: "sess-stdin" });\n  process.stdout.write(out + "\\n", () => process.exit(0));\n});\n`
+        `let prompt = "";\nprocess.stdin.setEncoding("utf8");\nprocess.stdin.on("data", (chunk) => { prompt += chunk; });\nprocess.stdin.on("end", () => {\n  const result = JSON.stringify({ argv: process.argv.slice(2), prompt });\n  const out = JSON.stringify({ type: "result", subtype: "success", result, session_id: "sess-stdin" });\n  process.stdout.write(out + "\\n", () => process.exit(0));\n});\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
       const prompt = "Привет, Claude! 🧪\n".repeat(4_000);
@@ -1569,7 +1575,7 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `const result = JSON.stringify({ env: process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT ?? "unset", argv: process.argv.slice(2) });\nconst out = JSON.stringify({ type: "result", result, session_id: "sess-env" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `const result = JSON.stringify({ env: process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT ?? "unset", argv: process.argv.slice(2) });\nconst out = JSON.stringify({ type: "result", subtype: "success", result, session_id: "sess-env" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
 
@@ -2136,9 +2142,87 @@ describe("areModelIdsEquivalent", () => {
 
 describe("validateTurnCompletion", () => {
   it("returns completed for exit 0 with terminal event", () => {
-    const state = { receivedTerminalEvent: true, unresolvedParseErrors: 0, unknownEvents: [] };
+    const state = {
+      receivedTerminalEvent: true,
+      terminalSubtype: "success",
+      terminalReason: "completed",
+      terminalIsError: false,
+      unresolvedParseErrors: 0,
+      unknownEvents: [],
+    };
     const result = validateTurnCompletion(state, 0);
     assert.equal(result.status, "completed");
+  });
+
+  it("maps the observed non-success result subtypes to bounded failures", () => {
+    for (const [terminalSubtype, terminalReason, kind, terminalCategory] of [
+      ["error_during_execution", "api_error", "claude_api_error", "CLAUDE_API_ERROR"],
+      ["error_max_turns", "max_turns", "claude_max_turns", "CLAUDE_MAX_TURNS"],
+      ["error_max_budget_usd", "budget_exhausted", "claude_max_budget", "CLAUDE_MAX_BUDGET"],
+      [
+        "error_max_structured_output_retries",
+        "structured_output_retry_exhausted",
+        "claude_structured_output_retries",
+        "CLAUDE_STRUCTURED_OUTPUT_RETRIES",
+      ],
+    ]) {
+      const result = validateTurnCompletion({
+        receivedTerminalEvent: true,
+        terminalSubtype,
+        terminalReason,
+        terminalIsError: true,
+        unresolvedParseErrors: 0,
+        unknownEvents: [],
+      }, 0);
+
+      assert.deepEqual(result, {
+        status: "failed",
+        failure: { kind, terminalCategory },
+      });
+    }
+  });
+
+  it("maps observed aborted success terminals to a bounded failure", () => {
+    const result = validateTurnCompletion({
+      receivedTerminalEvent: true,
+      terminalSubtype: "success",
+      terminalReason: "aborted_streaming",
+      terminalIsError: false,
+      unresolvedParseErrors: 0,
+      unknownEvents: [],
+    }, 0);
+
+    assert.deepEqual(result, {
+      status: "failed",
+      failure: {
+        kind: "claude_aborted",
+        terminalCategory: "CLAUDE_ABORTED",
+      },
+    });
+  });
+
+  it("fails closed for unknown and conflicting structured terminals", () => {
+    for (const state of [
+      { terminalSubtype: "future_terminal", terminalReason: null, terminalIsError: true },
+      { terminalSubtype: "success", terminalReason: "max_turns", terminalIsError: false },
+      { terminalSubtype: "error_max_turns", terminalReason: "api_error", terminalIsError: true },
+      { terminalSubtype: null, terminalReason: "completed", terminalIsError: false },
+    ]) {
+      const result = validateTurnCompletion({
+        receivedTerminalEvent: true,
+        unresolvedParseErrors: 0,
+        unknownEvents: [],
+        ...state,
+      }, 0);
+
+      assert.deepEqual(result, {
+        status: "failed",
+        failure: {
+          kind: "claude_unknown_terminal",
+          terminalCategory: "CLAUDE_UNKNOWN_TERMINAL",
+        },
+      });
+    }
   });
 
   it("returns unknown for exit 0 without terminal event", () => {
@@ -2149,21 +2233,36 @@ describe("validateTurnCompletion", () => {
   });
 
   it("returns failed for non-zero exit code", () => {
-    const state = { receivedTerminalEvent: true, unresolvedParseErrors: 0, unknownEvents: [] };
+    const state = {
+      receivedTerminalEvent: true,
+      terminalSubtype: "success",
+      unresolvedParseErrors: 0,
+      unknownEvents: [],
+    };
     const result = validateTurnCompletion(state, 1);
     assert.equal(result.status, "failed");
     assert.equal(result.exitCode, 1);
   });
 
   it("returns unknown when there are unresolved parse errors", () => {
-    const state = { receivedTerminalEvent: true, unresolvedParseErrors: 3, unknownEvents: [] };
+    const state = {
+      receivedTerminalEvent: true,
+      terminalSubtype: "success",
+      unresolvedParseErrors: 3,
+      unknownEvents: [],
+    };
     const result = validateTurnCompletion(state, 0);
     assert.equal(result.status, "unknown");
     assert.ok(result.warning.includes("3 unrecovered parse errors"));
   });
 
   it("accepts terminal output with parse errors only when explicitly allowed", () => {
-    const state = { receivedTerminalEvent: true, unresolvedParseErrors: 1, unknownEvents: [] };
+    const state = {
+      receivedTerminalEvent: true,
+      terminalSubtype: "success",
+      unresolvedParseErrors: 1,
+      unknownEvents: [],
+    };
     const result = validateTurnCompletion(state, 0, {
       allowTerminalWithParseErrors: true,
     });
@@ -2181,7 +2280,12 @@ describe("validateTurnCompletion", () => {
   });
 
   it("returns completed even when unknown events exist (protocol drift)", () => {
-    const state = { receivedTerminalEvent: true, unresolvedParseErrors: 0, unknownEvents: [{ type: "new_type", ts: 1 }] };
+    const state = {
+      receivedTerminalEvent: true,
+      terminalSubtype: "success",
+      unresolvedParseErrors: 0,
+      unknownEvents: [{ type: "new_type", ts: 1 }],
+    };
     const result = validateTurnCompletion(state, 0);
     assert.equal(result.status, "completed");
   });

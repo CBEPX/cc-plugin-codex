@@ -59,6 +59,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
     process.stdout.write(JSON.stringify({
       type: "result",
       session_id: "hook-session-result",
+      subtype: "success",
       result: ""
     }) + "\\n");
     process.exit(0);
@@ -67,6 +68,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
     process.stdout.write(JSON.stringify({
       type: "result",
       session_id: "hook-session-result",
+      subtype: "success",
       result: "BLOCK: fix the failing regression"
     }) + "\\n");
     process.exit(0);
@@ -75,6 +77,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
     process.stdout.write(JSON.stringify({
       type: "result",
       session_id: "hook-session-result",
+      subtype: "success",
       result: "Review complete.\\nBLOCK: fix the failing regression"
     }) + "\\n");
     process.exit(0);
@@ -93,6 +96,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
     process.stdout.write(JSON.stringify({
       type: "result",
       session_id: "hook-session-result",
+      subtype: "success",
       result: "ALLOW: hook ok"
     }) + "\\n");
     process.exit(0);
@@ -101,6 +105,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
     process.stdout.write(JSON.stringify({
       type: "result",
       session_id: "hook-session-result",
+      subtype: "success",
       result: "MAYBE: hook unsure"
     }) + "\\n");
     process.exit(0);
@@ -121,6 +126,7 @@ if (process.env.CLAUDE_ARGS_FILE) {
   process.stdout.write(JSON.stringify({
     type: "result",
     session_id: "hook-session-result",
+    subtype: "success",
     result: "ALLOW: hook ok"
   }) + "\\n");
   process.exit(0);

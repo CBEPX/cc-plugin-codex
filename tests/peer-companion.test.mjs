@@ -207,10 +207,22 @@ async function main() {
           ? {}
           : { structured_output: payload }),
       subtype: process.env.FAKE_CLAUDE_TERMINAL_SUBTYPE || "success",
-      result: process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
-        ? "not structured JSON"
-        : JSON.stringify(payload),
-      model: process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5-1",
+      terminal_reason: process.env.FAKE_CLAUDE_TERMINAL_REASON || "completed",
+      is_error: process.env.FAKE_CLAUDE_TERMINAL_IS_ERROR === "1"
+        ? true
+        : process.env.FAKE_CLAUDE_TERMINAL_IS_ERROR === "0"
+          ? false
+          : (process.env.FAKE_CLAUDE_TERMINAL_SUBTYPE || "success") !== "success",
+      result: process.env.FAKE_CLAUDE_FAILURE_SIGNAL === "auth"
+        ? "Not logged in. Run claude auth login to continue."
+        : process.env.FAKE_CLAUDE_FAILURE_SIGNAL === "rate"
+          ? "You've hit your session limit · resets 4:50pm (Europe/Moscow)"
+          : process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
+            ? "not structured JSON"
+            : JSON.stringify(payload),
+      model: process.env.FAKE_CLAUDE_FAILURE_SIGNAL
+        ? "<synthetic>"
+        : process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5-1",
       modelUsage: { "claude-fable-5-1": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
     }) + "\\n");
   };
@@ -810,22 +822,88 @@ describe("peer companion with fake Claude", () => {
     assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
   });
 
-  it("rejects a memo with a non-success terminal subtype", () => {
-    const testEnv = createEnvironment();
-    const created = createPeer(testEnv);
-    submitCodexMemo(testEnv, created);
-    const claudeLease = planLease(created, "_claude_");
-    const failed = run(testEnv, [
-      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash,
-      "--epoch", String(created.workflow.epoch), "--json",
-    ], {
-      input: attemptInput(claudeLease),
-      env: { FAKE_CLAUDE_TERMINAL_SUBTYPE: "error" },
-    });
+  it("fails Claude memos closed with bounded terminal details and auth/rate precedence", () => {
+    for (const testCase of [
+      {
+        name: "known max turns",
+        env: {
+          FAKE_CLAUDE_TERMINAL_SUBTYPE: "error_max_turns",
+          FAKE_CLAUDE_TERMINAL_REASON: "max_turns",
+        },
+        code: "CLAUDE_TURN_FAILED",
+        detail: "CLAUDE_MAX_TURNS",
+      },
+      {
+        name: "unknown terminal",
+        env: {
+          FAKE_CLAUDE_TERMINAL_SUBTYPE: "future_terminal",
+          FAKE_CLAUDE_TERMINAL_REASON: "provider_reason_MUST_NOT_PERSIST",
+        },
+        code: "CLAUDE_TURN_FAILED",
+        detail: "CLAUDE_UNKNOWN_TERMINAL",
+      },
+      {
+        name: "auth precedence",
+        env: {
+          FAKE_CLAUDE_TERMINAL_SUBTYPE: "future_terminal",
+          FAKE_CLAUDE_TERMINAL_REASON: "provider_reason_MUST_NOT_PERSIST",
+          FAKE_CLAUDE_FAILURE_SIGNAL: "auth",
+        },
+        code: "CLAUDE_AUTH",
+        detail: null,
+      },
+      {
+        name: "rate precedence",
+        env: {
+          FAKE_CLAUDE_TERMINAL_SUBTYPE: "future_terminal",
+          FAKE_CLAUDE_TERMINAL_REASON: "provider_reason_MUST_NOT_PERSIST",
+          FAKE_CLAUDE_FAILURE_SIGNAL: "rate",
+        },
+        code: "CLAUDE_RATE_LIMIT",
+        detail: null,
+      },
+    ]) {
+      const testEnv = createEnvironment();
+      const created = createPeer(testEnv);
+      submitCodexMemo(testEnv, created);
+      const claudeLease = planLease(created, "_claude_");
+      const failed = run(testEnv, [
+        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], {
+        input: attemptInput(claudeLease),
+        env: {
+          FAKE_CLAUDE_MARKER: "provider_payload_MUST_NOT_PERSIST",
+          ...testCase.env,
+        },
+      });
 
-    assert.notEqual(failed.status, 0);
-    assert.equal(failed.stderr, "EVIDENCE_INCOMPLETE: STRUCTURED_JSON_REQUIRED\n");
+      assert.notEqual(failed.status, 0, testCase.name);
+      assert.equal(
+        failed.stderr,
+        `${testCase.code}${testCase.detail ? `: ${testCase.detail}` : ""}\n`,
+        testCase.name
+      );
+      const stored = readWorkflow(testEnv, created.workflow.id);
+      assert.equal(stored.failureReason, testCase.code, testCase.name);
+      assert.equal(stored.failureDetail, testCase.detail, testCase.name);
+      assert.equal(stored.branches.claude.status, "retryable_failed", testCase.name);
+      assert.equal(stored.branches.claude.failureDetail, testCase.detail, testCase.name);
+      assert.equal(stored.branches.claude.payload, null, testCase.name);
+      assert.equal(stored.branches.claude.commitment ?? null, null, testCase.name);
+      const [failedJob] = readPeerJobs(testEnv, created.workflow.id)
+        .filter(({ status }) => status === "failed");
+      assert.equal(
+        failedJob.errorMessage,
+        `${testCase.code}${testCase.detail ? `: ${testCase.detail}` : ""}`,
+        testCase.name
+      );
+      const durable = readManagedStateText(testEnv);
+      assert.doesNotMatch(durable, /provider_payload_MUST_NOT_PERSIST/, testCase.name);
+      assert.doesNotMatch(durable, /provider_reason_MUST_NOT_PERSIST/, testCase.name);
+      assert.doesNotMatch(durable, /Not logged in|session limit/, testCase.name);
+    }
   });
 
   it("rejects a success result without native output after failed native output", () => {
@@ -1699,6 +1777,59 @@ describe("peer companion with fake Claude", () => {
     for (const lease of rawLeases) {
       assert.doesNotMatch(readManagedStateText(testEnv), new RegExp(lease));
     }
+  });
+
+  it("fails a conflicting Claude critique terminal closed without committing or exposing it", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv);
+    submitCodexMemo(testEnv, created);
+    const claudeLease = planLease(created, "_claude_");
+    runJson(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(claudeLease) });
+    const checkpointLease = planLease(created, "_codex_", "checkpoint");
+    activate(testEnv, created, "checkpoint", null, checkpointLease);
+    runJson(testEnv, [
+      "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(checkpointLease, {
+      agreements: [], disagreements: [], decisionsNeeded: [],
+    }) });
+    const continuation = runJson(testEnv, [
+      "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--continue", "--owner-session-id", "owner-b", "--json",
+    ], { input: JSON.stringify({ feedback: "Check both memos." }) });
+    const critiqueLease = planLease(continuation, "_critique_");
+    const failed = run(testEnv, [
+      "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(continuation.workflow.epoch), "--json",
+    ], {
+      input: attemptInput(critiqueLease),
+      env: {
+        FAKE_CLAUDE_MARKER: "critique_provider_payload_MUST_NOT_PERSIST",
+        FAKE_CLAUDE_TERMINAL_SUBTYPE: "success",
+        FAKE_CLAUDE_TERMINAL_REASON: "max_turns",
+        FAKE_CLAUDE_TERMINAL_IS_ERROR: "0",
+      },
+    });
+
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stderr, "CLAUDE_TURN_FAILED: CLAUDE_UNKNOWN_TERMINAL\n");
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.equal(stored.failureReason, "CLAUDE_TURN_FAILED");
+    assert.equal(stored.failureDetail, "CLAUDE_UNKNOWN_TERMINAL");
+    assert.equal(stored.stages.critique.status, "retryable_failed");
+    assert.equal(stored.stages.critique.failureDetail, "CLAUDE_UNKNOWN_TERMINAL");
+    assert.equal(stored.critique, null);
+    assert.equal(stored.stages.synthesis.status, "pending");
+    assert.doesNotMatch(
+      readManagedStateText(testEnv),
+      /critique_provider_payload_MUST_NOT_PERSIST|max_turns/
+    );
   });
 
   it("rejects a critique with JSON text but no native structured output", () => {

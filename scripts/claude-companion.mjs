@@ -610,6 +610,9 @@ function formatClaudeFailureSummary(failure, fallback) {
   if (failure?.kind === "claude_auth") {
     return "Claude Code authentication failed; run `claude auth login`.";
   }
+  if (failure?.terminalCategory) {
+    return `Claude Code turn failed: ${failure.terminalCategory}.`;
+  }
   if (failure?.kind !== "claude_rate_limit") {
     return fallback;
   }
@@ -1417,6 +1420,9 @@ async function executeReviewRun(request) {
         stderr: result.stderr,
         failure: result.failure ?? null,
         stdout: result.result,
+        terminalSubtype: result.terminalSubtype ?? null,
+        terminalReason: result.terminalReason ?? null,
+        terminalIsError: result.terminalIsError ?? null,
         requestedModel: result.requestedModel ?? null,
         finalModel: result.finalModel ?? null,
         contextWindow: result.contextWindow ?? null,
@@ -1427,14 +1433,16 @@ async function executeReviewRun(request) {
       }
     };
     const rendered = appendModelFallbackSummary(
-      [
-        `# Claude Code ${reviewName}`,
-        "",
-        `Target: ${target.label}`,
-        "",
-        typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
-        ""
-      ].join("\n"),
+      result.failure?.terminalCategory
+        ? renderTaskResult({ failure: result.failure })
+        : [
+            `# Claude Code ${reviewName}`,
+            "",
+            `Target: ${target.label}`,
+            "",
+            typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
+            ""
+          ].join("\n"),
       modelFallbacks
     );
 
@@ -1528,6 +1536,9 @@ async function executeReviewRun(request) {
       stderr: result.stderr,
       failure: result.failure ?? null,
       stdout: typeof result.result === "string" ? result.result : JSON.stringify(result.result),
+      terminalSubtype: result.terminalSubtype ?? null,
+      terminalReason: result.terminalReason ?? null,
+      terminalIsError: result.terminalIsError ?? null,
       requestedModel: result.requestedModel ?? null,
       finalModel: result.finalModel ?? null,
       contextWindow: result.contextWindow ?? null,
@@ -1547,11 +1558,13 @@ async function executeReviewRun(request) {
     turnId: null,
     payload,
     rendered: appendModelFallbackSummary(
-      renderReviewResult(parsed, {
-        reviewLabel: reviewName,
-        targetLabel: context.target.label,
-        reasoningSummary: null
-      }),
+      result.failure?.terminalCategory
+        ? renderTaskResult({ failure: result.failure })
+        : renderReviewResult(parsed, {
+            reviewLabel: reviewName,
+            targetLabel: context.target.label,
+            reasoningSummary: null
+          }),
       modelFallbacks
     ),
     summary: formatClaudeFailureSummary(
@@ -1664,6 +1677,9 @@ async function executeTaskRun(request) {
     contextWindow: result.contextWindow ?? null,
     modelFallbacks,
     failure: result.failure ?? null,
+    terminalSubtype: result.terminalSubtype ?? null,
+    terminalReason: result.terminalReason ?? null,
+    terminalIsError: result.terminalIsError ?? null,
     parseErrors: result.parseErrors ?? [],
     unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
     streamDiagnostics: result.streamDiagnostics ?? [],
@@ -3436,7 +3452,7 @@ function peerFailureCode(error) {
 
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
   const reason = peerFailureCode(error);
-  const failureDetail = reason === "EVIDENCE_INCOMPLETE"
+  const failureDetail = reason === "EVIDENCE_INCOMPLETE" || reason === "CLAUDE_TURN_FAILED"
     ? normalizeWorkflowFailureDetail(error?.failureDetail)
     : null;
   if (reason === "ATTEMPT_LEASE_REFLECTION") return;
@@ -3464,7 +3480,6 @@ function submitPeerTargetOneShot(cwd, workflowId, options) {
 
 function parsePeerClaudePayload(result, label) {
   if (
-    result.terminalSubtype === "success" &&
     result.structuredOutput &&
     typeof result.structuredOutput === "object" &&
     !Array.isArray(result.structuredOutput) &&
@@ -3604,6 +3619,21 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
           "PEER_ISOLATION_UNAVAILABLE: Claude could not provide the required filesystem sandbox."
         );
       }
+      if (result.failure?.kind === "claude_auth") {
+        throw Object.assign(new Error("CLAUDE_AUTH"), { code: "CLAUDE_AUTH" });
+      }
+      if (result.failure?.kind === "claude_rate_limit") {
+        throw Object.assign(new Error("CLAUDE_RATE_LIMIT"), { code: "CLAUDE_RATE_LIMIT" });
+      }
+      if (result.failure?.terminalCategory) {
+        throw Object.assign(
+          new Error(`CLAUDE_TURN_FAILED: ${result.failure.terminalCategory}`),
+          {
+            code: "CLAUDE_TURN_FAILED",
+            failureDetail: result.failure.terminalCategory,
+          }
+        );
+      }
       throw new Error(result.failure?.kind ?? result.warning ?? "CLAUDE_TURN_FAILED");
     }
     const parsed = parsePeerClaudePayload(result, critique ? "Claude critique" : "Claude memo");
@@ -3668,7 +3698,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     return peerReceipt(submitted, stage, branchId, true);
   } catch (error) {
     const code = peerFailureCode(error);
-    const failureDetail = code === "EVIDENCE_INCOMPLETE"
+    const failureDetail = code === "EVIDENCE_INCOMPLETE" || code === "CLAUDE_TURN_FAILED"
       ? normalizeWorkflowFailureDetail(error?.failureDetail)
       : null;
     const sanitized = Object.assign(
