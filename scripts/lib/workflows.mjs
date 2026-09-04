@@ -297,7 +297,7 @@ function assertAttemptFence(workflow, target, options) {
   }
 }
 
-function payloadCommitment(payload) {
+export function workflowPayloadSha256(payload) {
   return createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
 }
 
@@ -753,7 +753,7 @@ function completeWorkflowStage(cwd, workflowId, options, reveal) {
     }
     if (!options.oneShot) assertAttemptFence(workflow, target, options);
     if (reveal) {
-      if (!target.state.commitment || target.state.commitment !== payloadCommitment(payload)) {
+      if (!target.state.commitment || target.state.commitment !== workflowPayloadSha256(payload)) {
         throw workflowError("COMMITMENT_MISMATCH", `${target.key} payload does not match its commitment.`);
       }
     } else if (target.state.commitment) {
@@ -865,7 +865,7 @@ export function commitWorkflowStage(cwd, workflowId, options) {
     return {
       ...updateTarget(workflow, target, {
         ...target.state,
-        commitment: payloadCommitment(payload),
+        commitment: workflowPayloadSha256(payload),
         committedAt: timestamp,
       }),
       ...(options.claudeSessionId ? { claudeSessionId: options.claudeSessionId } : {}),

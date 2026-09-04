@@ -165,6 +165,7 @@ import {
   reserveWorkflowAttempts,
   revealWorkflowStage,
   submitWorkflowStage,
+  workflowPayloadSha256,
   workflowNotificationEvent,
 } from "./lib/workflows.mjs";
 import {
@@ -3261,6 +3262,38 @@ function targetStatus(workflow, stage, branchId) {
   return branchId ? workflow.branches?.[branchId]?.status : workflow.stages?.[stage]?.status;
 }
 
+function peerWorkflowHeader(workflow) {
+  return {
+    id: workflow.id,
+    mode: workflow.mode,
+    revision: workflow.revision,
+    epoch: workflow.epoch,
+    status: workflow.status,
+    phase: workflow.phase,
+    briefHash: workflow.briefHash,
+  };
+}
+
+function peerReceipt(workflow, stage, branchId = null, includePayloadSha256 = false) {
+  const target = branchId ? workflow.branches?.[branchId] : workflow.stages?.[stage];
+  return {
+    workflowId: workflow.id,
+    mode: workflow.mode,
+    revision: workflow.revision,
+    epoch: workflow.epoch,
+    status: workflow.status,
+    phase: workflow.phase,
+    target: {
+      stage,
+      ...(branchId ? { branchId } : {}),
+      status: target?.status,
+    },
+    ...(includePayloadSha256
+      ? { payloadSha256: workflowPayloadSha256(target?.payload) }
+      : {}),
+  };
+}
+
 function withLatestWorkflow(cwd, workflowId, run) {
   let lastError;
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -3631,13 +3664,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         ...fence,
       });
     }
-    return {
-      status: "completed",
-      branch: branchId,
-      stage,
-      memo: payload,
-      workflow: submitted,
-    };
+    return peerReceipt(submitted, stage, branchId, true);
   } catch (error) {
     const code = peerFailureCode(error);
     const failureDetail = code === "EVIDENCE_INCOMPLETE"
@@ -3723,7 +3750,7 @@ async function handlePeerCreate(argv) {
     { stage: "checkpoint" },
   ]);
   outputResult({
-    workflow: reservation.workflow,
+    workflow: peerWorkflowHeader(reservation.workflow),
     spawnPlan: buildInitialAgentPlan(reservation.workflow, {
       companionPath: path.join(ROOT_DIR, "scripts", "claude-companion.mjs"),
       codexModel: route.codexModel,
@@ -3753,7 +3780,11 @@ function handlePeerActivateAttempt(argv) {
     expectedEpoch,
     lease
   );
-  outputResult(activated, options.json);
+  outputResult(peerReceipt(
+    activated,
+    options.stage,
+    options.branch ?? null
+  ), options.json);
 }
 
 function handlePeerSubmitMemo(argv) {
@@ -3782,7 +3813,7 @@ function handlePeerSubmitMemo(argv) {
       payload: memo,
       ...fence,
     });
-    outputResult({ branch, memo, workflow: submitted }, options.json);
+    outputResult(peerReceipt(submitted, "memo", branch, true), options.json);
   } catch (error) {
     failPeerAttempt(cwd, workflowId, { stage: "memo", branchId: branch }, fence, error);
     throw error;
@@ -3868,7 +3899,7 @@ function handlePeerCheckpoint(argv) {
       phase: "checkpoint",
       ...fence,
     });
-    outputResult({ checkpoint, workflow: submitted }, options.json);
+    outputResult(peerReceipt(submitted, "checkpoint", null, true), options.json);
   } catch (error) {
     failPeerAttempt(cwd, workflowId, { stage: "checkpoint" }, fence, error);
     throw error;
@@ -3910,7 +3941,11 @@ function handlePeerResumePlan(argv) {
       listJobs(workflow.workspaceRoot).filter((job) => job.workflowId === workflow.id)
     );
     if (reconciled.retryTargets.length === 0) {
-      outputResult({ workflow: reconciled.workflow, work: [], spawnPlan: [] }, options.json);
+      outputResult({
+        workflow: peerWorkflowHeader(reconciled.workflow),
+        work: [],
+        spawnPlan: [],
+      }, options.json);
       return;
     }
     const reservation = reserveWorkflowAttempts(cwd, workflowId, {
@@ -3925,7 +3960,7 @@ function handlePeerResumePlan(argv) {
       leases: reservation.leases,
     };
     outputResult({
-      workflow: reservation.workflow,
+      workflow: peerWorkflowHeader(reservation.workflow),
       work: reconciled.retryTargets.map(({ stage, branchId }) => branchId
         ? { kind: "branch", id: branchId }
         : { kind: "stage", id: stage }),
@@ -3951,7 +3986,7 @@ function handlePeerResumePlan(argv) {
     mode: workflow.mode,
   }, [{ stage: "critique" }, { stage: "synthesis" }]);
   outputResult({
-    workflow: reservation.workflow,
+    workflow: peerWorkflowHeader(reservation.workflow),
     work: [{ kind: "stage", id: "critique" }, { kind: "stage", id: "synthesis" }],
     spawnPlan: buildContinuationAgentPlan(reservation.workflow, {
       companionPath: path.join(ROOT_DIR, "scripts", "claude-companion.mjs"),
@@ -3990,7 +4025,7 @@ function handlePeerFinal(argv) {
       phase: "done",
       ...fence,
     });
-    outputResult({ result, workflow: submitted }, options.json);
+    outputResult(peerReceipt(submitted, "synthesis", null, true), options.json);
   } catch (error) {
     failPeerAttempt(cwd, workflowId, { stage: "synthesis" }, fence, error);
     throw error;

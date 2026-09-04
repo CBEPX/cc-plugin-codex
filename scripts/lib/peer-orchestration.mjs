@@ -287,10 +287,10 @@ export function buildInitialAgentPlan(workflow, options) {
     message: [
       "You are a pure Claude forwarder for an independent peer workflow.",
       common,
-      "Run exactly one shell command in the foreground and return stdout unchanged.",
+      "Run exactly one shell command in the foreground and return its bounded receipt stdout unchanged.",
       "Do not inspect the repository, research, reinterpret the brief, or add commentary.",
       "Never use shell backgrounding. If the shell yields a session, poll only that session until it exits.",
-      "Exit code 0 is success; otherwise return the raw stdout or failure diagnostic.",
+      "Exit code 0 is success; otherwise return the failure diagnostic.",
       heredoc(baseCommand, { lease: claudeLease }, "CC_PEER_CLAUDE_ATTEMPT"),
     ].join("\n\n"),
   };
@@ -310,7 +310,7 @@ export function buildContinuationAgentPlan(workflow, options) {
       reasoning_effort: "medium",
       message: [
         "You are a pure Claude forwarder for a peer continuation.",
-        "Run exactly one shell command in the foreground and return stdout unchanged.",
+        "Run exactly one shell command in the foreground and return its bounded receipt stdout unchanged.",
         heredoc(critiqueCommand, { lease: critiqueLease }, "CC_PEER_CRITIQUE_ATTEMPT"),
       ].join("\n\n"),
     },
