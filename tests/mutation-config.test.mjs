@@ -11,6 +11,37 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
+const ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
+
+function readWorkflow(name) {
+  return fs.readFileSync(path.join(PROJECT_ROOT, ".github", "workflows", name), "utf8");
+}
+
+function workflowJob(source, name) {
+  const start = source.indexOf(`  ${name}:\n`);
+  assert.notEqual(start, -1, `missing workflow job ${name}`);
+  const next = source.slice(start + 1).search(/^ {2}[\w-]+:\n/mu);
+  return next === -1 ? source.slice(start) : source.slice(start, start + next + 1);
+}
+
+function actionStep(job, action) {
+  const marker = `uses: ${action}@`;
+  const actionOffset = job.indexOf(marker);
+  assert.notEqual(actionOffset, -1, `missing ${action} step`);
+  const start = job.lastIndexOf("\n      - ", actionOffset);
+  const next = job.indexOf("\n      - ", actionOffset);
+  return job.slice(start + 1, next === -1 ? undefined : next + 1);
+}
+
+function actionRef(step, action) {
+  return step.match(new RegExp(`uses: ${action.replaceAll("/", "\\/")}@([^ #\\n]+)`, "u"))?.[1];
+}
+
+function actionInputs(step) {
+  return Object.fromEntries(
+    [...step.matchAll(/^ {10}([\w-]+): (.+)$/gmu)].map((match) => [match[1], match[2]])
+  );
+}
 /** @type {Array<[string, string[]]>} */
 const expectations = [
   ["scripts/lib/process.mjs:9-54", ["runCommand", "runCommandChecked"]],
@@ -86,5 +117,73 @@ test("Windows lifecycle gate patterns stay aligned with their tests", () => {
   for (const [file, name] of expected) {
     assert.match(lifecycleScript, new RegExp(name));
     assert.match(fs.readFileSync(path.join(PROJECT_ROOT, file), "utf8"), new RegExp(name));
+  }
+});
+
+test("full mutation runs every force shard independently and merges available reports", () => {
+  const workflow = readWorkflow("mutation.yml");
+  const full = workflowJob(workflow, "full");
+  const expectedShards = [
+    ["critical", "test:mutation:critical:force"],
+    ["render", "test:mutation:shard:render:force"],
+    ["claude-cli", "test:mutation:shard:claude-cli:force"],
+    ["state", "test:mutation:shard:state:force"],
+    ["job-control", "test:mutation:shard:job-control:force"],
+    ["managed", "test:mutation:shard:managed:force"],
+    ["installer", "test:mutation:shard:installer:force"],
+  ];
+  const shards = [...full.matchAll(
+    /^ {10}- shard: ([\w-]+)\n {12}script: ([\w:-]+)$/gmu
+  )].map((match) => match.slice(1));
+
+  assert.deepEqual(shards, expectedShards);
+  assert.match(full, /^ {6}fail-fast: false$/mu);
+  assert.match(full, /^ {4}timeout-minutes: 45$/mu);
+  assert.match(full, /^ {6}- run: npm run \$\{\{ matrix\.script \}\}$/mu);
+  assert.doesNotMatch(full, /test:mutation:full:force/u);
+
+  const upload = actionStep(full, "actions/upload-artifact");
+  assert.equal(actionRef(upload, "actions/upload-artifact"), ARTIFACT_ACTION_SHA);
+  assert.match(upload, /^ {6}- if: always\(\)$/mu);
+  assert.deepEqual(actionInputs(upload), {
+    name: "mutation-full-${{ matrix.shard }}",
+    path: "reports/mutation/",
+    "if-no-files-found": "error",
+    "retention-days": "14",
+    archive: "true",
+  });
+
+  const merge = workflowJob(workflow, "merge");
+  assert.match(merge, /^ {4}needs: full$/mu);
+  assert.match(merge, /^ {4}if: \$\{\{ always\(\) && github\.event_name != 'pull_request' \}\}$/mu);
+  const mergeStep = actionStep(merge, "actions/upload-artifact/merge");
+  assert.equal(actionRef(mergeStep, "actions/upload-artifact/merge"), ARTIFACT_ACTION_SHA);
+  assert.deepEqual(actionInputs(mergeStep), {
+    name: "mutation-full",
+    pattern: "mutation-full-*",
+    "separate-directories": "false",
+    "delete-merged": "true",
+    "retention-days": "14",
+  });
+  assert.equal(Object.hasOwn(actionInputs(mergeStep), "archive"), false);
+});
+
+test("coverage and pull-request mutation preserve archived failure evidence", () => {
+  const cases = [
+    ["ci.yml", "linux-coverage", "coverage", "reports/coverage/"],
+    ["mutation.yml", "pull-request", "mutation-pull-request", "reports/mutation/"],
+  ];
+  for (const [workflowName, jobName, artifactName, artifactPath] of cases) {
+    const job = workflowJob(readWorkflow(workflowName), jobName);
+    const upload = actionStep(job, "actions/upload-artifact");
+    assert.equal(actionRef(upload, "actions/upload-artifact"), ARTIFACT_ACTION_SHA);
+    assert.match(upload, /^ {6}- if: always\(\)$/mu);
+    assert.deepEqual(actionInputs(upload), {
+      name: artifactName,
+      path: artifactPath,
+      "if-no-files-found": "error",
+      "retention-days": "14",
+      archive: "true",
+    });
   }
 });
