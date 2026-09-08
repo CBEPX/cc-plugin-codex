@@ -146,9 +146,14 @@ export function enrichJob(job, options = {}) {
   const progressFreshness = ACTIVE_STATUSES.has(job.status)
     ? resolveProgressFreshness(job, managedLogFile, options.now ?? Date.now())
     : { lastProgressAt: null, progressAgeMs: null };
+  const telemetry = job.result?.codex ?? job.result;
   const enriched = {
     ...job,
     kindLabel: getJobTypeLabel(job),
+    failure: job.failure ?? telemetry?.failure ?? null,
+    requestedModel: job.requestedModel ?? telemetry?.requestedModel ?? null,
+    finalModel: job.finalModel ?? telemetry?.finalModel ?? null,
+    contextWindow: job.contextWindow ?? telemetry?.contextWindow ?? null,
     progressPreview:
       ACTIVE_STATUSES.has(job.status) || job.status === "failed"
         ? readJobProgressPreview(managedLogFile, maxProgressLines)
@@ -278,9 +283,9 @@ export function buildStatusSnapshot(cwd, options = {}) {
           cwd: workspaceRoot,
         }).filter((job) => !job.workflowId)
   );
-  const workflows = listWorkflows(workspaceRoot)
-    .filter((workflow) => options.all || !sessionId || workflow.currentOwnerSessionId === sessionId)
-    .map(summarizeWorkflow)
+  const allWorkflows = listWorkflows(workspaceRoot)
+    .filter((workflow) => options.all || !sessionId || workflow.currentOwnerSessionId === sessionId);
+  const workflows = allWorkflows.map(summarizeWorkflow)
     .slice(0, options.all ? undefined : maxJobs);
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
@@ -305,6 +310,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
     latestFinished,
     recent,
     needsReview: Boolean(config.stopReviewGate),
+    totalJobs: jobs.length,
+    totalWorkflows: allWorkflows.length,
+    omittedJobs: Math.max(0, finishedJobs.length - recent.length - (latestFinished ? 1 : 0)),
+    omittedWorkflows: allWorkflows.length - workflows.length,
   };
 }
 

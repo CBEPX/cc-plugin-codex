@@ -206,13 +206,53 @@ function submissionRecipes(command, lease, marker) {
   ].join("\n");
 }
 
-function checkpointReadInstructions(readCommand) {
+function frozenReadInstructions(workflow, companionPath) {
+  return [
+    "Export the complete frozen workflow once readiness is confirmed. Never compare or synthesize a preview.",
+    "The export is a private temporary file outside the workspace; retain the receipt outputFile until all sections have been read:",
+    [
+      "node - <<'CC_PEER_READ_EXPORT'",
+      'const fs = require("node:fs");',
+      'const os = require("node:os");',
+      'const path = require("node:path");',
+      'const { execFileSync } = require("node:child_process");',
+      'const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-read-"));',
+      'try {',
+      `  process.stdout.write(execFileSync(process.execPath, ${promptData([
+        companionPath, "workflow-read", workflow.id, "--cwd", workflow.workspaceRoot,
+        "--mode", workflow.mode, "--json", "--output",
+      ])}.concat(path.join(dir, "workflow.json")), { encoding: "utf8" }));`,
+      '} catch (error) { fs.rmSync(dir, { recursive: true, force: true }); throw error; }',
+      "CC_PEER_READ_EXPORT",
+    ].join("\n"),
+    "Replace CC_PEER_OUTPUT_FILE with the quoted outputFile from the receipt. Inspect each field in 1024-character sections; repeat with nextOffset until null. Do not cat the entire file. Read branches.codex.payload, branches.claude.payload, checkpoint, feedback, critique, brief, modelManifest and toolManifest completely before synthesis or comparison:",
+    [
+      "node - CC_PEER_OUTPUT_FILE branches.codex.payload 0 <<'CC_PEER_READ_SECTION'",
+      'const fs = require("node:fs");',
+      'const [file, field, start] = process.argv.slice(2);',
+      'const data = JSON.parse(fs.readFileSync(file, "utf8"));',
+      `if (data.epoch !== ${promptData(workflow.epoch)}) throw new Error("STALE_EPOCH: discard this export and stop");`,
+      'const value = field.split(".").reduce((item, key) => item?.[key], data);',
+      'const text = JSON.stringify(value ?? null, null, 2);',
+      'const offset = Number(start);',
+      'if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid section offset");',
+      'const end = Math.min(offset + 1024, text.length);',
+      'console.log(JSON.stringify({ field, text: text.slice(offset, end), nextOffset: end < text.length ? end : null, totalChars: text.length }));',
+      "CC_PEER_READ_SECTION",
+    ].join("\n"),
+    "After reading every required section, remove only this export and its temporary directory (replace CC_PEER_OUTPUT_FILE with the same quoted path):",
+    `node -e 'const fs=require("node:fs"),path=require("node:path"); fs.unlinkSync(process.argv[1]); fs.rmdirSync(path.dirname(process.argv[1]));' CC_PEER_OUTPUT_FILE`,
+  ];
+}
+
+function checkpointReadInstructions(readCommand, workflow, companionPath) {
   return [
     "Make separate short foreground peer-wait calls; wait for each call to exit before starting another.",
     "Do not use `while`, shell loops, background processes, or persistent pollers.",
     readCommand,
     "If terminalIncomplete is true, stop before checkpoint activation.",
     "Activate checkpoint only when readyForCheckpoint is true.",
+    ...frozenReadInstructions(workflow, companionPath),
   ];
 }
 
@@ -264,7 +304,7 @@ export function buildInitialAgentPlan(workflow, options) {
       "Submit {lease:<memo lease>,payload:<structured memo>} as JSON stdin to this command:",
       submissionRecipes(submitMemoCommand, codexLease, "CC_PEER_MEMO_SUBMISSION"),
       "After submission, read the peer state with these one-shot instructions:",
-      ...checkpointReadInstructions(readCommand),
+      ...checkpointReadInstructions(readCommand, workflow, companionPath),
       "When both memos completed, activate checkpoint with {lease:<checkpoint lease>} on JSON stdin immediately before comparison:",
       heredoc(
         activationCommand(workflow, companionPath, "checkpoint"),
@@ -323,7 +363,11 @@ export function buildContinuationAgentPlan(workflow, options) {
         "You are the Codex synthesizer for a peer continuation.",
         `Workflow: ${workflow.id}`,
         `Canonical workspace: ${workflow.workspaceRoot}`,
-        "Wait until the critique is completed, then activate immediately before synthesis.",
+        "Make separate short foreground peer-wait calls; wait for each call to exit before starting another.",
+        "Do not use `while`, shell loops, background processes, or persistent pollers.",
+        `node ${quoted(companionPath)} peer-wait ${quoted(workflow.id)} --cwd ${quoted(workflow.workspaceRoot)} --mode ${quoted(workflow.mode)} --json`,
+        "If terminalIncomplete is true, stop. Wait until stages.critique.status is completed, then activate immediately before synthesis.",
+        ...frozenReadInstructions(workflow, companionPath),
         "The attempt lease below belongs only to this worker. Never persist, render, log, or pass it on argv.",
         attemptBlock({ synthesis: synthesisLease }),
         heredoc(
@@ -359,7 +403,7 @@ export function buildRetryAgentPlan(workflow, retryTargets, options) {
       ...(options.codexModel ? { model: options.codexModel } : {}),
       message: [
         "You are the Codex checkpoint waiter for a peer retry.",
-        ...checkpointReadInstructions(waitCommand),
+        ...checkpointReadInstructions(waitCommand, workflow, options.companionPath),
         attemptBlock({ checkpoint: options.leases?.["stage:checkpoint"] }),
         heredoc(
           activationCommand(workflow, options.companionPath, "checkpoint"),
@@ -603,6 +647,7 @@ export function buildPeerWaitView(workflow) {
     },
     readyForCheckpoint,
     terminalIncomplete,
+    stages: Object.fromEntries(Object.entries(workflow.stages ?? {}).map(([key, stage]) => [key, peerBranchStatus(stage)])),
     ...(codexSealed ? {
       memos: {
         codex: workflow.branches.codex.payload,

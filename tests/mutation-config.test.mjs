@@ -28,7 +28,7 @@ const expectations = [
   ["scripts/lib/tracked-jobs.mjs:30-78", ["transitionTrackedJob", "isStatusReaperFailure", "transitionTrackedJobTerminal"]],
   ["scripts/lib/tracked-jobs.mjs:308-392", ["createJobRecord", "createJobProgressUpdater"]],
   ["scripts/lib/tracked-jobs.mjs:411-544", ["runTrackedJob"]],
-  ["scripts/lib/job-control.mjs:207-469", ["matchJobReference", "buildStatusSnapshot", "resolveCancelableJob"]],
+  ["scripts/lib/job-control.mjs:212-478", ["matchJobReference", "buildStatusSnapshot", "resolveCancelableJob"]],
   ["scripts/installer-cli.mjs:98-236", ["readPersonalMarketplace", "prepareLegacyLocalCleanup", "isPluginAlreadyAbsent", "isPluginUninstallRefused"]],
   ["scripts/installer-cli.mjs:277-377", ["installOrUpdate", "uninstall"]],
 ];

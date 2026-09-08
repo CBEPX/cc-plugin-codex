@@ -552,7 +552,7 @@ describe("renderStatusReport", () => {
     assert.ok(output.indexOf("j2") < output.indexOf("j3"));
   });
 
-  it("limits the overview to the first 15 jobs after sorting", () => {
+  it("renders every projected overview row without silently dropping records", () => {
     const report = {
       config: { stopReviewGate: false },
       running: [],
@@ -570,7 +570,7 @@ describe("renderStatusReport", () => {
     const output = renderStatusReport(report);
     assert.ok(output.includes("j0"));
     assert.ok(output.includes("j14"));
-    assert.ok(!output.includes("j15"));
+    assert.ok(output.includes("j19"));
   });
 
   it("deduplicates latestFinished from recent rows", () => {

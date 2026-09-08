@@ -188,7 +188,7 @@ describe("workflow companion internals", () => {
     const listed = runJson(testEnv, [
       "workflow-list", "--cwd", testEnv.workspaceDir, "--mode", "design", "--json",
     ]);
-    assert.deepEqual(listed.map(({ id }) => id), ["workflow-cli"]);
+    assert.deepEqual(listed.workflows.map(({ id }) => id), ["workflow-cli"]);
     assert.equal(runJson(testEnv, [
       "workflow-read", "workflow-cli", "--cwd", testEnv.workspaceDir,
       "--mode", "design", "--json",

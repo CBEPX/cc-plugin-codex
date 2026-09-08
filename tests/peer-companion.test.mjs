@@ -692,9 +692,11 @@ describe("peer companion with fake Claude", () => {
     });
     assert.equal(finalResult.stdout.includes(finalMarker), false);
     assert.equal(finalResult.stdout.includes(synthesisLease), false);
-    const authoritative = runJson(testEnv, [
-      "workflow-read", created.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
+    const authoritativeFile = path.join(testEnv.rootDir, "authoritative.json");
+    runJson(testEnv, [
+      "workflow-read", created.workflow.id, "--cwd", testEnv.workspaceDir, "--output", authoritativeFile, "--json",
     ]);
+    const authoritative = JSON.parse(fs.readFileSync(authoritativeFile, "utf8"));
     assert.equal(authoritative.finalResult.recommendation, finalMarker);
   });
 
@@ -1057,11 +1059,11 @@ describe("peer companion with fake Claude", () => {
       assert.equal(view.branches.claude.status, "running");
       const serialized = JSON.stringify(view);
       assert.doesNotMatch(serialized, /The repository and primary source agree/);
-      assert.doesNotMatch(serialized, /toolEvents|repoCitations|webCitations|payload/);
+      assert.doesNotMatch(serialized, /"(?:toolEvents|repoCitations|webCitations|payload)":/);
     }
     const listed = runJson(testEnv, [
       "workflow-list", "--cwd", testEnv.workspaceDir, "--mode", "design", "--json",
-    ]).find(({ id, workflowId }) => (workflowId ?? id) === created.workflow.id);
+    ]).workflows.find(({ id, workflowId }) => (workflowId ?? id) === created.workflow.id);
     assert.ok(listed);
     assert.equal(listed.readyForCheckpoint, false);
     assert.doesNotMatch(
@@ -1089,8 +1091,13 @@ describe("peer companion with fake Claude", () => {
       "--mode", "design", "--json",
     ]);
     assert.equal(ready.readyForCheckpoint, true);
-    assert.deepEqual(ready.memos.codex.content, codexMemo.content);
-    assert.deepEqual(ready.memos.claude.content, {
+    assert.equal(ready.memos, undefined);
+    const output = path.join(testEnv.rootDir, "sealed-memos.json");
+    runJson(testEnv, ["peer-wait", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--output", output, "--json"]);
+    const exported = JSON.parse(fs.readFileSync(output, "utf8"));
+    assert.deepEqual(exported.memos.codex.content, codexMemo.content);
+    assert.deepEqual(exported.memos.claude.content, {
       alternatives: ["Keep the current design."],
       tradeoffs: ["It favors compatibility."],
       decisionDrivers: ["Preserve the peer contract."],

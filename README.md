@@ -268,6 +268,7 @@ By default, `$cc:status` shows current-session jobs plus one aggregate row per o
 ```text
 $cc:result                          # open the latest job or workflow result for this session/repo
 $cc:result task-abc123              # show job output or a workflow checkpoint/final result
+$cc:result task-abc123 --output /tmp/new-result.json  # full private JSON export
 ```
 
 When a job came from a built-in background child, the output can show both:
@@ -312,7 +313,9 @@ All review and rescue commands support `--background`. Background jobs are track
 5. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
 6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
 
-Job inspection can also reconcile stale `queued`, `running`, or `cancelling` records. It only terminates an orphaned owned process after its recorded PID identity matches; healthy active jobs are left unchanged. `$cc:result` and JSON status access may additionally record that a terminal result was viewed.
+Public `status`, `result`, `workflow-read`, `workflow-list` and `peer-wait` output is capped at 8192 UTF-8 bytes, including JSON. JSON reports `truncated` and omissions; workflow lists wrap rows as `{workflows,total,truncated,omissions}`. Status/list/poll omit memo and result bodies. Use `--output <new-path>` for full public JSON (workflow-list exports an array): a new mode-0600 file is created exclusively and the receipt includes `outputFile`, `bytes` and `sha256`. Existing files and symlinks are refused. Read large exports in sections and remove temporary exports when finished.
+
+Job inspection can also reconcile stale `queued`, `running`, or `cancelling` records. It only terminates an orphaned owned process after its recorded PID identity matches; healthy active jobs are left unchanged. Successfully delivered complete `$cc:result` output or a full public JSON export may additionally record that a terminal result was viewed; status summaries and truncated previews leave notifications unread.
 
 **Typical background flow:**
 

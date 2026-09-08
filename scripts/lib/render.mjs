@@ -449,7 +449,7 @@ export function renderTaskResult(parsedResult) {
 }
 
 export function renderStatusReport(report) {
-  const rows = collectStatusRows(report).slice(0, 15);
+  const rows = collectStatusRows(report);
   if (rows.length === 0) return "No Claude Code jobs recorded yet.\n";
   return renderStatusTable(rows);
 }
@@ -469,7 +469,7 @@ function workflowNextCommand(workflow) {
 
 function workflowEvidenceSummary(branch) {
   const payload = branch?.payload ?? {};
-  return `repo=${payload.repoCitations?.length ?? 0}, web=${payload.webCitations?.length ?? 0}, tools=${payload.toolEvents?.length ?? 0}`;
+  return `repo=${branch?.evidenceCounts?.repo ?? payload.repoCitations?.length ?? 0}, web=${branch?.evidenceCounts?.web ?? payload.webCitations?.length ?? 0}, tools=${branch?.evidenceCounts?.tools ?? payload.toolEvents?.length ?? 0}`;
 }
 
 function fencedJson(value) {
@@ -515,7 +515,7 @@ function renderWorkflowDetails(workflow, options = {}) {
       "",
     ]);
   }
-  const claudeModel = workflow.branches?.claude?.payload?.model;
+  const claudeModel = workflow.branches?.claude?.model ?? workflow.branches?.claude?.payload?.model;
   if (claudeModel) {
     modelRows.push([
       "claude actual",
@@ -594,6 +594,11 @@ export function renderJobStatusReport(job, platform = process.platform) {
   pushKeyValueTableRow(lines, "Status", job.status ?? "unknown");
   pushKeyValueTableRow(lines, "Phase", job.phase ?? "");
   pushKeyValueTableRow(lines, "Summary", job.summary ?? "");
+  pushKeyValueTableRow(lines, "Failure", job.failure?.terminalCategory ?? job.failure?.kind ?? "");
+  pushKeyValueTableRow(lines, "Failure detail", job.failure?.message ?? job.errorMessage ?? "");
+  pushKeyValueTableRow(lines, "Requested model", job.requestedModel ?? "");
+  pushKeyValueTableRow(lines, "Final model", job.finalModel ?? "");
+  pushKeyValueTableRow(lines, "Context window", job.contextWindow ?? "");
   pushKeyValueTableRow(lines, "Started", job.startedAt ?? "");
   pushKeyValueTableRow(lines, "Ended", job.completedAt ?? "");
   if (isPendingJob(job)) pushKeyValueTableRow(lines, "Elapsed", job.elapsed ?? "");

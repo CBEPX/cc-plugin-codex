@@ -433,9 +433,11 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
       all.latestFinished,
       ...all.recent,
     ].filter(Boolean).some(({ workflowId }) => workflowId === created.workflow.id), true);
-    const checkpoint = runJson(testEnv, [
-      "result", created.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
+    const checkpointFile = path.join(testEnv.rootDir, "checkpoint-result.json");
+    runJson(testEnv, [
+      "result", created.workflow.id, "--cwd", testEnv.workspaceDir, "--output", checkpointFile, "--json",
     ]);
+    const checkpoint = JSON.parse(fs.readFileSync(checkpointFile, "utf8"));
     assert.equal(checkpoint.targetType, "workflow");
     assert.equal(checkpoint.workflow.phase, "checkpoint");
     assert.deepEqual(checkpoint.workflow.checkpoint.agreements, ["same"]);
@@ -459,9 +461,11 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     ], { input: attemptInput(synthesisLease, {
       recommendation: "Use the narrow path.",
     }) });
-    const finalResult = runJson(testEnv, [
-      "result", created.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
+    const finalFile = path.join(testEnv.rootDir, "final-result.json");
+    runJson(testEnv, [
+      "result", created.workflow.id, "--cwd", testEnv.workspaceDir, "--output", finalFile, "--json",
     ]);
+    const finalResult = JSON.parse(fs.readFileSync(finalFile, "utf8"));
     assert.equal(finalResult.workflow.currentOwnerSessionId, "owner-b");
     assert.equal(finalResult.workflow.finalResult.recommendation, "Use the narrow path.");
 
