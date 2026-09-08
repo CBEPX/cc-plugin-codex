@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## v1.7.5
+
+### Changed
+
+- Bound ordinary JSON from `status`, `result`, `workflow-read`, `workflow-list`, and `peer-wait` to 8192 bytes with explicit omissions; compact ordinary JSON is an intentionally accepted compatibility change. Add `--output <new-path>` to export full authorized JSON exclusively as a mode-0600 file with a SHA-256 receipt, while summary views and failed exports leave their result notifications unread.
+- Make worker and read recipes self-contained, require native web citations as `string[]` while accepting legacy input, and bound schema validation causes.
+
+### Fixed
+
+- Arm signal cleanup before temporary resource creation, isolate direct stateful test entrypoints, and fix full-mutation CI sharding and Node 24 artifact handling.
+
 ## v1.7.4
 
 ### Added

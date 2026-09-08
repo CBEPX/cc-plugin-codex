@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -376,7 +376,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
 codex plugin add cc@cbepx
 ```
 
@@ -397,8 +397,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
 ```
 
 After install, run:
@@ -430,7 +430,7 @@ Codex rejects re-adding an existing marketplace name when the pinned source/ref 
 ```bash
 codex plugin remove cc@cbepx
 codex plugin marketplace remove cbepx
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
 codex plugin add cc@cbepx
 ```
 
@@ -438,7 +438,7 @@ Restart Codex so the newly installed plugin is loaded, then run `$cc:setup` and 
 
 ### Maintainer release qualification (#27)
 
-This is an opt-in, credential-gated manual check against the installed exact `v1.7.4` tag and artifact. It is separate from hermetic CI and was not run as part of this documentation task. Record each result without printing secrets:
+This is an opt-in, credential-gated manual check against the installed exact `v1.7.5` tag and artifact. It is separate from hermetic CI and was not run as part of this documentation task. Record each result without printing secrets:
 
 - [ ] Record the exact tag, commit, artifact basename, byte size, and SHA-256; confirm the installed marketplace/plugin ref and cache metadata match.
 - [ ] Restart Codex, run `$cc:setup`, then run `$cc:setup --check`; record the read-only readiness result and confirm no `$cc:doctor` command is required.
