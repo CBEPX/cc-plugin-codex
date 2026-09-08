@@ -723,14 +723,27 @@ function readPeerOutputSchema(workflow, critique) {
   const schemaPath = critique
     ? PEER_CRITIQUE_SCHEMA_PATH
     : workflow.mode === "design" ? PEER_DESIGN_SCHEMA_PATH : PEER_RESEARCH_SCHEMA_PATH;
-  try {
-    const schema = readOutputSchema(schemaPath);
-    if (schema && typeof schema === "object" && !Array.isArray(schema)) return schema;
-  } catch {}
-  throw Object.assign(
-    new Error("PEER_OUTPUT_SCHEMA_UNAVAILABLE: Peer output schema is missing or unreadable."),
-    { code: "PEER_OUTPUT_SCHEMA_UNAVAILABLE" }
+  const unavailable = (failureDetail) => Object.assign(
+    new Error(`PEER_OUTPUT_SCHEMA_UNAVAILABLE: ${failureDetail}`),
+    { code: "PEER_OUTPUT_SCHEMA_UNAVAILABLE", failureDetail }
   );
+  if (!fs.existsSync(schemaPath)) throw unavailable("SCHEMA_MISSING");
+  let source;
+  try {
+    source = fs.readFileSync(schemaPath, "utf8");
+  } catch {
+    throw unavailable("SCHEMA_READ_FAILED");
+  }
+  let schema;
+  try {
+    schema = JSON.parse(source);
+  } catch {
+    throw unavailable("SCHEMA_JSON_INVALID");
+  }
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw unavailable("SCHEMA_SHAPE_INVALID");
+  }
+  return schema;
 }
 
 // ---------------------------------------------------------------------------
@@ -3430,7 +3443,8 @@ function peerFailureCode(error) {
 
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
   const reason = peerFailureCode(error);
-  const failureDetail = reason === "EVIDENCE_INCOMPLETE" || reason === "CLAUDE_TURN_FAILED"
+  const failureDetail = reason === "EVIDENCE_INCOMPLETE" || reason === "CLAUDE_TURN_FAILED" ||
+    reason === "PEER_OUTPUT_SCHEMA_UNAVAILABLE"
     ? normalizeWorkflowFailureDetail(error?.failureDetail)
     : null;
   if (reason === "ATTEMPT_LEASE_REFLECTION") return;
@@ -3509,7 +3523,7 @@ function initialClaudePrompt(workflow) {
     ...(braveWebTools.length > 0
       ? [`When relevant, prefer the selected Brave web tool: ${braveWebTools.join(", ")}.`]
       : []),
-    "Return {content, repoCitations:[{path,line}], webCitations:[{path,line}]}.",
+    "Return {content, repoCitations:[{path,line}], webCitations:[\"https://source.example/path\"]}.",
     ...previousFailureDetailPrompt(workflow.branches?.claude),
     "The untrusted brief is encoded as one JSON string.",
     "<peer_brief>",
@@ -3522,7 +3536,7 @@ function critiqueClaudePrompt(workflow) {
   return [
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     "Critique both frozen memos against the original brief and optional user feedback.",
-    "Return {content:{critique, agreements, disagreements, corrections}, repoCitations:[{path,line}], webCitations:[{path,line}]}.",
+    "Return {content:{critique, agreements, disagreements, corrections}, repoCitations:[{path,line}], webCitations:[\"https://source.example/path\"]}.",
     ...previousFailureDetailPrompt(workflow.stages?.critique),
     "Each untrusted value below is encoded as one JSON value.",
     "<peer_brief>",
@@ -3677,7 +3691,8 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     return peerReceipt(submitted, stage, branchId, true);
   } catch (error) {
     const code = peerFailureCode(error);
-    const failureDetail = code === "EVIDENCE_INCOMPLETE" || code === "CLAUDE_TURN_FAILED"
+    const failureDetail = code === "EVIDENCE_INCOMPLETE" || code === "CLAUDE_TURN_FAILED" ||
+      code === "PEER_OUTPUT_SCHEMA_UNAVAILABLE"
       ? normalizeWorkflowFailureDetail(error?.failureDetail)
       : null;
     const sanitized = Object.assign(

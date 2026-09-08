@@ -15,20 +15,20 @@ const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
 const COMPANION = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
 const cleanup = [];
 
-function writeMissingSchemaPreload(rootDir, unavailablePath) {
-  const filePath = path.join(rootDir, "missing-schema-preload.mjs");
+function writeSchemaPreload(rootDir, unavailablePath, scenario) {
+  const filePath = path.join(rootDir, `${scenario}-schema-preload.mjs`);
   fs.writeFileSync(filePath, `import fs from "node:fs";
 
 const target = ${JSON.stringify(unavailablePath)};
+const scenario = ${JSON.stringify(scenario)};
 const existsSync = fs.existsSync.bind(fs);
 const readFileSync = fs.readFileSync.bind(fs);
-fs.existsSync = (candidate) => candidate === target ? false : existsSync(candidate);
+fs.existsSync = (candidate) => candidate === target && scenario === "missing" ? false : existsSync(candidate);
 fs.readFileSync = (candidate, ...args) => {
   if (candidate === target) {
-    const error = new Error("ENOENT: no such file or directory, open " + target);
-    error.code = "ENOENT";
-    error.path = target;
-    throw error;
+    if (scenario === "unreadable") throw new Error("RAW_SCHEMA_READ_FAILURE " + target);
+    if (scenario === "malformed") return "{malformed";
+    if (scenario === "non-object") return "[]";
   }
   return readFileSync(candidate, ...args);
 };
@@ -77,6 +77,9 @@ function writeFakeClaude(binDir) {
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
+if (process.env.FAKE_CLAUDE_INVOCATION_LOG) {
+  fs.appendFileSync(process.env.FAKE_CLAUDE_INVOCATION_LOG, JSON.stringify(args) + "\\n");
+}
 const value = (flag) => {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : null;
@@ -153,7 +156,7 @@ async function main() {
   const marker = process.env.FAKE_CLAUDE_MARKER || "The repository and primary source agree.";
   const citations = {
     repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
-    webCitations: sparse ? [] : [{ path: "https://example.test/primary", line: 1 }],
+    webCitations: sparse ? [] : ["https://example.test/primary"],
   };
   const payload = critique
     ? {
@@ -726,6 +729,8 @@ describe("peer companion with fake Claude", () => {
       assert.deepEqual(JSON.parse(invocation.args[schemaIndex + 1]), JSON.parse(
         fs.readFileSync(path.join(PROJECT_ROOT, "schemas", file), "utf8")
       ));
+      assert.match(invocation.prompt, /webCitations:\["https:\/\/source\.example\/path"\]/u);
+      assert.doesNotMatch(invocation.prompt, /webCitations:\[\{path,line\}\]/u);
     }
   });
 
@@ -764,29 +769,49 @@ describe("peer companion with fake Claude", () => {
     assert.deepEqual(Object.keys(invocation.mcpConfig.mcpServers), ["brave-search"]);
   });
 
-  it("fails closed before spawning Claude when its output schema is missing", () => {
-    const testEnv = createEnvironment();
-    const schemaPath = path.join(PROJECT_ROOT, "schemas", "peer-design-output.schema.json");
-    const preloadDir = path.join(testEnv.rootDir, "preload with spaces");
-    fs.mkdirSync(preloadDir);
-    const preloadPath = writeMissingSchemaPreload(preloadDir, schemaPath);
-    const created = createPeer(testEnv);
-    const claudeLease = planLease(created, "_claude_");
-    const failed = run(testEnv, [
-      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash,
-      "--epoch", String(created.workflow.epoch), "--json",
-    ], {
-      input: attemptInput(claudeLease),
-      env: {
-        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preloadPath).href}`]
-          .filter(Boolean).join(" "),
-        FAKE_CLAUDE_SANDBOX_UNAVAILABLE: "1",
-      },
-    });
-    assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /PEER_OUTPUT_SCHEMA_UNAVAILABLE/);
-    assert.equal(fs.existsSync(testEnv.claudeLog), false);
+  it("reports bounded schema diagnostics and never invokes Claude", () => {
+    for (const [scenario, failureDetail] of [
+      ["missing", "SCHEMA_MISSING"],
+      ["unreadable", "SCHEMA_READ_FAILED"],
+      ["malformed", "SCHEMA_JSON_INVALID"],
+      ["non-object", "SCHEMA_SHAPE_INVALID"],
+    ]) {
+      const testEnv = createEnvironment();
+      const schemaPath = path.join(PROJECT_ROOT, "schemas", "peer-design-output.schema.json");
+      const preloadDir = path.join(testEnv.rootDir, "preload with spaces");
+      fs.mkdirSync(preloadDir);
+      const preloadPath = writeSchemaPreload(preloadDir, schemaPath, scenario);
+      const invocationLog = path.join(testEnv.rootDir, "all-claude-invocations.ndjson");
+      const created = createPeer(testEnv);
+      const claudeLease = planLease(created, "_claude_");
+      const failed = run(testEnv, [
+        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], {
+        input: attemptInput(claudeLease),
+        env: {
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preloadPath).href}`]
+            .filter(Boolean).join(" "),
+          FAKE_CLAUDE_INVOCATION_LOG: invocationLog,
+        },
+      });
+      assert.notEqual(failed.status, 0, scenario);
+      assert.match(failed.stderr, new RegExp(`PEER_OUTPUT_SCHEMA_UNAVAILABLE: ${failureDetail}`, "u"));
+      assert.doesNotMatch(failed.stderr, /RAW_SCHEMA_READ_FAILURE|peer-design-output\.schema\.json/u);
+      assert.equal(fs.existsSync(invocationLog), false, scenario);
+      assert.equal(fs.existsSync(testEnv.claudeLog), false, scenario);
+      const outputFile = path.join(testEnv.rootDir, `${scenario}-workflow.json`);
+      const receipt = runJson(testEnv, [
+        "workflow-read", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--output", outputFile, "--json",
+      ]);
+      assert.equal(receipt.outputFile, outputFile, scenario);
+      const stored = JSON.parse(fs.readFileSync(outputFile, "utf8"));
+      assert.equal(stored.status, "incomplete", scenario);
+      assert.equal(stored.branches.claude.failureReason, "PEER_OUTPUT_SCHEMA_UNAVAILABLE", scenario);
+      assert.equal(stored.branches.claude.failureDetail, failureDetail, scenario);
+    }
   });
 
   it("uses native structured output when final text is invalid JSON", () => {
@@ -1709,6 +1734,8 @@ describe("peer companion with fake Claude", () => {
       assert.deepEqual(JSON.parse(invocation.args[schemaIndex + 1]), JSON.parse(
         fs.readFileSync(path.join(PROJECT_ROOT, "schemas", file), "utf8")
       ));
+      assert.match(invocation.prompt, /webCitations:\["https:\/\/source\.example\/path"\]/u);
+      assert.doesNotMatch(invocation.prompt, /webCitations:\[\{path,line\}\]/u);
     }
     assert.ok(critique.args.includes("--no-session-persistence"));
     assert.equal(critique.args.includes("--resume"), false);
