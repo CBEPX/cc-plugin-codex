@@ -1,3 +1,5 @@
+import "./test-env.mjs";
+
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
