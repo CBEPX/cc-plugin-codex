@@ -366,7 +366,16 @@ fs.appendFileSync(process.env.CC_PEER_CAPTURE, JSON.stringify({
       fs.writeFileSync(mktempPath, `#!/usr/bin/env node
 const fs = require("node:fs");
 fs.writeFileSync(process.env.CC_PEER_TEMP_PATH, "", { flag: "wx", mode: 0o600 });
-process.stdout.write(process.env.CC_PEER_TEMP_PATH);
+const finish = () => process.stdout.write(process.env.CC_PEER_TEMP_PATH);
+if (process.env.CC_PEER_MKTEMP_READY) {
+  fs.writeFileSync(process.env.CC_PEER_MKTEMP_READY, JSON.stringify({
+    pid: process.pid,
+    parentPid: process.ppid,
+  }));
+  setTimeout(finish, 250);
+} else {
+  finish();
+}
 `, "utf8");
       fs.chmodSync(mktempPath, 0o755);
       fs.writeFileSync(companionPath, `import fs from "node:fs";
@@ -429,6 +438,29 @@ fs.appendFileSync(process.env.CC_PEER_CAPTURE, JSON.stringify(input) + "\\n");
       const normalPhase = JSON.parse(fs.readFileSync(normalReady, "utf8"));
       assert.equal(normalPhase.mode, 0o600);
       assert.equal(fs.existsSync(normalPhase.inputPath), false, normalPhase.inputPath);
+
+      const creationReady = path.join(root, "creation.ready");
+      const creationCapture = path.join(root, "creation.ndjson");
+      const creationInput = path.join(tempDir, "creation-input.json");
+      const creation = spawn("sh", ["-c", recipe], {
+        cwd: root,
+        env: {
+          ...process.env,
+          CC_PEER_CAPTURE: creationCapture,
+          CC_PEER_MKTEMP_READY: creationReady,
+          CC_PEER_TEMP_PATH: creationInput,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+        },
+        stdio: "ignore",
+      });
+      const creationExited = waitForExit(creation);
+      await waitForFile(creationReady);
+      const creationPhase = JSON.parse(fs.readFileSync(creationReady, "utf8"));
+      assert.equal(fs.statSync(creationInput).mode & 0o777, 0o600);
+      process.kill(creationPhase.parentPid, "SIGTERM");
+      assert.deepEqual(await creationExited, { code: 143, signal: null });
+      assert.equal(fs.existsSync(creationInput), false);
+      assert.equal(fs.existsSync(creationCapture), false);
 
       for (const [signal, exitCode] of [["SIGHUP", 129], ["SIGINT", 130], ["SIGTERM", 143]]) {
         const ready = path.join(root, `${signal}.ready`);
