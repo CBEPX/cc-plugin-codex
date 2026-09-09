@@ -859,3 +859,43 @@ describe("resolveResultJob", () => {
     });
   });
 });
+
+
+describe("resolveCancelableJob", () => {
+  it("selects the sole running or queued job and excludes inactive jobs", () => {
+    for (const status of ["running", "queued"]) {
+      withTempJobRepo((repoDir) => {
+        const createdAt = new Date().toISOString();
+        for (const inactive of ["completed", "failed", "cancelled", "cancelling", "cancel_failed"]) {
+          writeJobAt(repoDir, { id: `inactive-${inactive}`, status: inactive, createdAt });
+        }
+        assert.throws(() => resolveCancelableJob(repoDir), /No active Claude Code jobs/);
+        writeJobAt(repoDir, { id: "cancel-only", status, createdAt });
+        for (const reference of [undefined, "cancel-only", "cancel-o"]) {
+          const selected = resolveCancelableJob(repoDir, reference);
+          assert.equal(selected.job.id, "cancel-only");
+          assert.equal(selected.job.status, status);
+          assert.equal(fs.realpathSync(selected.workspaceRoot), fs.realpathSync(repoDir));
+        }
+        for (const inactive of ["completed", "failed", "cancelled", "cancelling", "cancel_failed"]) {
+          assert.throws(() => resolveCancelableJob(repoDir, `inactive-${inactive}`), /No active job/);
+        }
+      });
+    }
+  });
+
+  it("requires an unambiguous active reference when several jobs can be cancelled", () => {
+    withTempJobRepo((repoDir) => {
+      const createdAt = new Date().toISOString();
+      assert.throws(() => resolveCancelableJob(repoDir), /No active Claude Code jobs/);
+      for (const [id, status] of [["cancel-alpha", "running"], ["cancel-beta", "queued"]]) {
+        writeJobAt(repoDir, { id, status, createdAt });
+      }
+      assert.throws(() => resolveCancelableJob(repoDir), /Multiple Claude Code jobs/);
+      assert.throws(() => resolveCancelableJob(repoDir, "cancel-"), /ambiguous/);
+      assert.throws(() => resolveCancelableJob(repoDir, "cancel-missing"), /No job found/);
+      assert.equal(resolveCancelableJob(repoDir, "cancel-alpha").job.id, "cancel-alpha");
+      assert.equal(resolveCancelableJob(repoDir, "cancel-b").job.id, "cancel-beta");
+    });
+  });
+});
