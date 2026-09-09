@@ -132,6 +132,7 @@ async function main() {
   }) + "\\n");
   tool("Read", { file_path: process.env.FAKE_REPO_FILE });
   if (!sparse) tool("WebSearch", { query: "primary documentation" });
+  for (const name of JSON.parse(process.env.FAKE_CLAUDE_EXTRA_TOOLS || "[]")) tool(name, {});
   if (process.env.FAKE_CLAUDE_DELTA_MARKER) {
     process.stdout.write(JSON.stringify({
       type: "stream_event",
@@ -498,6 +499,59 @@ afterEach(() => {
 });
 
 describe("peer companion with fake Claude", () => {
+  for (const stage of ["memo", "critique"]) {
+    for (const tools of [["Bash"], ["Bash", ...Array(255).fill("Read"), "WebSearch"], ["Agent"], ["Write"], ["mcp__docs__other"], ["mcp__docs__search_extra"], ["ToolSearchExtra"], ["mcp__docs__search", "ToolSearch", "StructuredOutput"]]) {
+      it(`${stage} enforces actual tool boundary for ${tools.length > 3 ? "Bash before bounded tail" : tools.join(", ")}`, () => {
+        const testEnv = createEnvironment();
+        writeFakeMcp(testEnv.rootDir, "docs", ["search", "other", "search_extra"].map((name) => ({
+          name, description: "Public documentation", annotations: { readOnlyHint: true },
+        })));
+        const created = createPeer(testEnv);
+        submitCodexMemo(testEnv, created);
+        let lease = planLease(created, "_claude_");
+        if (stage === "critique") {
+          const workflow = readWorkflow(testEnv, created.workflow.id);
+          lease = "c".repeat(64);
+          workflow.phase = "critique";
+          workflow.branches.claude.payload = { content: { findings: ["Frozen memo"] } };
+          workflow.stages.critique.attemptReservation = {
+            leaseDigest: createHash("sha256").update(lease).digest("hex"),
+            epoch: workflow.epoch, reservedAt: workflow.updatedAt, previousFailureDetail: null,
+          };
+          writeWorkflow(testEnv, workflow);
+        }
+        const result = run(testEnv, [
+          stage === "memo" ? "peer-claude-turn" : "peer-claude-critique",
+          created.workflow.id, "--cwd", testEnv.workspaceDir,
+          "--brief-hash", created.workflow.briefHash,
+          "--epoch", String(created.workflow.epoch), "--json",
+        ], { input: attemptInput(lease), env: { FAKE_CLAUDE_EXTRA_TOOLS: JSON.stringify(tools) } });
+        const stored = readWorkflow(testEnv, created.workflow.id);
+        const target = stage === "memo" ? stored.branches.claude : stored.stages.critique;
+        if (tools[0] !== "mcp__docs__search") {
+          assert.notEqual(result.status, 0, result.stdout);
+          assert.match(result.stderr, /EVIDENCE_INCOMPLETE/u);
+          assert.equal(target.failureDetail, "TOOL_EVENT_NOT_ALLOWED");
+          assert.equal(target.commitment ?? null, null);
+          assert.equal(target.payload ?? null, null);
+          assert.equal(stored.critique ?? null, null);
+        } else {
+          assert.equal(result.status, 0, result.stderr);
+          const payload = stage === "memo" ? target.payload : stored.critique;
+          assert.deepEqual(payload.toolEvents.map(({ tool }) => tool), ["Read", "WebSearch", ...tools]);
+        }
+        const invocation = JSON.parse(fs.readFileSync(testEnv.claudeLog, "utf8").trim());
+        assert.equal(invocation.args[invocation.args.indexOf("--tools") + 1], "Read,Glob,Grep,WebSearch,WebFetch,ToolSearch");
+        assert.deepEqual(invocation.args.flatMap((value, index, args) => args[index - 1] === "--allowedTools" ? [value] : []),
+          ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "mcp__docs__search"]);
+        assert.deepEqual(invocation.args.flatMap((value, index, args) => args[index - 1] === "--disallowedTools" ? [value] : []),
+          ["mcp__docs__other", "mcp__docs__search_extra"]);
+        assert.ok(invocation.args.includes("--strict-mcp-config"));
+        assert.equal(invocation.args.includes("--bare"), false);
+        assert.equal(invocation.settings.disableAllHooks, true);
+      });
+    }
+  }
   it("accepts a large piped memo and returns bounded peer receipts", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);

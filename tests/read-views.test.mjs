@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, it } from "node:test";
 import { writeJobFile, readJobFile, resolveStateDir } from "../scripts/lib/state.mjs";
 import { buildInitialAgentPlan, buildRetryAgentPlan, buildContinuationAgentPlan } from "../scripts/lib/peer-orchestration.mjs";
@@ -35,7 +36,7 @@ function fixture() {
   return { root, job, workflow, workflowFile };
 }
 function run(root, args, extra = {}) {
-  return spawnSync(process.execPath, [companion, ...args, "--cwd", root], { encoding: "utf8", env: { ...process.env, CODEX_THREAD_ID: "", CLAUDE_COMPANION_SESSION_ID: "" }, maxBuffer: 20 * 1024 * 1024, ...extra });
+  return spawnSync(process.execPath, [companion, ...args, "--cwd", root], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024, ...extra, env: { ...process.env, ...extra.env, CODEX_THREAD_ID: "", CLAUDE_COMPANION_SESSION_ID: "" } });
 }
 function json(root, args) {
   const result = run(root, [...args, "--json"]);
@@ -120,6 +121,9 @@ it("bounds --all lists and reports how many records were omitted", () => {
   for (let index = 0; index < 50; index++) {
     writeJobFile(root, `job-${index}`, { ...job, id: `job-${index}`, title: "長".repeat(20000), result: { finalMessage: "done" } });
   }
+  const overview = json(root, ["status"]);
+  assert.match(overview.nextStep, /--all/u);
+  assert.match(overview.nextStep, /--output/u);
   for (const format of [[], ["--json"]]) {
     const result = run(root, ["status", "--all", ...format]);
     assert.equal(result.status, 0, result.stderr);
@@ -144,7 +148,7 @@ fs.writeFileSync = function(file, ...args) {
   }
   return write.call(this, file, ...args);
 };`);
-  const result = run(root, ["result", job.id, "--output", output, "--json"], { env: { ...process.env, NODE_OPTIONS: `--import=${preload}` } });
+  const result = run(root, ["result", job.id, "--output", output, "--json"], { env: { NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${pathToFileURL(preload).href}` } });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /injected disk full/u);
   assert.equal(fs.existsSync(output), false);
@@ -213,6 +217,7 @@ it("keeps globally resolved linked jobs private in their owning workflow before 
   const output = path.join(other, "global.json");
   json(other, ["result", job.id, "--output", output]);
   assert.equal(fs.readFileSync(output, "utf8").includes("SIBLING_SECRET"), false);
+  assert.match(fs.readFileSync(output, "utf8"), /codex-memo-unsealed/u);
   assert.equal(readJobFile(root, job.id).resultViewedAt, null);
 });
 it("retains failure and model information in a status summary while withholding result bodies", () => {
@@ -253,4 +258,75 @@ it("exposes workflow readiness, evidence counts and actual model without memo bo
   const human = run(root, ["status", workflow.id]);
   assert.match(human.stdout, /opus/u);
   assert.equal(human.stdout.includes("MODEL_MEMO_BODY"), false);
+});
+
+
+it("delivers and acknowledges linked results for valid generic owning workflows", () => {
+  const { root, job } = fixture();
+  for (const branches of [[], ["researcher"]]) {
+    const workflow = reserveWorkflow(root, {
+      id: branches.length ? "generic-branched" : "generic-empty", mode: "design",
+      brief: "Generic tracked work", originSessionId: "reader", stages: ["memo"], branches,
+    });
+    for (const exportResult of [false, true]) {
+      const result = { finalMessage: "Complete generic workflow result" };
+      writeJobFile(root, job.id, {
+        ...job, workflowId: workflow.id, workflowStage: "memo", jobClass: "workflow", result,
+      });
+      const output = path.join(root, `${workflow.id}.json`);
+      const receipt = json(root, ["result", job.id, ...(exportResult ? ["--output", output] : [])]);
+      const view = exportResult ? JSON.parse(fs.readFileSync(output, "utf8")) : receipt;
+      assert.equal(view.storedJob.result.finalMessage, result.finalMessage);
+      assert.equal(view.storedJob.withheld, undefined);
+      assert.ok(readJobFile(root, job.id).resultViewedAt);
+    }
+  }
+});
+
+it("withholds linked job payloads when their owning workflow is missing or unreadable", () => {
+  const { root, job, workflow, workflowFile } = fixture();
+  writeJobFile(root, job.id, { ...job, workflowId: workflow.id, workflowBranch: "claude",
+    summary: "SIBLING_SECRET", result: { finalMessage: "SIBLING_SECRET" } });
+  for (const record of [null, "invalid JSON", "{}"] ) {
+    if (record === null) fs.unlinkSync(workflowFile);
+    else fs.writeFileSync(workflowFile, record);
+    for (const args of [["status", "--all"], ["status", job.id], ["result", job.id]]) {
+      for (const format of [[], ["--json"]]) {
+        const result = run(root, [...args, ...format]);
+        assert.equal(result.status, 0, result.stderr);
+        assert.doesNotMatch(result.stdout, /SIBLING_SECRET/u);
+        if (format.length) JSON.parse(result.stdout);
+      }
+      const output = path.join(root, `orphan-${Math.random()}.json`);
+      json(root, [...args, "--output", output]);
+      assert.doesNotMatch(fs.readFileSync(output, "utf8"), /SIBLING_SECRET/u);
+      assert.match(fs.readFileSync(output, "utf8"), /workflow-unavailable/u);
+      assert.equal(readJobFile(root, job.id).resultViewedAt, null);
+    }
+  }
+});
+
+it("delivers a result without crashing when the stored job disappears after selection", () => {
+  const { root, job } = fixture();
+
+  const preload = path.join(root, "remove-after-read.mjs");
+  fs.writeFileSync(preload, `import fs from "node:fs";
+import path from "node:path";
+const read = fs.readFileSync;
+fs.readFileSync = function(file, ...args) {
+  const data = read.call(this, file, ...args);
+  if (path.basename(String(file)) === "large-job.json" && path.basename(path.dirname(String(file))) === "jobs") fs.unlinkSync(file);
+  return data;
+};`);
+  for (const format of [[], ["--json"]]) {
+    writeJobFile(root, job.id, { ...job, result: { finalMessage: "selected answer" } });
+    const result = run(root, ["result", job.id, ...format], { env: { NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${pathToFileURL(preload).href}` } });
+    assert.equal(result.status, 0, result.stderr);
+    if (format.length) {
+      const view = JSON.parse(result.stdout);
+      assert.equal(view.job.result.finalMessage, "selected answer");
+      assert.equal(view.storedJob, null);
+    } else assert.match(result.stdout, /selected answer/u);
+    assert.equal(readJobFile(root, job.id), null);
+  }
 });

@@ -223,6 +223,7 @@ describe("sandbox settings lifecycle", () => {
       );
       const content = JSON.parse(fs.readFileSync(f, "utf8"));
       assert.deepEqual(content, SANDBOX_SETTINGS["read-only"]);
+      assert.equal(content.disableAllHooks, undefined);
       cleanupSandboxSettings(f);
     });
   });
@@ -238,6 +239,7 @@ describe("sandbox settings lifecycle", () => {
       );
       const content = JSON.parse(fs.readFileSync(f, "utf8"));
       assert.deepEqual(content, SANDBOX_SETTINGS["workspace-write"]);
+      assert.equal(content.disableAllHooks, undefined);
       cleanupSandboxSettings(f);
     });
   });
@@ -422,4 +424,19 @@ describe("buildArgs review mode", () => {
     const allowed = argsAllowedTools(args);
     assert.deepEqual([...allowed].sort(), [...SANDBOX_REVIEW_TOOLS].sort());
   });
+});
+
+it("buildArgs opts into builtin selection without changing ordinary callers", () => {
+  const args = buildArgs("p", { tools: ["Read", "Grep"] });
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Grep");
+  assert.equal(buildArgs("p").includes("--tools"), false);
+  const empty = buildArgs("p", { tools: [] });
+  assert.equal(empty[empty.indexOf("--tools") + 1], "");
+});
+
+it("buildArgs opts into exact tool denials without changing ordinary callers", () => {
+  const args = buildArgs("p", { disallowedTools: ["mcp__docs__other", "mcp__docs__write"] });
+  assert.deepEqual(args.flatMap((value, index) => args[index - 1] === "--disallowedTools" ? [value] : []),
+    ["mcp__docs__other", "mcp__docs__write"]);
+  assert.equal(buildArgs("p").includes("--disallowedTools"), false);
 });

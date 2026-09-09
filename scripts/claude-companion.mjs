@@ -3147,7 +3147,7 @@ async function handleResult(argv) {
   await outputRead({ job, storedJob, state }, options, {
     render: (view) => state === "active" ? renderJobStatusReport(view.job) : renderStoredJobResult(view.job, view.storedJob),
     acknowledge: state === "active" ? null : (view) => {
-      if (view.storedJob.result || !job.workflowId) markTerminalJobViewed(workspaceRoot, job.id);
+      if (view.storedJob?.result || !job.workflowId) markTerminalJobViewed(workspaceRoot, job.id);
     },
   });
 }
@@ -3409,6 +3409,8 @@ function validatePeerSelection(discovery, workflow) {
     }
     return {
       selection,
+      disallowedTools: probeResult.catalog.map(({ toolId }) => toolId)
+        .filter((toolId) => !selected.has(toolId)),
       servers: buildSelectedMcpServers(selectedDiscovery, selection),
     };
   });
@@ -3572,11 +3574,18 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     const discovery = collectConfiguredMcpServers(cwd, {
       allowProjectMcpServers: workflow.toolManifest.some(({ source }) => source === "project"),
     });
-    const { selection, servers } = await validatePeerSelection(discovery, workflow);
+    const { selection, servers, disallowedTools } = await validatePeerSelection(discovery, workflow);
     sandboxSettingsFile = createSandboxSettings("peer-read-only", {
       workspaceRoot: workflow.workspaceRoot,
     });
     mcpConfigFile = createStrictMcpConfig(servers);
+    const permittedTools = new Set([
+      ...PEER_CLAUDE_ALLOWED_BASE_TOOLS,
+      ...workflow.toolManifest.map(({ toolId }) => toolId),
+      "ToolSearch",
+      "StructuredOutput",
+    ]);
+    let toolViolation = false;
     const result = await runClaudeTurn(
       workflow.workspaceRoot,
       critique ? critiqueClaudePrompt(workflow) : initialClaudePrompt(workflow),
@@ -3585,6 +3594,8 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         fallbackModel: peerModelValue(workflow, "claude-fallback") ?? "opus",
         effort: peerModelValue(workflow, "claude-effort") ?? undefined,
         noSessionPersistence: true,
+        tools: [...PEER_CLAUDE_ALLOWED_BASE_TOOLS, "ToolSearch"],
+        disallowedTools,
         allowedTools: [
           ...PEER_CLAUDE_ALLOWED_BASE_TOOLS,
           ...selection.selected.map(({ toolId }) => toolId),
@@ -3595,7 +3606,10 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         strictMcpConfig: true,
         jsonSchema,
         systemPrompt: peerClaudeSystemPrompt(),
-        onProgress: options.onProgress,
+        onProgress: (event) => {
+          if (event.kind === "tool_use" && !permittedTools.has(event.tool)) toolViolation = true;
+          options.onProgress?.(event);
+        },
         onSpawn: options.onSpawn,
       }
     );
@@ -3628,6 +3642,12 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         );
       }
       throw new Error(result.failure?.kind ?? result.warning ?? "CLAUDE_TURN_FAILED");
+    }
+    if (toolViolation) {
+      throw Object.assign(
+        new Error("EVIDENCE_INCOMPLETE: Claude used a tool outside the frozen peer selection."),
+        { code: "EVIDENCE_INCOMPLETE", failureDetail: "TOOL_EVENT_NOT_ALLOWED" }
+      );
     }
     const parsed = parsePeerClaudePayload(result, critique ? "Claude critique" : "Claude memo");
     if (critique && (

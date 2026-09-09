@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- Restrict peer builtins explicitly, disable ordinary Claude hooks for peer turns (managed administrator hooks remain governed by policy), and reject out-of-selection tool events before accepting memos or critiques; explain withheld linked job output when its workflow is unavailable or the Codex memo is unsealed.
+
 - Arm signal cleanup before temporary resource creation, isolate direct stateful test entrypoints, split state and tracked-job mutation targets across eight full-mutation CI shards, and use Node 24 artifact handling.
 
 ## v1.7.4

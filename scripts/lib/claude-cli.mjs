@@ -1219,6 +1219,7 @@ export function buildPeerSandboxSettings(workspaceRoot, options = {}) {
     const allowedWorkspace = normalizePathSlashes(workspace);
     const protectedReads = [codexHome, claudeProjects].map(normalizePathSlashes);
     return {
+      disableAllHooks: true,
       permissions: {
         deny: protectedReads.map((protectedPath) => `Read(${protectedPath}/**)`),
       },
@@ -1470,7 +1471,7 @@ export function resolveEffort(effort) {
 /** @visibleForTesting */
 export function buildArgs(prompt, options = {}) {
   const args = ["-p"];
-  // No --bare: it breaks OAuth auth. Isolation is achieved via --allowedTools.
+  // No --bare: it breaks OAuth auth. Peer callers explicitly select builtins.
 
   if (options.outputFormat === "stream-json") {
     args.push(
@@ -1507,10 +1508,16 @@ export function buildArgs(prompt, options = {}) {
   if (options.forkSession) {
     args.push("--fork-session");
   }
+  if (options.tools) {
+    args.push("--tools", options.tools.join(","));
+  }
   if (options.allowedTools) {
     for (const tool of options.allowedTools) {
       args.push("--allowedTools", tool);
     }
+  }
+  for (const tool of options.disallowedTools ?? []) {
+    args.push("--disallowedTools", tool);
   }
   if (options.maxTurns) {
     args.push("--max-turns", String(options.maxTurns));

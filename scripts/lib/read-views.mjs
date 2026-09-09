@@ -22,11 +22,13 @@ export function publicReadPayload(value, lookupWorkflow = () => null) {
       ? { id: value.id, ...wait }
       : { ...value, readyForCheckpoint: wait.readyForCheckpoint, terminalIncomplete: wait.terminalIncomplete };
   } else if (value.workflowId && value.id) {
-    const workflow = lookupWorkflow(value.workflowId, value.workspaceRoot);
-    if (isPeerWorkflow(workflow) && workflow.branches.codex.status !== "completed") {
+    let workflow = null;
+    try { workflow = lookupWorkflow(value.workflowId, value.workspaceRoot); } catch {}
+    if (!workflow || (isPeerWorkflow(workflow) && workflow.branches.codex.status !== "completed")) {
       // Old linked job records may contain sibling output in arbitrary text fields.
       value = Object.fromEntries(["id", "workflowId", "status", "phase", "kind", "jobClass", "workspaceRoot"]
         .filter((key) => key in value).map((key) => [key, value[key]]));
+      value.withheld = workflow ? "codex-memo-unsealed" : "workflow-unavailable";
     }
   }
   return Object.fromEntries(Object.entries(value)
@@ -72,13 +74,16 @@ function project(value, omissions, limits, summary, location = "", depth = 0) {
 
 export function boundedReadView(payload, { summary = false, render = null, asJson = true } = {}) {
   const source = Array.isArray(payload) ? { workflows: payload, total: payload.length } : payload;
+  const nextStep = (source.omittedJobs ?? 0) + (source.omittedWorkflows ?? 0) > 0
+    ? "Use --all to include omitted records, with --output <new-path> for the complete public JSON payload."
+    : "Use --output <new-path> for the complete public JSON payload.";
   let limits = { string: Infinity, items: Infinity };
   while (true) {
     const omissions = { fields: 0, fieldNames: [], records: (source.omittedJobs ?? 0) + (source.omittedWorkflows ?? 0), strings: 0 };
     const projected = project(source, omissions, limits, summary);
     const truncated = omissions.fields + omissions.records + omissions.strings > 0;
     const view = { ...projected, truncated, omissions,
-      ...(truncated ? { nextStep: "Use --output <new-path> for the complete public JSON payload." } : {}) };
+      ...(truncated ? { nextStep } : {}) };
     const json = JSON.stringify(view, null, 2) + "\n";
     if (Buffer.byteLength(json) <= PUBLIC_READ_BYTES) {
       let text = json;
@@ -94,7 +99,7 @@ export function boundedReadView(payload, { summary = false, render = null, asJso
       : { string: Math.floor(limits.string / 2), items: Math.floor(limits.items / 2) };
     if (limits.string === 0 && limits.items === 0) {
       // An unusually wide historical object can exceed the cap even with empty values.
-      const view = { truncated: true, omissions: { fields: Object.keys(source).length, records: Array.isArray(payload) ? payload.length : 0 }, nextStep: "Use --output <new-path> for the complete public JSON payload." };
+      const view = { truncated: true, omissions: { fields: Object.keys(source).length, records: Array.isArray(payload) ? payload.length : 0 }, nextStep };
       return { view, text: JSON.stringify(view, null, 2) + "\n", complete: false };
     }
   }
