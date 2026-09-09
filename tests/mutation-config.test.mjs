@@ -120,6 +120,29 @@ test("Windows lifecycle gate patterns stay aligned with their tests", () => {
   }
 });
 
+test("state mutation targets are split by source file without changing their test command", async () => {
+  const previous = process.env.CC_MUTATION_SHARD;
+  const load = async (shard) => {
+    process.env.CC_MUTATION_SHARD = shard;
+    return (await import(`../stryker.shard.config.mjs?test-shard=${shard}`)).default;
+  };
+
+  try {
+    const state = await load("state");
+    const trackedJobs = await load("tracked-jobs");
+
+    assert.deepEqual(state.mutate, expectations.slice(5, 12).map(([target]) => target));
+    assert.deepEqual(trackedJobs.mutate, expectations.slice(12, 15).map(([target]) => target));
+    assert.equal(state.commandRunner.command, "npm run test:mutation:state:unit");
+    assert.equal(trackedJobs.commandRunner.command, state.commandRunner.command);
+    assert.equal(state.thresholds.break, 55);
+    assert.equal(trackedJobs.thresholds.break, 55);
+  } finally {
+    if (previous === undefined) delete process.env.CC_MUTATION_SHARD;
+    else process.env.CC_MUTATION_SHARD = previous;
+  }
+});
+
 test("full mutation runs every force shard independently and merges available reports", () => {
   const workflow = readWorkflow("mutation.yml");
   const full = workflowJob(workflow, "full");
@@ -128,6 +151,7 @@ test("full mutation runs every force shard independently and merges available re
     ["render", "test:mutation:shard:render:force"],
     ["claude-cli", "test:mutation:shard:claude-cli:force"],
     ["state", "test:mutation:shard:state:force"],
+    ["tracked-jobs", "test:mutation:shard:tracked-jobs:force"],
     ["job-control", "test:mutation:shard:job-control:force"],
     ["managed", "test:mutation:shard:managed:force"],
     ["installer", "test:mutation:shard:installer:force"],

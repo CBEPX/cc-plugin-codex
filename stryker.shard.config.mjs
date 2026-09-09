@@ -28,6 +28,11 @@ const shards = {
       "scripts/lib/state.mjs:937-1109",
       "scripts/lib/state.mjs:1175-1240",
       "scripts/lib/state.mjs:1246-1292",
+    ],
+  },
+  "tracked-jobs": {
+    command: "npm run test:mutation:state:unit",
+    mutate: [
       "scripts/lib/tracked-jobs.mjs:30-78",
       "scripts/lib/tracked-jobs.mjs:308-392",
       "scripts/lib/tracked-jobs.mjs:411-544",

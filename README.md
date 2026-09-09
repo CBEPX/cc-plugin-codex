@@ -519,7 +519,7 @@ npm run test:mutation
 npm run test:mutation:force
 ```
 
-`test:mutation` checks the critical parser contracts plus managed cleanup and installer orchestration. `test:mutation:force` runs all seven shards, matching the weekly/manual workflow. Scores below each configured break threshold fail the command, and reports are written under `reports/mutation/`. Use the force variant after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; improve the focused tests or use a `// Stryker disable ...: reason` comment only for an intentional equivalent mutant.
+`test:mutation` checks the critical parser contracts plus managed cleanup and installer orchestration. `test:mutation:force` runs all eight shards, matching the weekly/manual workflow. Scores below each configured break threshold fail the command, and reports are written under `reports/mutation/`. Use the force variant after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; improve the focused tests or use a `// Stryker disable ...: reason` comment only for an intentional equivalent mutant.
 
 Mutation testing requires Node.js 20+ because Stryker 9 has a newer development-time engine requirement. The plugin runtime still supports the Node.js version listed in the prerequisites.
 

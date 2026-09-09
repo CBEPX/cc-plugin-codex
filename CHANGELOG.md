@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- Arm signal cleanup before temporary resource creation, isolate direct stateful test entrypoints, and fix full-mutation CI sharding and Node 24 artifact handling.
+- Arm signal cleanup before temporary resource creation, isolate direct stateful test entrypoints, split state and tracked-job mutation targets across eight full-mutation CI shards, and use Node 24 artifact handling.
 
 ## v1.7.4
 

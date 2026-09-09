@@ -47,6 +47,8 @@ jobs:
             script: test:mutation:shard:claude-cli:force
           - shard: state
             script: test:mutation:shard:state:force
+          - shard: tracked-jobs
+            script: test:mutation:shard:tracked-jobs:force
           - shard: job-control
             script: test:mutation:shard:job-control:force
           - shard: managed
