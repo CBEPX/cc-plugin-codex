@@ -29,6 +29,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { boundedReadView, exportReadPayload, publicReadPayload } from "./lib/read-views.mjs";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
 import {
@@ -239,8 +240,8 @@ function printUsage() {
       "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
       "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--workflow-id <id> --workflow-stage <stage>] [--wait-timeout-ms <ms>] [prompt]",
       "  node scripts/claude-companion.mjs transfer [--source <claude-jsonl>] [--json]",
-      "  node scripts/claude-companion.mjs status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--poll-interval-ms <ms>] [--json]",
-      "  node scripts/claude-companion.mjs result [job-id] [--json]",
+      "  node scripts/claude-companion.mjs status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--poll-interval-ms <ms>] [--output <path>] [--json]",
+      "  node scripts/claude-companion.mjs result [job-id] [--output <path>] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
       "  node scripts/claude-companion.mjs mcp-diagnose [--cwd <path>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [--no-auto-tools] [--json]",
       "  node scripts/claude-companion.mjs session-routing-context [--cwd <path>] [--json]",
@@ -249,8 +250,8 @@ function printUsage() {
       "  node scripts/claude-companion.mjs task-reserve-job [--json]",
       "  node scripts/claude-companion.mjs review-reserve-job [--json]",
       "  node scripts/claude-companion.mjs workflow-create [--cwd <path>] [--json] < workflow.json",
-      "  node scripts/claude-companion.mjs workflow-read <workflow-id> [--mode <design|research>] [--json]",
-      "  node scripts/claude-companion.mjs workflow-list [--mode <design|research>] [--json]",
+      "  node scripts/claude-companion.mjs workflow-read <workflow-id> [--mode <design|research>] [--output <path>] [--json]",
+      "  node scripts/claude-companion.mjs workflow-list [--mode <design|research>] [--output <path>] [--json]",
       "  node scripts/claude-companion.mjs workflow-submit-stage <workflow-id> --stage <stage> --revision <n> --epoch <n> [--branch <id>] [--field <field>] [--json] < payload.json",
       "  node scripts/claude-companion.mjs workflow-fail-branch <workflow-id> --stage <stage> --revision <n> --epoch <n> --reason <reason> [--branch <id>] [--cancel-failed] [--json]",
       "  node scripts/claude-companion.mjs workflow-retry-context <workflow-id> --retry [--required-stage <stage>...] [--required-branch <id>...] [--json]",
@@ -260,7 +261,7 @@ function printUsage() {
       "  node scripts/claude-companion.mjs peer-activate-attempt <workflow-id> --stage <stage> [--branch <id>] --epoch <n> < attempt.json",
       "  node scripts/claude-companion.mjs peer-submit-memo <workflow-id> --branch codex --brief-hash <hash> --epoch <n> < attempt.json",
       "  node scripts/claude-companion.mjs peer-claude-turn <workflow-id> --brief-hash <hash> --epoch <n> < attempt.json",
-      "  node scripts/claude-companion.mjs peer-wait <workflow-id> [--mode <design|research>] [--json]",
+      "  node scripts/claude-companion.mjs peer-wait <workflow-id> [--mode <design|research>] [--output <path>] [--json]",
       "  node scripts/claude-companion.mjs peer-checkpoint <workflow-id> --brief-hash <hash> --epoch <n> < attempt.json",
       "  node scripts/claude-companion.mjs peer-resume-plan <workflow-id> --continue|--retry --owner-session-id <id>",
       "  node scripts/claude-companion.mjs peer-claude-critique <workflow-id> --brief-hash <hash> --epoch <n> < attempt.json",
@@ -722,14 +723,27 @@ function readPeerOutputSchema(workflow, critique) {
   const schemaPath = critique
     ? PEER_CRITIQUE_SCHEMA_PATH
     : workflow.mode === "design" ? PEER_DESIGN_SCHEMA_PATH : PEER_RESEARCH_SCHEMA_PATH;
-  try {
-    const schema = readOutputSchema(schemaPath);
-    if (schema && typeof schema === "object" && !Array.isArray(schema)) return schema;
-  } catch {}
-  throw Object.assign(
-    new Error("PEER_OUTPUT_SCHEMA_UNAVAILABLE: Peer output schema is missing or unreadable."),
-    { code: "PEER_OUTPUT_SCHEMA_UNAVAILABLE" }
+  const unavailable = (failureDetail) => Object.assign(
+    new Error(`PEER_OUTPUT_SCHEMA_UNAVAILABLE: ${failureDetail}`),
+    { code: "PEER_OUTPUT_SCHEMA_UNAVAILABLE", failureDetail }
   );
+  if (!fs.existsSync(schemaPath)) throw unavailable("SCHEMA_MISSING");
+  let source;
+  try {
+    source = fs.readFileSync(schemaPath, "utf8");
+  } catch {
+    throw unavailable("SCHEMA_READ_FAILED");
+  }
+  let schema;
+  try {
+    schema = JSON.parse(source);
+  } catch {
+    throw unavailable("SCHEMA_JSON_INVALID");
+  }
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw unavailable("SCHEMA_SHAPE_INVALID");
+  }
+  return schema;
 }
 
 // ---------------------------------------------------------------------------
@@ -2133,35 +2147,20 @@ function isActiveJobStatus(status) {
   return ACTIVE_JOB_STATUSES.has(status);
 }
 
-function renderStatusPayload(report, asJson) {
-  return asJson ? report : renderStatusReport(report);
-}
-
-function statusPayloadSurfacesStoredResult(job) {
-  return (
-    Boolean(job) &&
-    (job.status === "completed" ||
-      job.status === "failed" ||
-      job.status === "cancelled" ||
-      job.status === "cancel_failed" ||
-      job.status === "unknown") &&
-    Object.prototype.hasOwnProperty.call(job, "result")
-  );
-}
-
-function markViewedViaStatusAccess(workspaceRoot, jobs) {
-  const viewedAt = nowIso();
-  let changed = false;
-
-  for (const job of jobs) {
-    if (!job?.id || job.resultViewedAt || !statusPayloadSurfacesStoredResult(job)) {
-      continue;
-    }
-    const storedJob = markTerminalJobViewed(workspaceRoot, job.id, viewedAt);
-    changed ||= Boolean(storedJob?.resultViewedAt);
+async function outputRead(payload, options, { summary = false, render = null, acknowledge = null } = {}) {
+  const cwd = resolveCommandCwd(options);
+  const publiclyReadable = publicReadPayload(payload, (id, workspaceRoot) => readWorkflow(workspaceRoot ?? cwd, id));
+  let text;
+  let complete;
+  if (options.output) {
+    const receipt = exportReadPayload(publiclyReadable, options.output);
+    text = JSON.stringify(receipt, null, 2) + "\n";
+    complete = true;
+  } else {
+    ({ text, complete } = boundedReadView(publiclyReadable, { summary, render, asJson: options.json }));
   }
-
-  return changed;
+  await new Promise((resolve, reject) => process.stdout.write(text, (error) => error ? reject(error) : resolve()));
+  if (complete && acknowledge) acknowledge(publiclyReadable);
 }
 
 function markTerminalJobViewed(workspaceRoot, jobId, viewedAt = nowIso()) {
@@ -2181,6 +2180,14 @@ function markTerminalJobViewed(workspaceRoot, jobId, viewedAt = nowIso()) {
   } catch {
     return storedJob;
   }
+}
+
+function markDeliveredWorkflowViewed(workspaceRoot, workflow, delivered) {
+  if (isPeerWorkflow(workflow) && workflow.branches.codex.status !== "completed") return;
+  const event = workflowNotificationEvent(workflow);
+  if (event === "checkpoint" && !delivered?.checkpoint) return;
+  if (event === "completed" && !delivered?.finalResult) return;
+  markWorkflowViewed(workspaceRoot, workflow);
 }
 
 function markWorkflowViewed(workspaceRoot, workflow) {
@@ -3073,7 +3080,7 @@ async function handleReviewWorker(argv) {
 
 async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "wait-timeout-ms", "timeout-ms", "poll-interval-ms"],
+    valueOptions: ["cwd", "output", "wait-timeout-ms", "timeout-ms", "poll-interval-ms"],
     booleanOptions: ["json", "all", "wait"]
   });
 
@@ -3089,34 +3096,21 @@ async function handleStatus(argv) {
   const waitTimeoutMs = parseWaitTimeoutMilliseconds(options);
   const reference = positionals[0] ?? "";
   if (reference) {
-    let snapshot = options.wait
+    const snapshot = options.wait
       ? await waitForStatusTarget(cwd, reference, {
           timeoutMs: waitTimeoutMs,
           pollIntervalMs: options["poll-interval-ms"]
         })
       : buildSingleStatusSnapshot(cwd, reference);
-    if (snapshot.targetType === "workflow") {
-      const workflow = markWorkflowViewed(snapshot.workspaceRoot, snapshot.workflow);
-      snapshot = { ...snapshot, workflow };
-    } else if (
-      options.json &&
-      markViewedViaStatusAccess(snapshot.workspaceRoot, [snapshot.job])
-    ) {
-      snapshot = options.wait
-        ? {
-            ...buildSingleStatusSnapshot(cwd, reference),
-            waitTimedOut: snapshot.waitTimedOut,
-            timeoutMs: snapshot.timeoutMs,
-          }
-        : buildSingleStatusSnapshot(cwd, reference);
-    }
-    outputCommandResult(
-      snapshot,
-      snapshot.targetType === "workflow"
-        ? renderWorkflowStatusReport(snapshot.workflow)
-        : renderJobStatusReport(snapshot.job),
-      options.json
-    );
+    await outputRead(snapshot, options, {
+      summary: true,
+      render: (view) => view.targetType === "workflow"
+        ? renderWorkflowStatusReport(view.workflow)
+        : renderJobStatusReport(view.job),
+      acknowledge: options.output ? (view) => snapshot.targetType === "workflow"
+        ? markDeliveredWorkflowViewed(snapshot.workspaceRoot, snapshot.workflow, view.workflow)
+        : view.job.result && markTerminalJobViewed(snapshot.workspaceRoot, snapshot.job.id) : null,
+    });
     return;
   }
 
@@ -3124,55 +3118,38 @@ async function handleStatus(argv) {
     throw new Error("`status --wait` requires a job id.");
   }
 
-  let report = buildStatusSnapshot(cwd, { all: options.all });
-  if (
-    options.json &&
-    markViewedViaStatusAccess(report.workspaceRoot, [
-      report.latestFinished,
-      ...report.recent,
-    ])
-  ) {
-    report = buildStatusSnapshot(cwd, { all: options.all });
-  }
-  outputResult(renderStatusPayload(report, options.json), options.json);
+  const report = buildStatusSnapshot(cwd, { all: options.all });
+  await outputRead(report, options, { summary: true, render: renderStatusReport,
+    acknowledge: options.output ? (view) => {
+      for (const job of [view.latestFinished, ...view.recent].filter(Boolean)) {
+        if (job.result) markTerminalJobViewed(report.workspaceRoot, job.id);
+      }
+    } : null,
+  });
 }
 
-function handleResult(argv) {
+async function handleResult(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "output"],
     booleanOptions: ["json"]
   });
-
   const cwd = resolveCommandCwd(options);
-  const reference = positionals[0] ?? "";
-  const resolved = resolveResultTarget(cwd, reference);
+  const resolved = resolveResultTarget(cwd, positionals[0] ?? "");
   if ("workflow" in resolved) {
-    const workflow = markWorkflowViewed(resolved.workspaceRoot, resolved.workflow);
-    outputCommandResult(
-      { ...resolved, workflow },
-      renderWorkflowResult(workflow),
-      options.json
-    );
+    await outputRead(resolved, options, {
+      render: (view) => renderWorkflowResult(view.workflow),
+      acknowledge: (view) => markDeliveredWorkflowViewed(resolved.workspaceRoot, resolved.workflow, view.workflow),
+    });
     return;
   }
   const { workspaceRoot, job, state } = resolved;
-  let storedJob = readStoredJob(workspaceRoot, job.id);
-  if (state !== "active") {
-    storedJob = markTerminalJobViewed(workspaceRoot, job.id) ?? storedJob;
-  }
-  const payload = {
-    job,
-    storedJob,
-    state
-  };
-
-  outputCommandResult(
-    payload,
-    state === "active"
-      ? renderJobStatusReport(job)
-      : renderStoredJobResult(job, storedJob),
-    options.json
-  );
+  const storedJob = readStoredJob(workspaceRoot, job.id);
+  await outputRead({ job, storedJob, state }, options, {
+    render: (view) => state === "active" ? renderJobStatusReport(view.job) : renderStoredJobResult(view.job, view.storedJob),
+    acknowledge: state === "active" ? null : (view) => {
+      if (view.storedJob?.result || !job.workflowId) markTerminalJobViewed(workspaceRoot, job.id);
+    },
+  });
 }
 
 function handleTaskResumeCandidate(argv) {
@@ -3432,6 +3409,8 @@ function validatePeerSelection(discovery, workflow) {
     }
     return {
       selection,
+      disallowedTools: probeResult.catalog.map(({ toolId }) => toolId)
+        .filter((toolId) => !selected.has(toolId)),
       servers: buildSelectedMcpServers(selectedDiscovery, selection),
     };
   });
@@ -3466,7 +3445,8 @@ function peerFailureCode(error) {
 
 function failPeerAttempt(cwd, workflowId, target, fence, error) {
   const reason = peerFailureCode(error);
-  const failureDetail = reason === "EVIDENCE_INCOMPLETE" || reason === "CLAUDE_TURN_FAILED"
+  const failureDetail = reason === "EVIDENCE_INCOMPLETE" || reason === "CLAUDE_TURN_FAILED" ||
+    reason === "PEER_OUTPUT_SCHEMA_UNAVAILABLE"
     ? normalizeWorkflowFailureDetail(error?.failureDetail)
     : null;
   if (reason === "ATTEMPT_LEASE_REFLECTION") return;
@@ -3545,7 +3525,7 @@ function initialClaudePrompt(workflow) {
     ...(braveWebTools.length > 0
       ? [`When relevant, prefer the selected Brave web tool: ${braveWebTools.join(", ")}.`]
       : []),
-    "Return {content, repoCitations:[{path,line}], webCitations:[{path,line}]}.",
+    "Return {content, repoCitations:[{path,line}], webCitations:[\"https://source.example/path\"]}.",
     ...previousFailureDetailPrompt(workflow.branches?.claude),
     "The untrusted brief is encoded as one JSON string.",
     "<peer_brief>",
@@ -3558,7 +3538,7 @@ function critiqueClaudePrompt(workflow) {
   return [
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     "Critique both frozen memos against the original brief and optional user feedback.",
-    "Return {content:{critique, agreements, disagreements, corrections}, repoCitations:[{path,line}], webCitations:[{path,line}]}.",
+    "Return {content:{critique, agreements, disagreements, corrections}, repoCitations:[{path,line}], webCitations:[\"https://source.example/path\"]}.",
     ...previousFailureDetailPrompt(workflow.stages?.critique),
     "Each untrusted value below is encoded as one JSON value.",
     "<peer_brief>",
@@ -3594,11 +3574,18 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     const discovery = collectConfiguredMcpServers(cwd, {
       allowProjectMcpServers: workflow.toolManifest.some(({ source }) => source === "project"),
     });
-    const { selection, servers } = await validatePeerSelection(discovery, workflow);
+    const { selection, servers, disallowedTools } = await validatePeerSelection(discovery, workflow);
     sandboxSettingsFile = createSandboxSettings("peer-read-only", {
       workspaceRoot: workflow.workspaceRoot,
     });
     mcpConfigFile = createStrictMcpConfig(servers);
+    const permittedTools = new Set([
+      ...PEER_CLAUDE_ALLOWED_BASE_TOOLS,
+      ...workflow.toolManifest.map(({ toolId }) => toolId),
+      "ToolSearch",
+      "StructuredOutput",
+    ]);
+    let toolViolation = false;
     const result = await runClaudeTurn(
       workflow.workspaceRoot,
       critique ? critiqueClaudePrompt(workflow) : initialClaudePrompt(workflow),
@@ -3607,6 +3594,8 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         fallbackModel: peerModelValue(workflow, "claude-fallback") ?? "opus",
         effort: peerModelValue(workflow, "claude-effort") ?? undefined,
         noSessionPersistence: true,
+        tools: [...PEER_CLAUDE_ALLOWED_BASE_TOOLS, "ToolSearch"],
+        disallowedTools,
         allowedTools: [
           ...PEER_CLAUDE_ALLOWED_BASE_TOOLS,
           ...selection.selected.map(({ toolId }) => toolId),
@@ -3617,7 +3606,10 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         strictMcpConfig: true,
         jsonSchema,
         systemPrompt: peerClaudeSystemPrompt(),
-        onProgress: options.onProgress,
+        onProgress: (event) => {
+          if (event.kind === "tool_use" && !permittedTools.has(event.tool)) toolViolation = true;
+          options.onProgress?.(event);
+        },
         onSpawn: options.onSpawn,
       }
     );
@@ -3650,6 +3642,12 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         );
       }
       throw new Error(result.failure?.kind ?? result.warning ?? "CLAUDE_TURN_FAILED");
+    }
+    if (toolViolation) {
+      throw Object.assign(
+        new Error("EVIDENCE_INCOMPLETE: Claude used a tool outside the frozen peer selection."),
+        { code: "EVIDENCE_INCOMPLETE", failureDetail: "TOOL_EVENT_NOT_ALLOWED" }
+      );
     }
     const parsed = parsePeerClaudePayload(result, critique ? "Claude critique" : "Claude memo");
     if (critique && (
@@ -3713,7 +3711,8 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
     return peerReceipt(submitted, stage, branchId, true);
   } catch (error) {
     const code = peerFailureCode(error);
-    const failureDetail = code === "EVIDENCE_INCOMPLETE" || code === "CLAUDE_TURN_FAILED"
+    const failureDetail = code === "EVIDENCE_INCOMPLETE" || code === "CLAUDE_TURN_FAILED" ||
+      code === "PEER_OUTPUT_SCHEMA_UNAVAILABLE"
       ? normalizeWorkflowFailureDetail(error?.failureDetail)
       : null;
     const sanitized = Object.assign(
@@ -4100,50 +4099,41 @@ async function handleWorkflowCreate(argv) {
   outputResult(workflow, options.json);
 }
 
-function handleWorkflowRead(argv) {
+async function handleWorkflowRead(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode"],
-    booleanOptions: ["json"],
+    valueOptions: ["cwd", "mode", "output"], booleanOptions: ["json"],
   });
+  const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
-  const workflow = readWorkflow(resolveCommandCwd(options), workflowId, {
-    mode: options.mode,
+  const workflow = readWorkflow(cwd, workflowId, { mode: options.mode });
+  if (!workflow) throw new Error(`WORKFLOW_NOT_FOUND: No workflow found for ${workflowId}.`);
+  await outputRead(workflow, options, {
+    acknowledge: options.output ? (view) => markDeliveredWorkflowViewed(resolveWorkspaceRoot(cwd), workflow, view) : null,
   });
-  if (!workflow) {
-    throw new Error(`WORKFLOW_NOT_FOUND: No workflow found for ${workflowId}.`);
-  }
-  outputResult(
-    isPeerWorkflow(workflow) && workflow.branches.codex.status !== "completed"
-      ? buildPeerWaitView(workflow)
-      : workflow,
-    options.json
-  );
 }
 
-function handlePeerWait(argv) {
+async function handlePeerWait(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode"],
-    booleanOptions: ["json"],
+    valueOptions: ["cwd", "mode", "output"], booleanOptions: ["json"],
   });
-  const workflow = readPeerWorkflow(
-    resolveCommandCwd(options),
-    requireWorkflowId(positionals),
-    options.mode
-  );
-  outputResult(buildPeerWaitView(workflow), options.json);
+  const cwd = resolveCommandCwd(options);
+  const workflow = readPeerWorkflow(cwd, requireWorkflowId(positionals), options.mode);
+  await outputRead(buildPeerWaitView(workflow), options, { summary: true });
 }
 
-function handleWorkflowList(argv) {
+async function handleWorkflowList(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode"],
-    booleanOptions: ["json"],
+    valueOptions: ["cwd", "mode", "output"], booleanOptions: ["json"],
   });
-  const workflows = listWorkflows(resolveCommandCwd(options), { mode: options.mode });
-  outputResult(workflows.map((workflow) =>
-    isPeerWorkflow(workflow) && workflow.branches.codex.status !== "completed"
-      ? buildPeerWaitView(workflow)
-      : workflow
-  ), options.json);
+  const cwd = resolveCommandCwd(options);
+  const workflows = listWorkflows(cwd, { mode: options.mode });
+  await outputRead(workflows, options, { summary: true,
+    acknowledge: options.output ? (view) => {
+      for (let index = 0; index < workflows.length; index++) {
+        markDeliveredWorkflowViewed(resolveWorkspaceRoot(cwd), workflows[index], view[index]);
+      }
+    } : null,
+  });
 }
 
 function workflowMutationOptions(options) {
@@ -4496,7 +4486,7 @@ async function main() {
       await handleStatus(argv);
       break;
     case "result":
-      handleResult(argv);
+      await handleResult(argv);
       break;
     case "session-routing-context":
       handleSessionRoutingContext(argv);
@@ -4518,10 +4508,10 @@ async function main() {
       await handleWorkflowCreate(argv);
       break;
     case "workflow-read":
-      handleWorkflowRead(argv);
+      await handleWorkflowRead(argv);
       break;
     case "workflow-list":
-      handleWorkflowList(argv);
+      await handleWorkflowList(argv);
       break;
     case "workflow-submit-stage":
       await handleWorkflowSubmitStage(argv);
@@ -4551,7 +4541,7 @@ async function main() {
       await handlePeerClaudeTurn(argv);
       break;
     case "peer-wait":
-      handlePeerWait(argv);
+      await handlePeerWait(argv);
       break;
     case "peer-checkpoint":
       await handlePeerCheckpoint(argv);

@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -268,6 +268,7 @@ By default, `$cc:status` shows current-session jobs plus one aggregate row per o
 ```text
 $cc:result                          # open the latest job or workflow result for this session/repo
 $cc:result task-abc123              # show job output or a workflow checkpoint/final result
+$cc:result task-abc123 --output /tmp/new-result.json  # full private JSON export
 ```
 
 When a job came from a built-in background child, the output can show both:
@@ -312,7 +313,9 @@ All review and rescue commands support `--background`. Background jobs are track
 5. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
 6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
 
-Job inspection can also reconcile stale `queued`, `running`, or `cancelling` records. It only terminates an orphaned owned process after its recorded PID identity matches; healthy active jobs are left unchanged. `$cc:result` and JSON status access may additionally record that a terminal result was viewed.
+Public `status`, `result`, `workflow-read`, `workflow-list` and `peer-wait` output is capped at 8192 UTF-8 bytes, including JSON. JSON reports `truncated` and omissions; workflow lists wrap rows as `{workflows,total,truncated,omissions}`. Status/list/poll omit memo and result bodies. Use `--output <new-path>` for full public JSON (workflow-list exports an array): a new mode-0600 file is created exclusively and the receipt includes `outputFile`, `bytes` and `sha256`. Existing files and symlinks are refused. Read large exports in sections and remove temporary exports when finished.
+
+Job inspection can also reconcile stale `queued`, `running`, or `cancelling` records. It only terminates an orphaned owned process after its recorded PID identity matches; healthy active jobs are left unchanged. Successfully delivered complete `$cc:result` output or a full public JSON export may additionally record that a terminal result was viewed; status summaries and truncated previews leave notifications unread.
 
 **Typical background flow:**
 
@@ -373,7 +376,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
 codex plugin add cc@cbepx
 ```
 
@@ -394,8 +397,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.4 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.4/cc-plugin-codex-1.7.4.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
 ```
 
 After install, run:
@@ -427,7 +430,7 @@ Codex rejects re-adding an existing marketplace name when the pinned source/ref 
 ```bash
 codex plugin remove cc@cbepx
 codex plugin marketplace remove cbepx
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.4
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
 codex plugin add cc@cbepx
 ```
 
@@ -435,7 +438,7 @@ Restart Codex so the newly installed plugin is loaded, then run `$cc:setup` and 
 
 ### Maintainer release qualification (#27)
 
-This is an opt-in, credential-gated manual check against the installed exact `v1.7.4` tag and artifact. It is separate from hermetic CI and was not run as part of this documentation task. Record each result without printing secrets:
+This is an opt-in, credential-gated manual check against the installed exact `v1.7.5` tag and artifact. It is separate from hermetic CI and was not run as part of this documentation task. Record each result without printing secrets:
 
 - [ ] Record the exact tag, commit, artifact basename, byte size, and SHA-256; confirm the installed marketplace/plugin ref and cache metadata match.
 - [ ] Restart Codex, run `$cc:setup`, then run `$cc:setup --check`; record the read-only readiness result and confirm no `$cc:doctor` command is required.
@@ -516,7 +519,7 @@ npm run test:mutation
 npm run test:mutation:force
 ```
 
-`test:mutation` checks the critical parser contracts plus managed cleanup and installer orchestration. `test:mutation:force` runs all seven shards, matching the weekly/manual workflow. Scores below each configured break threshold fail the command, and reports are written under `reports/mutation/`. Use the force variant after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; improve the focused tests or use a `// Stryker disable ...: reason` comment only for an intentional equivalent mutant.
+`test:mutation` checks the critical parser contracts plus managed cleanup and installer orchestration. `test:mutation:force` runs all eight shards, matching the weekly/manual workflow. Scores below each configured break threshold fail the command, and reports are written under `reports/mutation/`. Use the force variant after changing only tests because command-runner incremental mode cannot reliably detect that. Do not mass-disable surviving mutants; improve the focused tests or use a `// Stryker disable ...: reason` comment only for an intentional equivalent mutant.
 
 Mutation testing requires Node.js 20+ because Stryker 9 has a newer development-time engine requirement. The plugin runtime still supports the Node.js version listed in the prerequisites.
 

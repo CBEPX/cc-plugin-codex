@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## v1.7.5
+
+### Changed
+
+- Bound ordinary JSON from `status`, `result`, `workflow-read`, `workflow-list`, and `peer-wait` to 8192 bytes with explicit omissions; compact ordinary JSON is an intentionally accepted compatibility change. Add `--output <new-path>` to export full authorized JSON exclusively as a mode-0600 file with a SHA-256 receipt, while summary views and failed exports leave their result notifications unread.
+- Make worker and read recipes self-contained, require native web citations as `string[]` while accepting legacy input, and bound schema validation causes.
+
+### Fixed
+
+- Restrict peer builtins explicitly, disable ordinary Claude hooks for peer turns (managed administrator hooks remain governed by policy), and reject out-of-selection tool events before accepting memos or critiques; explain withheld linked job output when its workflow is unavailable or the Codex memo is unsealed.
+
+- Arm signal cleanup before temporary resource creation, isolate direct stateful test entrypoints, split state and tracked-job mutation targets across eight full-mutation CI shards, and use Node 24 artifact handling.
+
 ## v1.7.4
 
 ### Added

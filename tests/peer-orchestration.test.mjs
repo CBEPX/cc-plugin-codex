@@ -2,8 +2,10 @@
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
+import "./test-env.mjs";
+
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -65,6 +67,21 @@ function assertOneShotCheckpointInstructions(message) {
     message.indexOf("terminalIncomplete") <
       message.indexOf("peer-activate-attempt", message.indexOf("peer-submit-memo"))
   );
+}
+
+async function waitForFile(filePath) {
+  const deadline = Date.now() + 5_000;
+  while (!fs.existsSync(filePath)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${filePath}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function waitForExit(child) {
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
 }
 
 describe("peer skill argument routing", () => {
@@ -178,6 +195,42 @@ describe("fake built-in agent orchestration", () => {
     for (const child of calls) {
       for (const line of child.message.split("\n").filter((line) => line.startsWith("node "))) {
         assert.doesNotMatch(line, /[cdf]{64}|--lease/u);
+      }
+    }
+  });
+
+  it("gives initial and retry Codex workers the mode-specific executable memo contract", () => {
+    const options = {
+      companionPath: "/plugin/scripts/claude-companion.mjs",
+      leases: {
+        "branch:codex": "c".repeat(64),
+        "stage:checkpoint": "f".repeat(64),
+      },
+    };
+    for (const [mode, fields] of [
+      ["design", ["alternatives", "tradeoffs", "decisionDrivers", "recommendation", "gaps"]],
+      ["research", ["findings", "sourceQuality", "contradictions", "confidence", "gaps"]],
+    ]) {
+      const workflow = {
+        id: `workflow-${mode}`,
+        mode,
+        epoch: 1,
+        workspaceRoot: "/workspace/repo",
+        brief: "Inspect the contract.",
+        briefHash: "a".repeat(64),
+      };
+      const workers = [
+        buildInitialAgentPlan(workflow, options)[0],
+        buildRetryAgentPlan(workflow, [{ stage: "memo", branchId: "codex" }], options)[0],
+      ];
+      for (const { message } of workers) {
+        for (const field of fields) assert.match(message, new RegExp(`\\b${field}\\b`, "u"));
+        assert.match(message, /repoCitations: \[\{path:string,line:positive integer\}\]/u);
+        assert.match(message, /real file and line inside the canonical workspace/u);
+        assert.match(message, /webCitations: \["https:\/\/[^"]+"\]/u);
+        assert.match(message, /toolEvents: \[\{tool:string\}\]/u);
+        assert.match(message, /actual tools used/u);
+        assert.doesNotMatch(message, /peer-status/u);
       }
     }
   });
@@ -296,6 +349,149 @@ fs.appendFileSync(process.env.CC_PEER_CAPTURE, JSON.stringify({
       assert.equal(captured.every(({ argv }) =>
         !argv.some((value) => Object.values(leases).includes(value))), true);
       assert.equal(wrapped.split("\n").every((line) => line.length <= 64), true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans the generated file-backed submission on normal exit and catchable signals", {
+    skip: process.platform === "win32",
+  }, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-recipe-signals-"));
+    try {
+      const companionPath = path.join(root, "controlled companion.mjs");
+      const tempDir = path.join(root, "tmp");
+      const binDir = path.join(root, "bin");
+      fs.mkdirSync(tempDir);
+      fs.mkdirSync(binDir);
+      const mktempPath = path.join(binDir, "mktemp");
+      fs.writeFileSync(mktempPath, `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(process.env.CC_PEER_TEMP_PATH, "", { flag: "wx", mode: 0o600 });
+const finish = () => process.stdout.write(process.env.CC_PEER_TEMP_PATH);
+if (process.env.CC_PEER_MKTEMP_READY) {
+  fs.writeFileSync(process.env.CC_PEER_MKTEMP_READY, JSON.stringify({
+    pid: process.pid,
+    parentPid: process.ppid,
+  }));
+  setTimeout(finish, 250);
+} else {
+  finish();
+}
+`, "utf8");
+      fs.chmodSync(mktempPath, 0o755);
+      fs.writeFileSync(companionPath, `import fs from "node:fs";
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+if (process.env.CC_PEER_READY) {
+  fs.writeFileSync(process.env.CC_PEER_READY, JSON.stringify({
+    pid: process.pid,
+    parentPid: process.ppid,
+    inputPath: process.env.CC_PEER_TEMP_PATH,
+    mode: fs.fstatSync(0).mode & 0o777,
+  }));
+}
+if (process.env.CC_PEER_PAUSE === "1") {
+  await new Promise((resolve) => setTimeout(resolve, 10_000));
+}
+fs.appendFileSync(process.env.CC_PEER_CAPTURE, JSON.stringify(input) + "\\n");
+`, "utf8");
+      const workflow = {
+        id: "workflow-signals",
+        mode: "research",
+        epoch: 7,
+        workspaceRoot: root,
+        brief: "Inspect signal cleanup.",
+        briefHash: "a".repeat(64),
+      };
+      const lease = "c".repeat(64);
+      const [worker] = buildInitialAgentPlan(workflow, {
+        companionPath,
+        leases: { "branch:codex": lease, "stage:checkpoint": "f".repeat(64) },
+      });
+      const wrapped = Buffer.from(JSON.stringify({
+        lease,
+        payload: {
+          content: { findings: ["signal contract"] },
+          repoCitations: [{ path: companionPath, line: 1 }],
+          webCitations: ["https://example.test/source"],
+          toolEvents: [{ tool: "Read" }, { tool: "WebSearch" }],
+        },
+      })).toString("base64");
+      const recipe = extractBase64Recipe(worker.message, "CC_PEER_MEMO_SUBMISSION_B64")
+        .replace("CC_PEER_WRAPPED_BASE64", wrapped);
+
+      const normalCapture = path.join(root, "normal.ndjson");
+      const normalReady = path.join(root, "normal.ready");
+      const normalInput = path.join(tempDir, "normal-input.json");
+      const normal = spawnSync("sh", ["-c", recipe], {
+        cwd: root,
+        env: {
+          ...process.env,
+          TMPDIR: tempDir,
+          CC_PEER_CAPTURE: normalCapture,
+          CC_PEER_READY: normalReady,
+          CC_PEER_TEMP_PATH: normalInput,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+        },
+        encoding: "utf8",
+      });
+      assert.equal(normal.status, 0, normal.stderr || normal.stdout);
+      assert.equal(fs.readFileSync(normalCapture, "utf8").trim().length > 0, true);
+      const normalPhase = JSON.parse(fs.readFileSync(normalReady, "utf8"));
+      assert.equal(normalPhase.mode, 0o600);
+      assert.equal(fs.existsSync(normalPhase.inputPath), false, normalPhase.inputPath);
+
+      const creationReady = path.join(root, "creation.ready");
+      const creationCapture = path.join(root, "creation.ndjson");
+      const creationInput = path.join(tempDir, "creation-input.json");
+      const creation = spawn("sh", ["-c", recipe], {
+        cwd: root,
+        env: {
+          ...process.env,
+          CC_PEER_CAPTURE: creationCapture,
+          CC_PEER_MKTEMP_READY: creationReady,
+          CC_PEER_TEMP_PATH: creationInput,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+        },
+        stdio: "ignore",
+      });
+      const creationExited = waitForExit(creation);
+      await waitForFile(creationReady);
+      const creationPhase = JSON.parse(fs.readFileSync(creationReady, "utf8"));
+      assert.equal(fs.statSync(creationInput).mode & 0o777, 0o600);
+      process.kill(creationPhase.parentPid, "SIGTERM");
+      assert.deepEqual(await creationExited, { code: 143, signal: null });
+      assert.equal(fs.existsSync(creationInput), false);
+      assert.equal(fs.existsSync(creationCapture), false);
+
+      for (const [signal, exitCode] of [["SIGHUP", 129], ["SIGINT", 130], ["SIGTERM", 143]]) {
+        const ready = path.join(root, `${signal}.ready`);
+        const capture = path.join(root, `${signal}.ndjson`);
+        const inputPath = path.join(tempDir, `${signal}-input.json`);
+        const child = spawn("sh", ["-c", recipe], {
+          cwd: root,
+          env: {
+            ...process.env,
+            TMPDIR: tempDir,
+            CC_PEER_CAPTURE: capture,
+            CC_PEER_READY: ready,
+            CC_PEER_PAUSE: "1",
+            CC_PEER_TEMP_PATH: inputPath,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+          },
+          stdio: "ignore",
+        });
+        const exited = waitForExit(child);
+        await waitForFile(ready);
+        const phase = JSON.parse(fs.readFileSync(ready, "utf8"));
+        assert.equal(phase.mode, 0o600);
+        assert.equal(fs.existsSync(phase.inputPath), true);
+        process.kill(phase.parentPid, signal);
+        process.kill(phase.pid, signal);
+        assert.deepEqual(await exited, { code: exitCode, signal: null });
+        assert.equal(fs.existsSync(phase.inputPath), false);
+        assert.equal(fs.existsSync(capture), false);
+      }
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -515,6 +711,10 @@ describe("peer evidence validation", () => {
       assert.deepEqual(validatePeerMemo(workflow, base).repoCitations, [
         { path: "source.mjs", line: 2 },
       ]);
+      assert.deepEqual(validatePeerMemo(workflow, {
+        ...base,
+        webCitations: [{ path: "https://legacy.example.test/reference", line: 9 }],
+      }).webCitations, ["https://legacy.example.test/reference"]);
 
       for (const invalid of [
         { ...base, repoCitations: [{ path: source, line: 0 }] },

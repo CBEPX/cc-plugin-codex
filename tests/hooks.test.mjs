@@ -2,6 +2,8 @@
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
+import "./test-env.mjs";
+
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";

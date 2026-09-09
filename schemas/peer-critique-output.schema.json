@@ -31,15 +31,7 @@
     },
     "webCitations": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["path", "line"],
-        "properties": {
-          "path": { "type": "string" },
-          "line": { "type": "integer" }
-        }
-      }
+      "items": { "type": "string" }
     }
   }
 }

@@ -2,6 +2,8 @@
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
+import "../test-env.mjs";
+
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -3574,8 +3576,8 @@ describe("claude-companion integration", () => {
         ["status", "--cwd", testEnv.workspaceDir, "--json", jobId],
         { env: testEnv.env }
       );
-      assert.equal(statusPayload.job.result.contextWindow, null);
-      assert.deepEqual(statusPayload.job.result.streamDiagnostics, []);
+      assert.equal(statusPayload.job.contextWindow, null);
+      assert.equal(statusPayload.job.result, undefined);
 
       writeSessionScopedJob(testEnv, jobId, legacyJob);
       const resultPayload = runCompanionJson(
@@ -3591,8 +3593,8 @@ describe("claude-companion integration", () => {
         ["status", "--cwd", testEnv.workspaceDir, "--json", legacyReviewJob.id],
         { env: testEnv.env }
       );
-      assert.equal(reviewStatusPayload.job.result.codex.contextWindow, null);
-      assert.deepEqual(reviewStatusPayload.job.result.codex.streamDiagnostics, []);
+      assert.equal(reviewStatusPayload.job.contextWindow, null);
+      assert.equal(reviewStatusPayload.job.result, undefined);
 
       writeSessionScopedJob(testEnv, legacyReviewJob.id, legacyReviewJob);
       const reviewResultPayload = runCompanionJson(
@@ -4395,10 +4397,10 @@ describe("claude-companion integration", () => {
       );
 
       const afterStatus = readStoredJobById(testEnv, backgroundLaunch.jobId);
-      assert.match(
-        afterStatus.resultViewedAt ?? "",
-        /\d{4}-\d{2}-\d{2}T/,
-        "fetching finished job details through status --json should mark the job as viewed"
+      assert.equal(
+        afterStatus.resultViewedAt ?? null,
+        null,
+        "status summaries must leave the terminal result unread"
       );
 
       runCompanion(["result", "--cwd", testEnv.workspaceDir, backgroundLaunch.jobId], {

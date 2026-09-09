@@ -96,20 +96,22 @@ describe("peer output schemas", () => {
         required: Object.keys(content),
         properties: content,
       });
-      for (const field of ["repoCitations", "webCitations"]) {
-        assert.deepEqual(schema.properties[field], {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["path", "line"],
-            properties: {
-              path: { type: "string" },
-              line: { type: "integer" },
-            },
+      assert.deepEqual(schema.properties.repoCitations, {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["path", "line"],
+          properties: {
+            path: { type: "string" },
+            line: { type: "integer" },
           },
-        });
-      }
+        },
+      });
+      assert.deepEqual(schema.properties.webCitations, {
+        type: "array",
+        items: { type: "string" },
+      });
       visit(schema);
     }
   });

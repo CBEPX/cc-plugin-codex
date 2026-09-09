@@ -2,6 +2,8 @@
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
+import "./test-env.mjs";
+
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -188,7 +190,7 @@ describe("workflow companion internals", () => {
     const listed = runJson(testEnv, [
       "workflow-list", "--cwd", testEnv.workspaceDir, "--mode", "design", "--json",
     ]);
-    assert.deepEqual(listed.map(({ id }) => id), ["workflow-cli"]);
+    assert.deepEqual(listed.workflows.map(({ id }) => id), ["workflow-cli"]);
     assert.equal(runJson(testEnv, [
       "workflow-read", "workflow-cli", "--cwd", testEnv.workspaceDir,
       "--mode", "design", "--json",

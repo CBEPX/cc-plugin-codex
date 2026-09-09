@@ -2,6 +2,8 @@
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
+import "./test-env.mjs";
+
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -15,20 +17,20 @@ const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
 const COMPANION = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
 const cleanup = [];
 
-function writeMissingSchemaPreload(rootDir, unavailablePath) {
-  const filePath = path.join(rootDir, "missing-schema-preload.mjs");
+function writeSchemaPreload(rootDir, unavailablePath, scenario) {
+  const filePath = path.join(rootDir, `${scenario}-schema-preload.mjs`);
   fs.writeFileSync(filePath, `import fs from "node:fs";
 
 const target = ${JSON.stringify(unavailablePath)};
+const scenario = ${JSON.stringify(scenario)};
 const existsSync = fs.existsSync.bind(fs);
 const readFileSync = fs.readFileSync.bind(fs);
-fs.existsSync = (candidate) => candidate === target ? false : existsSync(candidate);
+fs.existsSync = (candidate) => candidate === target && scenario === "missing" ? false : existsSync(candidate);
 fs.readFileSync = (candidate, ...args) => {
   if (candidate === target) {
-    const error = new Error("ENOENT: no such file or directory, open " + target);
-    error.code = "ENOENT";
-    error.path = target;
-    throw error;
+    if (scenario === "unreadable") throw new Error("RAW_SCHEMA_READ_FAILURE " + target);
+    if (scenario === "malformed") return "{malformed";
+    if (scenario === "non-object") return "[]";
   }
   return readFileSync(candidate, ...args);
 };
@@ -77,6 +79,9 @@ function writeFakeClaude(binDir) {
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
+if (process.env.FAKE_CLAUDE_INVOCATION_LOG) {
+  fs.appendFileSync(process.env.FAKE_CLAUDE_INVOCATION_LOG, JSON.stringify(args) + "\\n");
+}
 const value = (flag) => {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : null;
@@ -127,6 +132,7 @@ async function main() {
   }) + "\\n");
   tool("Read", { file_path: process.env.FAKE_REPO_FILE });
   if (!sparse) tool("WebSearch", { query: "primary documentation" });
+  for (const name of JSON.parse(process.env.FAKE_CLAUDE_EXTRA_TOOLS || "[]")) tool(name, {});
   if (process.env.FAKE_CLAUDE_DELTA_MARKER) {
     process.stdout.write(JSON.stringify({
       type: "stream_event",
@@ -153,7 +159,7 @@ async function main() {
   const marker = process.env.FAKE_CLAUDE_MARKER || "The repository and primary source agree.";
   const citations = {
     repoCitations: [{ path: process.env.FAKE_REPO_FILE, line: 1 }],
-    webCitations: sparse ? [] : [{ path: "https://example.test/primary", line: 1 }],
+    webCitations: sparse ? [] : ["https://example.test/primary"],
   };
   const payload = critique
     ? {
@@ -493,6 +499,59 @@ afterEach(() => {
 });
 
 describe("peer companion with fake Claude", () => {
+  for (const stage of ["memo", "critique"]) {
+    for (const tools of [["Bash"], ["Bash", ...Array(255).fill("Read"), "WebSearch"], ["Agent"], ["Write"], ["mcp__docs__other"], ["mcp__docs__search_extra"], ["ToolSearchExtra"], ["mcp__docs__search", "ToolSearch", "StructuredOutput"]]) {
+      it(`${stage} enforces actual tool boundary for ${tools.length > 3 ? "Bash before bounded tail" : tools.join(", ")}`, () => {
+        const testEnv = createEnvironment();
+        writeFakeMcp(testEnv.rootDir, "docs", ["search", "other", "search_extra"].map((name) => ({
+          name, description: "Public documentation", annotations: { readOnlyHint: true },
+        })));
+        const created = createPeer(testEnv);
+        submitCodexMemo(testEnv, created);
+        let lease = planLease(created, "_claude_");
+        if (stage === "critique") {
+          const workflow = readWorkflow(testEnv, created.workflow.id);
+          lease = "c".repeat(64);
+          workflow.phase = "critique";
+          workflow.branches.claude.payload = { content: { findings: ["Frozen memo"] } };
+          workflow.stages.critique.attemptReservation = {
+            leaseDigest: createHash("sha256").update(lease).digest("hex"),
+            epoch: workflow.epoch, reservedAt: workflow.updatedAt, previousFailureDetail: null,
+          };
+          writeWorkflow(testEnv, workflow);
+        }
+        const result = run(testEnv, [
+          stage === "memo" ? "peer-claude-turn" : "peer-claude-critique",
+          created.workflow.id, "--cwd", testEnv.workspaceDir,
+          "--brief-hash", created.workflow.briefHash,
+          "--epoch", String(created.workflow.epoch), "--json",
+        ], { input: attemptInput(lease), env: { FAKE_CLAUDE_EXTRA_TOOLS: JSON.stringify(tools) } });
+        const stored = readWorkflow(testEnv, created.workflow.id);
+        const target = stage === "memo" ? stored.branches.claude : stored.stages.critique;
+        if (tools[0] !== "mcp__docs__search") {
+          assert.notEqual(result.status, 0, result.stdout);
+          assert.match(result.stderr, /EVIDENCE_INCOMPLETE/u);
+          assert.equal(target.failureDetail, "TOOL_EVENT_NOT_ALLOWED");
+          assert.equal(target.commitment ?? null, null);
+          assert.equal(target.payload ?? null, null);
+          assert.equal(stored.critique ?? null, null);
+        } else {
+          assert.equal(result.status, 0, result.stderr);
+          const payload = stage === "memo" ? target.payload : stored.critique;
+          assert.deepEqual(payload.toolEvents.map(({ tool }) => tool), ["Read", "WebSearch", ...tools]);
+        }
+        const invocation = JSON.parse(fs.readFileSync(testEnv.claudeLog, "utf8").trim());
+        assert.equal(invocation.args[invocation.args.indexOf("--tools") + 1], "Read,Glob,Grep,WebSearch,WebFetch,ToolSearch");
+        assert.deepEqual(invocation.args.flatMap((value, index, args) => args[index - 1] === "--allowedTools" ? [value] : []),
+          ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "mcp__docs__search"]);
+        assert.deepEqual(invocation.args.flatMap((value, index, args) => args[index - 1] === "--disallowedTools" ? [value] : []),
+          ["mcp__docs__other", "mcp__docs__search_extra"]);
+        assert.ok(invocation.args.includes("--strict-mcp-config"));
+        assert.equal(invocation.args.includes("--bare"), false);
+        assert.equal(invocation.settings.disableAllHooks, true);
+      });
+    }
+  }
   it("accepts a large piped memo and returns bounded peer receipts", () => {
     const testEnv = createEnvironment();
     const created = createPeer(testEnv);
@@ -692,9 +751,11 @@ describe("peer companion with fake Claude", () => {
     });
     assert.equal(finalResult.stdout.includes(finalMarker), false);
     assert.equal(finalResult.stdout.includes(synthesisLease), false);
-    const authoritative = runJson(testEnv, [
-      "workflow-read", created.workflow.id, "--cwd", testEnv.workspaceDir, "--json",
+    const authoritativeFile = path.join(testEnv.rootDir, "authoritative.json");
+    runJson(testEnv, [
+      "workflow-read", created.workflow.id, "--cwd", testEnv.workspaceDir, "--output", authoritativeFile, "--json",
     ]);
+    const authoritative = JSON.parse(fs.readFileSync(authoritativeFile, "utf8"));
     assert.equal(authoritative.finalResult.recommendation, finalMarker);
   });
 
@@ -724,6 +785,8 @@ describe("peer companion with fake Claude", () => {
       assert.deepEqual(JSON.parse(invocation.args[schemaIndex + 1]), JSON.parse(
         fs.readFileSync(path.join(PROJECT_ROOT, "schemas", file), "utf8")
       ));
+      assert.match(invocation.prompt, /webCitations:\["https:\/\/source\.example\/path"\]/u);
+      assert.doesNotMatch(invocation.prompt, /webCitations:\[\{path,line\}\]/u);
     }
   });
 
@@ -762,29 +825,49 @@ describe("peer companion with fake Claude", () => {
     assert.deepEqual(Object.keys(invocation.mcpConfig.mcpServers), ["brave-search"]);
   });
 
-  it("fails closed before spawning Claude when its output schema is missing", () => {
-    const testEnv = createEnvironment();
-    const schemaPath = path.join(PROJECT_ROOT, "schemas", "peer-design-output.schema.json");
-    const preloadDir = path.join(testEnv.rootDir, "preload with spaces");
-    fs.mkdirSync(preloadDir);
-    const preloadPath = writeMissingSchemaPreload(preloadDir, schemaPath);
-    const created = createPeer(testEnv);
-    const claudeLease = planLease(created, "_claude_");
-    const failed = run(testEnv, [
-      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
-      "--brief-hash", created.workflow.briefHash,
-      "--epoch", String(created.workflow.epoch), "--json",
-    ], {
-      input: attemptInput(claudeLease),
-      env: {
-        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preloadPath).href}`]
-          .filter(Boolean).join(" "),
-        FAKE_CLAUDE_SANDBOX_UNAVAILABLE: "1",
-      },
-    });
-    assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /PEER_OUTPUT_SCHEMA_UNAVAILABLE/);
-    assert.equal(fs.existsSync(testEnv.claudeLog), false);
+  it("reports bounded schema diagnostics and never invokes Claude", () => {
+    for (const [scenario, failureDetail] of [
+      ["missing", "SCHEMA_MISSING"],
+      ["unreadable", "SCHEMA_READ_FAILED"],
+      ["malformed", "SCHEMA_JSON_INVALID"],
+      ["non-object", "SCHEMA_SHAPE_INVALID"],
+    ]) {
+      const testEnv = createEnvironment();
+      const schemaPath = path.join(PROJECT_ROOT, "schemas", "peer-design-output.schema.json");
+      const preloadDir = path.join(testEnv.rootDir, "preload with spaces");
+      fs.mkdirSync(preloadDir);
+      const preloadPath = writeSchemaPreload(preloadDir, schemaPath, scenario);
+      const invocationLog = path.join(testEnv.rootDir, "all-claude-invocations.ndjson");
+      const created = createPeer(testEnv);
+      const claudeLease = planLease(created, "_claude_");
+      const failed = run(testEnv, [
+        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], {
+        input: attemptInput(claudeLease),
+        env: {
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preloadPath).href}`]
+            .filter(Boolean).join(" "),
+          FAKE_CLAUDE_INVOCATION_LOG: invocationLog,
+        },
+      });
+      assert.notEqual(failed.status, 0, scenario);
+      assert.match(failed.stderr, new RegExp(`PEER_OUTPUT_SCHEMA_UNAVAILABLE: ${failureDetail}`, "u"));
+      assert.doesNotMatch(failed.stderr, /RAW_SCHEMA_READ_FAILURE|peer-design-output\.schema\.json/u);
+      assert.equal(fs.existsSync(invocationLog), false, scenario);
+      assert.equal(fs.existsSync(testEnv.claudeLog), false, scenario);
+      const outputFile = path.join(testEnv.rootDir, `${scenario}-workflow.json`);
+      const receipt = runJson(testEnv, [
+        "workflow-read", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--output", outputFile, "--json",
+      ]);
+      assert.equal(receipt.outputFile, outputFile, scenario);
+      const stored = JSON.parse(fs.readFileSync(outputFile, "utf8"));
+      assert.equal(stored.status, "incomplete", scenario);
+      assert.equal(stored.branches.claude.failureReason, "PEER_OUTPUT_SCHEMA_UNAVAILABLE", scenario);
+      assert.equal(stored.branches.claude.failureDetail, failureDetail, scenario);
+    }
   });
 
   it("uses native structured output when final text is invalid JSON", () => {
@@ -1057,11 +1140,11 @@ describe("peer companion with fake Claude", () => {
       assert.equal(view.branches.claude.status, "running");
       const serialized = JSON.stringify(view);
       assert.doesNotMatch(serialized, /The repository and primary source agree/);
-      assert.doesNotMatch(serialized, /toolEvents|repoCitations|webCitations|payload/);
+      assert.doesNotMatch(serialized, /"(?:toolEvents|repoCitations|webCitations|payload)":/);
     }
     const listed = runJson(testEnv, [
       "workflow-list", "--cwd", testEnv.workspaceDir, "--mode", "design", "--json",
-    ]).find(({ id, workflowId }) => (workflowId ?? id) === created.workflow.id);
+    ]).workflows.find(({ id, workflowId }) => (workflowId ?? id) === created.workflow.id);
     assert.ok(listed);
     assert.equal(listed.readyForCheckpoint, false);
     assert.doesNotMatch(
@@ -1089,8 +1172,13 @@ describe("peer companion with fake Claude", () => {
       "--mode", "design", "--json",
     ]);
     assert.equal(ready.readyForCheckpoint, true);
-    assert.deepEqual(ready.memos.codex.content, codexMemo.content);
-    assert.deepEqual(ready.memos.claude.content, {
+    assert.equal(ready.memos, undefined);
+    const output = path.join(testEnv.rootDir, "sealed-memos.json");
+    runJson(testEnv, ["peer-wait", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--mode", "design", "--output", output, "--json"]);
+    const exported = JSON.parse(fs.readFileSync(output, "utf8"));
+    assert.deepEqual(exported.memos.codex.content, codexMemo.content);
+    assert.deepEqual(exported.memos.claude.content, {
       alternatives: ["Keep the current design."],
       tradeoffs: ["It favors compatibility."],
       decisionDrivers: ["Preserve the peer contract."],
@@ -1702,6 +1790,8 @@ describe("peer companion with fake Claude", () => {
       assert.deepEqual(JSON.parse(invocation.args[schemaIndex + 1]), JSON.parse(
         fs.readFileSync(path.join(PROJECT_ROOT, "schemas", file), "utf8")
       ));
+      assert.match(invocation.prompt, /webCitations:\["https:\/\/source\.example\/path"\]/u);
+      assert.doesNotMatch(invocation.prompt, /webCitations:\[\{path,line\}\]/u);
     }
     assert.ok(critique.args.includes("--no-session-persistence"));
     assert.equal(critique.args.includes("--resume"), false);
