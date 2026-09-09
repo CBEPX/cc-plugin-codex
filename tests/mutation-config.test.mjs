@@ -14,7 +14,7 @@ const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url))
 const ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
 
 function readWorkflow(name) {
-  return fs.readFileSync(path.join(PROJECT_ROOT, ".github", "workflows", name), "utf8");
+  return fs.readFileSync(path.join(PROJECT_ROOT, ".github", "workflows", name), "utf8").replaceAll("\r\n", "\n");
 }
 
 function workflowJob(source, name) {

@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, it } from "node:test";
-import { writeJobFile, readJobFile } from "../scripts/lib/state.mjs";
+import { writeJobFile, readJobFile, resolveStateDir } from "../scripts/lib/state.mjs";
 import { buildInitialAgentPlan, buildRetryAgentPlan, buildContinuationAgentPlan } from "../scripts/lib/peer-orchestration.mjs";
 import { reserveWorkflow, resolveWorkflowsDir } from "../scripts/lib/workflows.mjs";
 
@@ -21,6 +21,7 @@ function fixture() {
     assert.equal(spawnSync("git", args, { cwd: root }).status, 0);
   }
   const job = { id: "large-job", workspaceRoot: root, kind: "task", jobClass: "task", status: "completed", summary: "done", result: { finalMessage: "😀漢字".repeat(140000) }, resultViewedAt: null };
+  cleanup.push(resolveStateDir(root));
   writeJobFile(root, job.id, job);
   const workflow = reserveWorkflow(root, { id: "large-workflow", mode: "design", brief: "Compare", originSessionId: "reader", stages: ["checkpoint", "critique", "synthesis"], branches: ["codex", "claude"] });
   Object.assign(workflow, { status: "completed", phase: "done", finalResult: { answer: job.result.finalMessage }, checkpoint: { agreements: Array(1000).fill("agreed") } });
