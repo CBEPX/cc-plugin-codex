@@ -906,7 +906,7 @@ function startMockProvider({
           assert.ok(!bodyText.includes("gpt-5.4"), "parent turn should not pin a stale Codex model");
 
           const spawnArgs = {
-            fork_context: false,
+            fork_turns: "none",
             reasoning_effort: "medium",
             message:
               spawnMessage ??
@@ -1870,7 +1870,7 @@ describe("Codex direct-skill E2E", () => {
         "Exit code 0 is the only successful completion.",
         "Exit code 124 means the job is still running",
         "For any other non-zero exit code or shell-tool error",
-        "allow one extra `send_input` call after a successful shell result",
+        "allow one extra `send_message` call after a successful shell result",
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
         "Background Claude Code review finished. Open it with $cc:result <reserved-job-id>.",
@@ -1885,7 +1885,7 @@ describe("Codex direct-skill E2E", () => {
         reservedJobId,
         "--owner-session-id",
         ownerSessionId,
-        "send_input",
+        "send_message",
         notificationMessage,
       ],
       notificationMessage,
@@ -2088,7 +2088,7 @@ describe("Codex direct-skill E2E", () => {
         "Exit code 0 is the only successful completion.",
         "Exit code 124 means the job is still running",
         "For any other non-zero exit code or shell-tool error",
-        "allow one extra `send_input` call after a successful shell result",
+        "allow one extra `send_message` call after a successful shell result",
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
         "Background Claude Code adversarial review finished. Open it with $cc:result <reserved-job-id>.",
@@ -2103,7 +2103,7 @@ describe("Codex direct-skill E2E", () => {
         reservedJobId,
         "--owner-session-id",
         ownerSessionId,
-        "send_input",
+        "send_message",
         notificationMessage,
         "focus on race conditions",
       ],

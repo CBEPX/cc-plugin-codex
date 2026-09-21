@@ -16,7 +16,7 @@ Unlike `$cc:review`, this skill accepts custom focus text after the flags. The m
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Parent and foreground commands use that shell's current directory directly:
 `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review ...`
 
-Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`, plus optional focus text after the flags (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku and fable have no effort)
+Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`, plus optional focus text after the flags (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku and fable leave effort unset, while explicit Fable effort such as `medium` is supported)
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -43,7 +43,7 @@ Execution mode rules:
 - Then ask the user once which execution mode to use, offering two options with the recommended one first and its label suffixed `(Recommended)`:
   - `Wait for results`
   - `Run in background`
-- Use `request_user_input` only when this thread actually has one. If an interactive thread has no question tool, ask in the reply and stop. In a non-interactive thread, proceed with the recommended mode; never spin waiting for a picker.
+- Use `request_user_input` only when this thread actually has one. If it is unavailable, proceed with the computed recommended mode; never stop solely because a picker is missing.
 
 Argument handling:
 - Preserve the user's arguments exactly.
@@ -82,12 +82,11 @@ Background flow:
 - If that helper returns a non-empty `parentThreadId`, pass it into the child prompt as the parent thread id for one-shot completion notification.
 - If it returns an empty `parentThreadId`, omit the notification path instead of emitting a blank thread-id placeholder.
 - Spawn exactly one transient forwarding child through `spawn_agent` with:
-  - `fork_context: false`
+  - `fork_turns: "none"`
   - `reasoning_effort: "medium"`
-- Use the built-in default role implicitly and omit `agent_type` when it is optional or absent. If the runtime schema marks `agent_type` required, pass `agent_type: "default"`.
 - Omit `model` so the forwarding child inherits the current Codex runtime model.
 - Prefer a self-contained child message over inheriting parent history. The built-in adversarial-review child should not rely on full parent thread replay for normal operation.
-- Only consider `fork_context: true` as a last resort for a short follow-up where essential context truly cannot be summarized. Avoid it for large or long-lived threads because it can exhaust the child context window.
+- Keep `fork_turns: "none"`; pass a self-contained forwarding prompt.
 - Before spawning the built-in child, emit one short commentary update that says the child will inherit the current Codex runtime model at `medium` effort.
 - Do not retry with an explicit model override if spawning fails; surface the failure.
 - The built-in child must be a pure forwarder. It should:
@@ -107,16 +106,17 @@ Background flow:
   - return only that command's stdout exactly, with no added commentary
   - ignore stderr progress chatter such as `[cc] ...` lines and preserve only the final stdout-equivalent result text
   - not inspect the repo or perform the review itself
-  - if a parent thread id is available, allow one extra `send_input` call after a successful shell result and before finishing
-  - the child prompt must mention the tool name `send_input` literally; do not replace it with a vague instruction like "send a message to the parent"
-  - that `send_input` call must target the provided parent thread id, must happen at most once, and must not run on failure paths
-  - that `send_input` call should use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })` with no extra prose payload
+  - if a parent thread id is available, allow one extra `send_message` call after a successful shell result and before finishing
+  - the child prompt must mention the tool name `send_message` literally
+  - that `send_message` call must target the provided parent thread id, must happen at most once, and must not run on failure paths
+  - that call should use the exact tool shape `send_message({ target: <parent-thread-id>, message: <steering-message> })`
+  - keep `--view-state defer`; a failed or unavailable `send_message` must leave the result unread for the UserPromptSubmit fallback
   - if the parent provided a non-empty parent thread id, do not silently drop the completion notification path from the child prompt
   - if a reserved review job id is available, use this exact notification message:
     `Background Claude Code adversarial review finished. Open it with $cc:result <reserved-job-id>.`
   - otherwise fall back to:
     `Background Claude Code adversarial review finished. Inspect it with $cc:status first, then use $cc:result for the finished job you want to open.`
-  - that `send_input` message should use one of those exact steering messages instead of inlining the raw review result
+  - that `send_message` should use one of those exact steering messages instead of inlining the raw review result
   - use these steering messages instead of embedding the raw review result in the notification
   - do not embed the raw Claude result inside the notification message
   - do not include any other prose in that notification message

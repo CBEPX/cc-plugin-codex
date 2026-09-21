@@ -505,8 +505,8 @@ export function listStoredJobs(cwd) {
   return readAllJobs(cwd);
 }
 
-export function listJobs(cwd) {
-  const jobs = reapStaleJobs(cwd, readAllJobs(cwd));
+export function listJobs(cwd, options = {}) {
+  const jobs = reapStaleJobs(cwd, readAllJobs(cwd), options);
   return partitionJobsForRetention(jobs).retained;
 }
 
@@ -578,6 +578,9 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
   const childExitDeadline = Date.now() + childExitWaitMs;
 
   return jobs.map((job) => {
+    if (Number.isFinite(options.deadlineAt) && performance.now() >= options.deadlineAt) {
+      return job;
+    }
     if (isWithinReapGracePeriod(job)) return job;
     if (!REAPABLE_STATUSES.has(job.status)) return job;
     const workerPid = Number.isInteger(job.workerPid) && job.workerPid > 0
@@ -676,9 +679,12 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
         identityMatches =
           getProcessIdentityImpl(
             trackedPid,
-            platform === "win32"
-              ? { timeout: WINDOWS_REAPER_IDENTITY_TIMEOUT_MS }
-              : undefined
+            { timeout: Math.max(1, Math.min(
+              options.identityTimeoutMs ?? WINDOWS_REAPER_IDENTITY_TIMEOUT_MS,
+              Number.isFinite(options.deadlineAt)
+                ? options.deadlineAt - performance.now()
+                : Infinity
+            )) }
           ) === trackedPidIdentity;
       } catch {
         identityMatches = false;

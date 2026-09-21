@@ -93,15 +93,15 @@ function hashText(value) {
   return createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 }
 
-export function getWorkingTreeFingerprint(cwd) {
+export function getWorkingTreeFingerprint(cwd, options = {}) {
   const fingerprintGitEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
   const smallGitOptions = {
-    timeout: FINGERPRINT_GIT_TIMEOUT_MS,
+    timeout: options.timeout ?? FINGERPRINT_GIT_TIMEOUT_MS,
     maxBuffer: FINGERPRINT_SMALL_MAX_BUFFER,
     env: fingerprintGitEnv,
   };
   const pathListGitOptions = {
-    timeout: FINGERPRINT_GIT_TIMEOUT_MS,
+    timeout: options.timeout ?? FINGERPRINT_GIT_TIMEOUT_MS,
     maxBuffer: FINGERPRINT_PATH_LIST_MAX_BUFFER,
     env: fingerprintGitEnv,
   };

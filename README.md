@@ -140,7 +140,7 @@ $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 
 **Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
-**Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` are passed through with no default effort setting. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version; for older pinned IDs, pass `--effort` explicitly instead of inheriting a current-family default.
+**Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` have no implicit effort. Explicit Fable effort, including `medium`, is forwarded unchanged. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version; for older pinned IDs, pass `--effort` explicitly instead of inheriting a current-family default.
 
 Fable 5.1 (`claude-fable-5-1`) has a native 1M context window and requires Claude Code 2.1.257 or newer. The bare `fable` alias remains floating and may still resolve to Fable 5 behind Claude Apps Gateway; use the full model ID when Fable 5.1 is required. No `[1m]` suffix or hidden Fable effort default is added. See Claude Code's [model configuration](https://code.claude.com/docs/en/model-config).
 
@@ -228,7 +228,7 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--fresh` | Force a new task (don't resume) |
 | `--write` | Allow file edits (default) |
 | `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`). Aliases are resolved by Claude Code; a full ID pins a version. |
-| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable) |
+| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable; explicit Fable effort such as `medium` is supported) |
 | `--prompt-file <path>` | Read task description from a file |
 | `--view-state on-terminal` | Mark the foreground terminal outcome as viewed |
 | `--view-state defer` | Leave the terminal outcome unread for later inspection |

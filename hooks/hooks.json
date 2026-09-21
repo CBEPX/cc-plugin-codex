@@ -7,6 +7,7 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" session-lifecycle",
+            "timeout": 5,
             "statusMessage": "Initializing Claude Code bridge"
           }
         ]
@@ -43,6 +44,7 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" unread-result",
+            "timeout": 5,
             "statusMessage": "Checking for unread Claude Code results"
           }
         ]

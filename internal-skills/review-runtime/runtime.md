@@ -43,15 +43,15 @@ Background contract:
   - Exit code 0 is the only successful completion.
   - Exit code 124 means the job is still running; return the companion output without claiming it finished.
   - For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
-  - use at most one `send_input` completion notification on success
-  - mention the tool name `send_input` literally in the child instructions
-  - use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`
+  - use at most one `send_message` completion notification on success
+  - mention the tool name `send_message` literally in the child instructions
+  - use the exact tool shape `send_message({ target: <parent-thread-id>, message: <steering-message> })`
+  - keep deferred view state so failed delivery remains available to the unread-result hook
   - do not silently drop the completion notification path when the parent provided a non-empty parent thread id
 
 Spawn-agent defaults:
-- `fork_context: false`
+- `fork_turns: "none"`
 - `reasoning_effort: "medium"`
-- Use the implicit default role and omit `agent_type` when it is optional or absent. If the runtime schema marks `agent_type` required, pass `agent_type: "default"`.
 - Omit `model` so the child inherits the current Codex runtime model.
 - Do not add a fixed-version model fallback.
 

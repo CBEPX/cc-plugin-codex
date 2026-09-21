@@ -25,7 +25,7 @@ Command selection:
 Routing controls:
 - Treat `--cwd`, `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
 - Preserve the parent helper's exact non-empty `workspaceRoot` as `--cwd "<workspaceRoot>"`; never substitute the plugin root or the child's default working directory.
-- Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku and fable.
+- Leave `--model` and `--effort` unset unless the user explicitly asks for them, and preserve explicit values exactly. The companion command applies its own defaults; Fable has no implicit effort but supports explicit effort such as `medium`.
 - `--view-state on-terminal` means the user will see this companion result in the current turn, so the companion may mark any terminal outcome viewed.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.
@@ -52,9 +52,10 @@ Task defaults:
 - Exit code 0 is the only successful completion.
 - Exit code 124 means the job is still running; return the companion output without claiming it finished.
 - For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
-- If the parent supplied a non-empty parent thread id for background completion, allow at most one success-only `send_input` notification before finishing.
-- Mention the tool name `send_input` literally when describing that notification path.
-- Use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`.
+- If the parent supplied a non-empty parent thread id for background completion, allow at most one success-only `send_message` notification before finishing.
+- Mention the tool name `send_message` literally when describing that notification path.
+- Use the exact tool shape `send_message({ target: <parent-thread-id>, message: <steering-message> })`.
+- Keep deferred view state so a failed or unavailable delivery remains available to the unread-result hook.
 - Use steering messages that point the parent at `$cc:result` or `$cc:status` instead of embedding the raw Claude result.
 - For background rescue, use that same steering message as the child's own final assistant message instead of echoing the raw companion result.
 - Do not poll status, fetch results, cancel jobs, or add commentary after the companion output.

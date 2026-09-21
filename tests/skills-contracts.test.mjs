@@ -131,7 +131,7 @@ test("review skills preserve foreground/background routing contracts", () => {
         "--owner-session-id <owner-session-id>",
         "--job-id <reserved-job-id>",
         "spawn_agent",
-        "`fork_context: false`",
+        '`fork_turns: "none"`',
         '`reasoning_effort: "medium"`',
         "Omit `model` so the forwarding child inherits the current Codex runtime model.",
         "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
@@ -139,7 +139,8 @@ test("review skills preserve foreground/background routing contracts", () => {
         "Exit code 124 means the job is still running; return the companion output without claiming it finished.",
         "For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.",
         "never leave an empty routing placeholder such as `--owner-session-id  --job-id`",
-        "send_input({ target: <parent-thread-id>, message: <steering-message> })",
+        "send_message({ target: <parent-thread-id>, message: <steering-message> })",
+        "must leave the result unread",
         notification,
       ],
       name
@@ -163,7 +164,7 @@ test("review and rescue skills retain negative routing guards", () => {
         "Do not fall back to raw `claude`",
         "generic `claude_review_runner`-style helper role",
         "shell backgrounding such as `&`, `nohup`, detached `spawn`",
-        "Only consider `fork_context: true` as a last resort",
+        'Keep `fork_turns: "none"`',
         "Do not retry with an explicit model override if spawning fails",
       ],
       name
@@ -194,8 +195,7 @@ test("review and rescue skills retain negative routing guards", () => {
       "This size-and-scope heuristic belongs to the main Codex thread",
       "If the user task text itself begins with a slash command",
       "Never satisfy background rescue by launching",
-      "Prefer `fork_context: false`",
-      "Only consider `fork_context: true` as a last resort",
+      'Use `fork_turns: "none"`',
       "Do not retry with an explicit model override if spawning fails",
     ],
     "rescue routing"
@@ -219,7 +219,7 @@ test("rescue keeps host execution controls out of the companion task", () => {
       "--owner-session-id <owner-session-id>",
       "--job-id <reserved-job-id>",
       "--prompt-file",
-      "send_input({ target: <parent-thread-id>, message: <steering-message> })",
+      "send_message({ target: <parent-thread-id>, message: <steering-message> })",
       "Background Claude Code rescue finished. Open it with $cc:result <reserved-job-id>.",
       "If the shell tool returns a session id, keep polling that same session until the companion command exits.",
       "Exit code 0 is the only successful completion.",
@@ -267,7 +267,7 @@ test("internal runtime references preserve executable routing invariants", () =>
       "For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.",
       "Omit `model` so the child inherits the current Codex runtime model.",
       "Do not add a fixed-version model fallback.",
-      "send_input({ target: <parent-thread-id>, message: <steering-message> })",
+      "send_message({ target: <parent-thread-id>, message: <steering-message> })",
       "Background Claude Code review finished. Open it with $cc:result <reserved-job-id>.",
       "Background Claude Code adversarial review finished. Open it with $cc:result <reserved-job-id>.",
     ],
@@ -290,7 +290,7 @@ test("internal runtime references preserve executable routing invariants", () =>
       "--job-id",
       "--prompt-file",
       "Never call `task-resume-candidate` from the rescue forwarder.",
-      "send_input({ target: <parent-thread-id>, message: <steering-message> })",
+      "send_message({ target: <parent-thread-id>, message: <steering-message> })",
     ],
     "rescue runtime"
   );
@@ -322,7 +322,7 @@ test("review skills use only an available Codex question tool", () => {
     assert.doesNotMatch(contract, /AskUserQuestion/);
     assert.match(contract, /request_user_input/);
     assert.match(contract, /only when this thread actually has one/i);
-    assert.match(contract, /non-interactive thread/i);
+    assert.match(contract, /If it is unavailable, proceed/i);
     assert.match(contract, /recommended mode/i);
   }
 });

@@ -678,6 +678,68 @@ test("records a turn baseline for the current session on UserPromptSubmit", () =
   }
 });
 
+test("bounds UserPromptSubmit Git discovery", () => {
+  const testEnv = createEnv();
+  try {
+    const stateDir = stateDirFor(testEnv);
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, "config.json"),
+      JSON.stringify({ version: 1, stopReviewGate: true }) + "\n",
+      "utf8"
+    );
+    const bin = path.join(testEnv.rootDir, "slow-tools");
+    fs.mkdirSync(bin);
+    const executable = path.join(bin, "git");
+    fs.writeFileSync(executable, "#!/bin/sh\nexec </dev/null >/dev/null 2>&1\nexec /bin/sleep 30\n", "utf8");
+    fs.chmodSync(executable, 0o755);
+
+    const startedAt = performance.now();
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue",
+    }, {
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    }, { timeout: 2_500 });
+
+    assert.ok(performance.now() - startedAt < 2_200);
+    assert.equal(output, "");
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("bounds UserPromptSubmit stale-job identity checks", (t) => {
+  if (process.platform !== "darwin") return t.skip("Darwin ps fixture");
+  const testEnv = createEnv();
+  try {
+    initGitRepo(testEnv.workspaceDir);
+    writeJob(testEnv, {
+      id: "stale-running", sessionId: "session-a", status: "running",
+      workerPid: process.pid, workerPidIdentity: "stale-identity",
+      createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    });
+    const bin = path.join(testEnv.rootDir, "slow-ps");
+    fs.mkdirSync(bin);
+    const executable = path.join(bin, "ps");
+    fs.writeFileSync(executable, "#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n", "utf8");
+    fs.chmodSync(executable, 0o755);
+
+    const startedAt = performance.now();
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit", cwd: testEnv.workspaceDir,
+      session_id: "session-a", prompt: "continue",
+    }, { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` }, { timeout: 2_500 });
+    assert.ok(performance.now() - startedAt < 2_200);
+    assert.equal(output, "");
+    assert.equal(readJob(testEnv, "stale-running").notifiedAt, undefined);
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
 test("does not replace an existing parent marker from an unmarked child prompt", () => {
   const testEnv = createEnv();
   try {
