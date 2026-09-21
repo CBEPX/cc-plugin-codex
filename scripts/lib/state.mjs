@@ -575,7 +575,19 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
   const terminateProcessTreeIfIdentityMatchesImpl =
     options.terminateProcessTreeIfIdentityMatchesImpl ??
     terminateProcessTreeIfIdentityMatches;
-  const childExitDeadline = Date.now() + childExitWaitMs;
+  const reaperDeadlineMs = Number.isFinite(options.deadlineAt)
+    ? Math.max(0, Math.floor(options.deadlineAt - performance.now()))
+    : null;
+  const childExitDeadline = Date.now() + Math.min(
+    childExitWaitMs,
+    reaperDeadlineMs ?? childExitWaitMs
+  );
+  const transitionOptions = {
+    ...(Number.isFinite(options.deadlineAt)
+      ? { deadlineAt: options.deadlineAt }
+      : {}),
+    ...(options.skipLockOwnerIdentity ? { skipLockOwnerIdentity: true } : {}),
+  };
 
   return jobs.map((job) => {
     if (Number.isFinite(options.deadlineAt) && performance.now() >= options.deadlineAt) {
@@ -610,17 +622,24 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
         return current;
       }
       try {
-        transitionJob(cwd, job.id, ["queued"], "failed", {
-          errorMessage: "Worker did not start before the startup grace period elapsed. Auto-reaped.",
-          completedAt: nowIso(),
-          reapedBy: "status-reaper",
-          reapReason: "startup-timeout",
-          pid: null,
-          pidIdentity: null,
-          workerPid: null,
-          workerPidIdentity: null,
-          phase: "failed",
-        });
+        transitionJob(
+          cwd,
+          job.id,
+          ["queued"],
+          "failed",
+          {
+            errorMessage: "Worker did not start before the startup grace period elapsed. Auto-reaped.",
+            completedAt: nowIso(),
+            reapedBy: "status-reaper",
+            reapReason: "startup-timeout",
+            pid: null,
+            pidIdentity: null,
+            workerPid: null,
+            workerPidIdentity: null,
+            phase: "failed",
+          },
+          transitionOptions
+        );
         return readJobFile(cwd, job.id) ?? job;
       } catch {
         return job;
@@ -786,6 +805,22 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
       let childCleanup = null;
       if (hasDistinctClaudeChild) {
         try {
+          const remainingDeadlineMs = Number.isFinite(options.deadlineAt)
+            ? Math.floor(options.deadlineAt - performance.now())
+            : null;
+          if (remainingDeadlineMs !== null && remainingDeadlineMs <= 0) {
+            throw Object.assign(new Error("Stale-job reaper deadline expired"), {
+              code: "ELOCKTIMEOUT",
+            });
+          }
+          const childIdentityTimeout = remainingDeadlineMs === null
+            ? (platform === "win32" ? WINDOWS_REAPER_IDENTITY_TIMEOUT_MS : null)
+            : Math.min(
+                remainingDeadlineMs,
+                platform === "win32"
+                  ? WINDOWS_REAPER_IDENTITY_TIMEOUT_MS
+                  : remainingDeadlineMs
+              );
           childCleanup = terminateProcessTreeIfIdentityMatchesImpl(
             job.pid,
             job.pidIdentity,
@@ -793,8 +828,8 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
               platform,
               getProcessIdentityImpl,
               isProcessAliveImpl,
-              ...(platform === "win32"
-                ? { timeout: WINDOWS_REAPER_IDENTITY_TIMEOUT_MS }
+              ...(childIdentityTimeout !== null
+                ? { timeout: Math.max(1, childIdentityTimeout) }
                 : {}),
             }
           );
@@ -880,7 +915,8 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
         job.id,
         [job.status],
         nextStatus,
-        terminalData
+        terminalData,
+        transitionOptions
       );
       if (transitioned.transitioned) {
         return readJobFile(cwd, job.id) ?? job;
