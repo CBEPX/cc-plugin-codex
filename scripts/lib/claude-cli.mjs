@@ -746,6 +746,11 @@ export class StreamParser {
 
   _handleStreamEvent(event) {
     const inner = event.event;
+    if (inner?.type === "message_start") {
+      // Keep terminal-tail recovery within this parent message, not prior progress.
+      this.state.finalMessage = "";
+      return null;
+    }
     const delta = inner?.delta;
     if (delta?.type === "text_delta" && delta.text) {
       this.state.finalMessage += delta.text;

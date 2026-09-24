@@ -2828,3 +2828,35 @@ describe("SANDBOX_SETTINGS", () => {
     assert.deepEqual(s.network.allowedDomains, []);
   });
 });
+
+describe("parent message final answer", () => {
+  const stream = (event, extra = {}) => JSON.stringify({ type: "stream_event", event, ...extra }) + "\n";
+  const start = () => stream({ type: "message_start", message: { role: "assistant", content: [] } });
+  const text = (value) => stream({ type: "content_block_delta", delta: { type: "text_delta", text: value } });
+  const result = (value) => JSON.stringify({ type: "result", result: value }) + "\n";
+
+  it("keeps progress live but excludes earlier messages from final JSON", () => {
+    const parser = new StreamParser();
+    const events = parser.feed(start() + text("I'll read the file.") + stream({ type: "message_stop" }) + start() + text('{"ok":true}') + result('{"ok":true}'));
+    assert.ok(events.some((event) => event.text === "I'll read the file."));
+    assert.equal(parser.state.finalMessage, '{"ok":true}');
+  });
+
+  it("preserves a truncated suffix only within the last parent message", () => {
+    const parser = new StreamParser();
+    parser.feed(start() + text("Progress.") + start() + text("Finding 1\nFinding 2") + result("Finding 2"));
+    assert.equal(parser.state.finalMessage, "Finding 1\nFinding 2");
+  });
+
+  it("does not recover earlier progress for a tool-only final message", () => {
+    const parser = new StreamParser();
+    parser.feed(start() + text("Starting.") + start() + stream({ type: "content_block_start", content_block: { type: "tool_use", name: "Read", input: {} } }) + result(""));
+    assert.equal(parser.state.finalMessage, "");
+  });
+
+  it("does not reset parent output at a subagent message boundary", () => {
+    const parser = new StreamParser();
+    parser.feed(start() + text("Parent") + stream({ type: "message_start", message: { role: "assistant" } }, { parent_tool_use_id: "child" }) + result("Parent"));
+    assert.equal(parser.state.finalMessage, "Parent");
+  });
+});
