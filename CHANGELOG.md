@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## v1.7.6
+
+### Changed
+
+- Bound session-start and prompt hooks at the manifest boundary and bound prompt-time Git discovery and stale-job identity probes inside the hook budget.
+- Align collaboration skill instructions with `fork_turns: "none"`, parent-only `send_message` delivery, computed defaults when no question tool is available, and explicit Fable reasoning effort.
+
+### Fixed
+
+- Keep malformed or oversized lifecycle hook payloads fail-open and retain unread background results when parent delivery fails.
+
 ## v1.7.5
 
 ### Changed

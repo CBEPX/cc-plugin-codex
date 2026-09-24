@@ -1859,6 +1859,39 @@ describe("reapStaleJobs", () => {
     assert.equal(cleanupOptions?.timeout, 2_000);
   });
 
+  it("bounds Claude child cleanup to the remaining reaper deadline", () => {
+    const id = "test-reap-dead-worker-child-deadline";
+    const claudePid = 11126;
+    const workerPid = 22237;
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "running",
+      pid: claudePid,
+      pidIdentity: "claude-identity",
+      workerPid,
+      workerPidIdentity: "worker-identity",
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+    /** @type {{ timeout?: number } | null} */
+    let cleanupOptions = null;
+
+    reapStaleJobs(PROJECT_CWD, [readJobFile(PROJECT_CWD, id)], {
+      platform: "darwin",
+      deadlineAt: performance.now() + 500,
+      isProcessAliveImpl: (pid) => pid === claudePid,
+      getProcessIdentityImpl: () => "worker-identity",
+      terminateProcessTreeIfIdentityMatchesImpl: (_pid, _identity, options) => {
+        cleanupOptions = options;
+        return { attempted: true, delivered: true };
+      },
+      childExitWaitMs: 0,
+    });
+
+    assert.ok(Number.isFinite(cleanupOptions?.timeout));
+    assert.ok(cleanupOptions.timeout > 0 && cleanupOptions.timeout <= 500);
+  });
+
   it("clears a recycled Claude child PID when its owning worker dies", () => {
     const id = "test-reap-dead-worker-recycled-child";
     writeJobFile(PROJECT_CWD, id, {

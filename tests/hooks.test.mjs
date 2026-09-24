@@ -1274,7 +1274,8 @@ fs.readdirSync = (directory, ...args) => {
       }
     }
 
-    assert.equal("timeout" in sessionStartHandler, false);
+    assert.equal(sessionStartHandler.timeout, 5);
+    assert.equal(manifest.hooks.UserPromptSubmit[0].hooks[0].timeout, 5);
     assert.equal(handler.timeout, 3);
     assert.match(handler.command, /session-lifecycle SessionEnd/u);
   });
@@ -2596,14 +2597,14 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         encoding: "utf8",
       });
 
-      assert.notEqual(result.status, 0);
+      assert.equal(result.status, 0);
       assert.match(result.stderr, /Hook input exceeds/i);
     } finally {
       cleanupHookEnvironment(testEnv);
     }
   });
 
-  it("hook input parser accepts empty input and rejects malformed JSON", () => {
+  it("hook input parser accepts empty input and fails open on malformed JSON", () => {
     const testEnv = createHookEnvironment();
     try {
       const empty = spawnSync(process.execPath, [UNREAD_HOOK], {
@@ -2621,7 +2622,7 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         input: "{invalid\n",
         encoding: "utf8",
       });
-      assert.notEqual(malformed.status, 0);
+      assert.equal(malformed.status, 0);
       assert.match(malformed.stderr, /Invalid hook input JSON/i);
     } finally {
       cleanupHookEnvironment(testEnv);

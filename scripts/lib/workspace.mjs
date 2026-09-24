@@ -12,6 +12,9 @@ const cachedWorkspaceRoots = new Map();
 function cacheWorkspaceRoot(cacheKey, workspaceRoot) {
   cachedWorkspaceRoots.set(cacheKey, workspaceRoot);
   cachedWorkspaceRoots.set(path.resolve(workspaceRoot), workspaceRoot);
+  try {
+    cachedWorkspaceRoots.set(fs.realpathSync.native(workspaceRoot), workspaceRoot);
+  } catch {}
 }
 
 function findGitRoot(cwd) {

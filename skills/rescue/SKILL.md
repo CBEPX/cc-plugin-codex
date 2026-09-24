@@ -58,11 +58,10 @@ Main-thread routing rules:
 - If a legacy request still includes `--notify-parent-on-complete`, treat it as a compatibility alias. Background built-in rescue now attempts parent wake-up by default.
 
 Subagent launch:
-- By default, use Codex's `spawn_agent` tool with its implicit default role and omit `agent_type` when it is optional or absent. If the runtime schema marks `agent_type` required, pass `agent_type: "default"`.
+- By default, use Codex's `spawn_agent` tool.
 - Never satisfy background rescue by launching `claude-companion.mjs task` itself as a detached shell process. Do not use `&`, `nohup`, detached `spawn`, or any equivalent direct background process launch from the parent.
 - If a legacy request still includes `--builtin-agent`, treat it as a compatibility alias for the default built-in path. It should not change behavior.
-- Prefer `fork_context: false` for the built-in rescue child. The parent should pass a self-contained forwarding message instead of replaying the full parent thread by default.
-- Only consider `fork_context: true` as a last resort for a short follow-up where essential context truly cannot be summarized. Avoid it for large or long-lived threads because it can exhaust the child context window.
+- Use `fork_turns: "none"` for the built-in rescue child and pass a self-contained forwarding message.
 - The built-in rescue path must omit `model` and set `reasoning_effort: "medium"` on `spawn_agent`, so the transient forwarding child inherits the current Codex runtime model.
 - Before spawning the built-in child, emit one short commentary update that says the child will inherit the current Codex runtime model at `medium` effort.
 - Do not retry with an explicit model override if spawning fails; surface the failure.
@@ -129,12 +128,13 @@ Subagent launch:
   - For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
   - for foreground rescue only, tell the child to return that command's stdout text exactly, with no preamble, summary, code fence, trimming, normalization, or punctuation changes
   - tell the child to ignore stderr progress chatter such as `[cc] ...` lines and preserve only the stdout-equivalent final result text
-  - if a parent thread id is provided for experimental background notification, allow one extra `send_input` call after a successful shell result and before finishing
-  - the child prompt must mention the tool name `send_input` literally; do not replace it with a vague instruction like "send a message to the parent"
-  - that `send_input` call must target the provided parent thread id, must happen at most once, and must not run on failure paths
-  - that `send_input` call should use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })` with no extra prose payload
+  - if a parent thread id is provided for background notification, allow one extra `send_message` call after a successful shell result and before finishing
+  - the child prompt must mention the tool name `send_message` literally
+  - that `send_message` call must target the provided parent thread id, must happen at most once, and must not run on failure paths
+  - that call should use the exact tool shape `send_message({ target: <parent-thread-id>, message: <steering-message> })`
+  - keep `--view-state defer`; a failed or unavailable `send_message` must leave the result unread for the UserPromptSubmit fallback
   - if the parent provided a non-empty parent thread id, do not silently drop the completion notification path from the child prompt
-  - that `send_input` message should use a short user-facing template that steers the parent toward explicit result retrieval instead of inlining the raw result
+  - that `send_message` should use a short user-facing template that steers the parent toward explicit result retrieval instead of inlining the raw result
   - if a reserved companion job id is available, use this exact high-level shape for the notification message:
     `Background Claude Code rescue finished. Open it with $cc:result <reserved-job-id>.`
   - if no reserved job id is available, fall back to:

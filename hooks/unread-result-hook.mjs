@@ -36,6 +36,7 @@ const MAX_LISTED_JOBS = 3;
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PROMPT_NOTIFICATION_BUDGET_MS = 1_500;
+const PROMPT_GIT_TIMEOUT_MS = 200;
 
 function isExplicitClaudeStatusRequest(prompt) {
   const text = String(prompt ?? "").toLowerCase();
@@ -89,12 +90,15 @@ function buildWorkflowContext(workflows) {
   ].join("\n");
 }
 
-function selectUnreadTerminalJobs(workspaceRoot, sessionId) {
+function selectUnreadTerminalJobs(workspaceRoot, sessionId, deadlineAt) {
   if (!sessionId) {
     return [];
   }
 
-  return listJobs(workspaceRoot)
+  return listJobs(workspaceRoot, {
+    deadlineAt,
+    identityTimeoutMs: PROMPT_GIT_TIMEOUT_MS,
+  })
     .filter((job) => job.sessionId === sessionId)
     .filter((job) => !job.workflowId)
     .filter((job) => TERMINAL_JOB_STATUSES.has(job.status))
@@ -117,13 +121,18 @@ function selectUnreadWorkflows(workspaceRoot, sessionId) {
     .filter(({ workflow, event }) => !(workflow.viewedEvents ?? []).includes(event));
 }
 
-function markJobsNotified(workspaceRoot, jobs) {
+function markJobsNotified(workspaceRoot, jobs, deadlineAt) {
   const timestamp = nowIso();
   for (const job of jobs) {
     try {
-      transitionJob(workspaceRoot, job.id, [job.status], job.status, {
-        notifiedAt: timestamp,
-      });
+      transitionJob(
+        workspaceRoot,
+        job.id,
+        [job.status],
+        job.status,
+        { notifiedAt: timestamp },
+        { deadlineAt, skipLockOwnerIdentity: process.platform === "win32" }
+      );
     } catch {
       // Notification state is best-effort; still surface the terminal result.
     }
@@ -167,12 +176,14 @@ function markWorkflowsNotified(workspaceRoot, workflows, deadlineAt) {
   return claimed;
 }
 
-function captureTurnBaseline(workspaceRoot, sessionId, cwd) {
+function captureTurnBaseline(workspaceRoot, sessionId, cwd, deadlineAt) {
   if (!sessionId) {
     return;
   }
   try {
-    const fingerprint = getWorkingTreeFingerprint(cwd);
+    const fingerprint = getWorkingTreeFingerprint(cwd, {
+      timeout: Math.max(1, Math.min(PROMPT_GIT_TIMEOUT_MS, deadlineAt - performance.now())),
+    });
     writeTurnBaseline(workspaceRoot, sessionId, {
       cwd,
       workspaceRoot,
@@ -200,10 +211,14 @@ async function main() {
     return;
   }
   const cwd = input.cwd || process.cwd();
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const notificationDeadlineAt = performance.now() + PROMPT_NOTIFICATION_BUDGET_MS;
+  const workspaceRoot = resolveWorkspaceRoot(cwd, {
+    filesystemFallbackOnTimeout: true,
+    gitTimeout: Math.max(1, Math.min(PROMPT_GIT_TIMEOUT_MS, notificationDeadlineAt - performance.now())),
+    processLocalHandoff: true,
+  });
   const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
   const prompt = String(input.prompt ?? "");
-  const notificationDeadlineAt = performance.now() + PROMPT_NOTIFICATION_BUDGET_MS;
 
   if (
     process.env[SKIP_INTERACTIVE_HOOKS_ENV] === "1" ||
@@ -224,20 +239,20 @@ async function main() {
     // Best effort: an invalid session id must not fail a user prompt.
   }
   if (config.stopReviewGate) {
-    captureTurnBaseline(workspaceRoot, sessionId, cwd);
+    captureTurnBaseline(workspaceRoot, sessionId, cwd, notificationDeadlineAt);
   }
 
   if (isExplicitClaudeStatusRequest(prompt)) {
     return;
   }
 
-  const jobs = selectUnreadTerminalJobs(workspaceRoot, sessionId);
+  const jobs = selectUnreadTerminalJobs(workspaceRoot, sessionId, notificationDeadlineAt);
   const workflows = selectUnreadWorkflows(workspaceRoot, sessionId);
   if (jobs.length === 0 && workflows.length === 0) {
     return;
   }
 
-  markJobsNotified(workspaceRoot, jobs);
+  markJobsNotified(workspaceRoot, jobs, notificationDeadlineAt);
   const claimedWorkflows = markWorkflowsNotified(
     workspaceRoot,
     workflows,
@@ -255,5 +270,4 @@ main().catch((error) => {
   process.stderr.write(
     `${error instanceof Error ? error.message : String(error)}\n`
   );
-  process.exit(1);
 });
