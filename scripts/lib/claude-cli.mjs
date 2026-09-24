@@ -21,6 +21,7 @@ import {
 import {
   getProcessIdentity,
   getSpawnedProcessIdentity,
+  isAmbiguousLegacyIdentity,
   isProcessAlive,
   isProcessGroupAlive,
   terminateProcessTreeIfIdentityMatches,
@@ -1897,7 +1898,7 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
   // Verify PID identity to prevent killing recycled PIDs
   let actualIdentity;
   try {
-    actualIdentity = getIdentity(pid);
+    actualIdentity = getIdentity(pid, { expectedIdentity: pidIdentity });
   } catch (error) {
     if (isAlive(pid) || isGroupAlive(pid)) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -1909,6 +1910,9 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
     return { cancelled: true, note: "Process already exited" };
   }
   if (actualIdentity !== pidIdentity) {
+    if (isAmbiguousLegacyIdentity(pidIdentity, actualIdentity, platform) && isAlive(pid)) {
+      return { cancelled: false, note: "Unable to verify legacy process identity after a possible exec" };
+    }
     return {
       cancelled: true,
       note: "Process already exited (PID recycled)",
@@ -1942,7 +1946,11 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
   }
   if (isAlive(pid)) {
     try {
-      if (getIdentity(pid) !== pidIdentity) {
+      const currentIdentity = getIdentity(pid, { expectedIdentity: pidIdentity });
+      if (currentIdentity !== pidIdentity) {
+        if (isAmbiguousLegacyIdentity(pidIdentity, currentIdentity, platform)) {
+          return { cancelled: false, note: "Unable to re-verify legacy process identity before SIGKILL" };
+        }
         return {
           cancelled: true,
           note: "Process exited during SIGTERM wait (PID recycled)",

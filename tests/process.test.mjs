@@ -649,7 +649,7 @@ describe("terminateProcessTreeIfIdentityMatches", () => {
     assert.equal(terminated, false);
     assert.equal(mismatched.reason, "identity-mismatch");
     assert.equal(matched.delivered, true);
-    assert.deepEqual(capturedIdentityOptions, { timeout: 321 });
+    assert.deepEqual(capturedIdentityOptions, { timeout: 321, expectedIdentity: "identity" });
     assert.equal(unavailable.reason, "identity-unavailable");
     assert.equal(unavailable.delivered, false);
     assert.equal(missing.reason, "process-missing");
@@ -1026,4 +1026,103 @@ describe("validateProcessIdentity", () => {
   it("returns false for non-existent PID", () => {
     assert.equal(validateProcessIdentity(99999999, "any"), false);
   });
+});
+
+describe("macOS birth identity", () => {
+  it("keeps a spawned process identity across exec and cancels that process", async (t) => {
+    if (process.platform !== "darwin") return t.skip("macOS only");
+    const child = spawn("/bin/sh", ["-c", "read -r signal; exec /bin/sleep 20"], {
+      detached: true, stdio: ["pipe", "ignore", "ignore"],
+    });
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    try {
+      const identity = getSpawnedProcessIdentity(child.pid);
+      assert.match(identity, /^darwin-birth-v1:\d+:\d+$/u);
+      child.stdin.end("go\n");
+      await delay(100);
+      assert.equal(getProcessIdentity(child.pid, { expectedIdentity: identity }), identity);
+      assert.equal(validateProcessIdentity(child.pid, identity), true);
+      const { cancelClaudeProcess } = await import("../scripts/lib/claude-cli.mjs");
+      const result = await cancelClaudeProcess(child.pid, identity);
+      assert.equal(result.cancelled, true, result.note);
+      await exited;
+      assert.equal(isProcessAlive(child.pid), false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+    }
+  });
+
+  it("rejects malformed native identity data and forwards the caller deadline", () => {
+    for (const invalid of [Buffer.alloc(0), Buffer.alloc(136)]) {
+      /** @type {Array<{command: string, options: {timeout: number}}>} */
+      const calls = [];
+      assert.throws(() => getSpawnedProcessIdentity(123, {
+        platform: "darwin", timeout: 17,
+        runCommandCheckedImpl: (command, args, options) => {
+          calls.push({ command, options });
+          return { stdout: invalid.toString("base64") };
+        },
+      }), /Invalid macOS process identity/u);
+      const call = calls[0];
+      assert.ok(call);
+      assert.equal(call.command, "/usr/bin/osascript");
+      assert.equal(call.options.timeout, 17);
+    }
+  });
+
+  it("fails closed on a live ambiguous legacy mismatch", () => {
+    const expected = "Thu Sep 24 13:00:00 2026     /usr/bin/env";
+    const actual = "Thu Sep 24 13:00:00 2026     node";
+    const result = terminateProcessTreeIfIdentityMatches(123, expected, {
+      platform: "darwin", getProcessIdentityImpl: () => actual,
+      isProcessAliveImpl: () => true,
+      terminateProcessTreeImpl: () => { throw new Error("must not signal"); },
+    });
+    assert.equal(result.reason, "identity-unavailable");
+    assert.equal(result.delivered, false);
+  });
+});
+
+it("reads versioned macOS birth tokens without a legacy fallback", () => {
+  const data = Buffer.alloc(136);
+  data.writeUInt32LE(123, 12);
+  data.writeBigUInt64LE(100n, 120);
+  data.writeBigUInt64LE(42n, 128);
+  const options = {
+    platform: "darwin",
+    runCommandCheckedImpl: () => ({ stdout: data.toString("base64") }),
+  };
+  const identity = getSpawnedProcessIdentity(123, options);
+  assert.equal(identity, "darwin-birth-v1:100:42");
+  assert.equal(getProcessIdentity(123, { ...options, expectedIdentity: identity }), identity);
+  assert.equal(validateProcessIdentity(123, identity, options), true);
+  for (const expectedIdentity of ["darwin-birth-v2:100:42", "darwin-birth-v1:bad"]) {
+    assert.throws(() => getProcessIdentity(123, { ...options, expectedIdentity }), /Unsupported/u);
+  }
+  data.writeBigUInt64LE(1000000n, 128);
+  assert.throws(() => getSpawnedProcessIdentity(123, options), /birth time/u);
+  data.writeBigUInt64LE(0n, 120);
+  assert.throws(() => getSpawnedProcessIdentity(123, options), /birth time/u);
+  data.writeUInt32LE(124, 12);
+  assert.throws(() => getSpawnedProcessIdentity(123, options), /identity response/u);
+});
+
+it("preserves an ambiguous legacy process before either cancellation signal", async () => {
+  const { cancelClaudeProcess } = await import("../scripts/lib/claude-cli.mjs");
+  const expected = "Thu Sep 24 13:00:00 2026     /usr/bin/env";
+  const actual = "Thu Sep 24 13:00:00 2026     node";
+  for (const beforeKill of [false, true]) {
+    let reads = 0;
+    const signals = [];
+    const result = await cancelClaudeProcess(123, expected, {
+      platform: "darwin", isProcessAliveImpl: () => true,
+      isProcessGroupAliveImpl: () => true,
+      getProcessIdentityImpl: () => beforeKill && reads++ === 0 ? expected : actual,
+      killImpl: (_pid, signal) => signals.push(signal),
+      waitForProcessGroupImpl: async () => false,
+    });
+    assert.equal(result.cancelled, false);
+    assert.deepEqual(signals, beforeKill ? ["SIGTERM"] : []);
+  }
 });

@@ -28,6 +28,7 @@ import {
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import {
   getProcessIdentity,
+  isAmbiguousLegacyIdentity,
   isProcessAlive,
   terminateProcessTreeIfIdentityMatches,
 } from "./process.mjs";
@@ -695,16 +696,19 @@ export function reapStaleJobs(cwd, jobs, options = {}) {
     let identityUnavailable = false;
     if (needsIdentityCheck) {
       try {
-        identityMatches =
-          getProcessIdentityImpl(
-            trackedPid,
-            { timeout: Math.max(1, Math.min(
-              options.identityTimeoutMs ?? WINDOWS_REAPER_IDENTITY_TIMEOUT_MS,
-              Number.isFinite(options.deadlineAt)
-                ? options.deadlineAt - performance.now()
-                : Infinity
-            )) }
-          ) === trackedPidIdentity;
+        const actualIdentity = getProcessIdentityImpl(
+          trackedPid,
+          { expectedIdentity: trackedPidIdentity, timeout: Math.max(1, Math.min(
+            options.identityTimeoutMs ?? WINDOWS_REAPER_IDENTITY_TIMEOUT_MS,
+            Number.isFinite(options.deadlineAt)
+              ? options.deadlineAt - performance.now()
+              : Infinity
+          )) }
+        );
+        identityMatches = actualIdentity === trackedPidIdentity;
+        if (!identityMatches && isAmbiguousLegacyIdentity(trackedPidIdentity, actualIdentity, platform)) {
+          identityUnavailable = true;
+        }
       } catch {
         identityMatches = false;
         identityUnavailable = true;
@@ -1051,7 +1055,8 @@ function recoverStaleLock(lockFile, options = {}) {
   }
 
   try {
-    if (getProcessIdentity(pid, { timeout: lockProcessTimeout(options) }) !== lockData.identity) {
+    const actualIdentity = getProcessIdentity(pid, { timeout: lockProcessTimeout(options), expectedIdentity: lockData.identity });
+    if (actualIdentity !== lockData.identity && !isAmbiguousLegacyIdentity(lockData.identity, actualIdentity)) {
       unlinkLockIfUnchanged(lockFile, lockSource);
     }
   } catch (error) {
