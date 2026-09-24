@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.7 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.7/cc-plugin-codex-1.7.7.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -293,6 +293,8 @@ $cc:cancel task-abc123              # cancel a running job or peer workflow
 
 Workflow cancellation targets only its linked work. A missing or unverifiable process identity remains visible as `cancel_failed`; the plugin does not turn that state into a successful cancellation.
 
+On macOS, new jobs use process birth times to preserve identity across launcher `exec` transitions. The plugin reads these through the built-in `osascript` command. If a legacy record has the same start time but a different process name, cancellation preserves its handles and reports `cancel_failed`.
+
 ### `$cc:setup`
 
 ```text
@@ -380,7 +382,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
 codex plugin add cc@cbepx
 ```
 
@@ -401,8 +403,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.7 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.7/cc-plugin-codex-1.7.7.tgz install
 ```
 
 After install, run:
@@ -429,12 +431,14 @@ $cc:setup
 
 ### Update
 
+Before an upgrade or rollback across v1.7.7, finish active cc jobs and resolve any `cancel_failed` jobs. Older versions cannot interpret the new macOS identity format safely.
+
 Codex rejects re-adding an existing marketplace name when the pinned source/ref changes. Replace the existing marketplace and plugin, then install the exact release ref:
 
 ```bash
 codex plugin remove cc@cbepx
 codex plugin marketplace remove cbepx
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
 codex plugin add cc@cbepx
 ```
 

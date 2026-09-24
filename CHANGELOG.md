@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 
+## v1.7.7
+
 ### Fixed
+
+- Keep macOS process identities stable across launcher `exec` transitions. Refuse ambiguous legacy cancellation and preserve process handles for recovery.
+- Keep progress from earlier assistant messages out of the final answer, while preserving truncated terminal text within the last message.
 
 - Preserve structured Claude terminal failure categories when the CLI also exits nonzero, and surface empty thinking blocks as content-free phase progress.
 - Keep the plugin's starter prompts within Codex's three-prompt limit.
