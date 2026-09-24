@@ -87,6 +87,23 @@ const WINDOWS_PROCESS_EXITED_DURING_TERMINATION_EXIT = 245;
 const WINDOWS_PROCESS_COMMAND_TIMEOUT_MS = 10_000;
 const WINDOWS_IDENTITY_CIRCUIT_RETRY_MS = 60_000;
 const currentProcessIdentityCache = new Map();
+const DARWIN_BIRTH_PREFIX = "darwin-birth-v1:";
+const DARWIN_BIRTH_SCRIPT = [
+  'ObjC.import("Cocoa");',
+  'ObjC.bindFunction("proc_pidinfo", ["int", ["int", "int", "unsigned long long", "void *", "int"]]);',
+  'function run(args) {',
+  'var data = $.NSMutableData.dataWithLength(136);',
+  'if ($.proc_pidinfo(Number(args[0]), 3, 0, data.mutableBytes, 136) !== 136) throw Error("Process identity unavailable");',
+  'return ObjC.unwrap(data.base64EncodedStringWithOptions(0));',
+  '}',
+].join(" ");
+
+export function isAmbiguousLegacyIdentity(expectedIdentity, actualIdentity, platform = process.platform) {
+  if (platform !== "darwin") return false;
+  const legacyStart = /^(\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4})\s+/u;
+  const expectedStart = String(expectedIdentity).match(legacyStart)?.[1];
+  return Boolean(expectedStart && expectedStart === String(actualIdentity).match(legacyStart)?.[1]);
+}
 const windowsIdentityUnavailableError = Object.assign(
   new Error("Windows process identity service is unavailable"),
   { code: "ETIMEDOUT" }
@@ -207,7 +224,7 @@ export function terminateProcessTreeIfIdentityMatches(
     const isAlive = options.isProcessAliveImpl ?? isProcessAlive;
     let actualIdentity;
     try {
-      actualIdentity = getIdentity(pid, { timeout: options.timeout });
+      actualIdentity = getIdentity(pid, { timeout: options.timeout, expectedIdentity });
     } catch {
       return {
         attempted: false,
@@ -221,7 +238,8 @@ export function terminateProcessTreeIfIdentityMatches(
         attempted: false,
         delivered: false,
         method: null,
-        reason: "identity-mismatch",
+        reason: isAmbiguousLegacyIdentity(expectedIdentity, actualIdentity, platform) && isAlive(pid)
+          ? "identity-unavailable" : "identity-mismatch",
       };
     }
     const terminate = options.terminateProcessTreeImpl ?? terminateProcessTree;
@@ -393,13 +411,20 @@ export function getProcessIdentity(pid, options = {}) {
   }
 
   const platform = options.platform ?? process.platform;
+  const birthIdentity = platform === "darwin" && (
+    options.birthIdentity || String(options.expectedIdentity ?? "").startsWith(DARWIN_BIRTH_PREFIX)
+  );
+  if (platform === "darwin" && String(options.expectedIdentity ?? "").startsWith("darwin-") &&
+    !/^darwin-birth-v1:\d+:\d+$/u.test(options.expectedIdentity)) {
+    throw new Error("Unsupported macOS process identity");
+  }
   const runCommandCheckedImpl = options.runCommandCheckedImpl ?? runCommandChecked;
   const readFileSyncImpl = options.readFileSyncImpl ?? readFileSync;
   const usesDefaultSources =
     options.runCommandCheckedImpl === undefined &&
     options.readFileSyncImpl === undefined;
   const cacheKey =
-    usesDefaultSources && pid === process.pid ? `${platform}:${pid}` : null;
+    usesDefaultSources && pid === process.pid ? `${platform}:${pid}:${Boolean(birthIdentity)}` : null;
   if (cacheKey && currentProcessIdentityCache.has(cacheKey)) {
     return currentProcessIdentityCache.get(cacheKey);
   }
@@ -448,6 +473,19 @@ export function getProcessIdentity(pid, options = {}) {
     if (!/^\d+$/u.test(identity)) {
       throw new Error("Windows process creation time was unavailable");
     }
+  } else if (birthIdentity) {
+    const row = runCommandCheckedImpl("/usr/bin/osascript", [
+      "-l", "JavaScript", "-e", DARWIN_BIRTH_SCRIPT, String(pid),
+    ], { timeout: Math.min(options.timeout ?? 1000, 1000) });
+    const encoded = row.stdout.trim();
+    const data = Buffer.from(encoded, "base64");
+    if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded) || data.length !== 136 || data.readUInt32LE(12) !== pid) {
+      throw new Error("Invalid macOS process identity response");
+    }
+    const seconds = data.readBigUInt64LE(120);
+    const micros = data.readBigUInt64LE(128);
+    if (seconds === 0n || micros >= 1000000n) throw new Error("Invalid macOS process birth time");
+    identity = `${DARWIN_BIRTH_PREFIX}${seconds}:${micros}`;
   } else if (platform === "darwin") {
     const row = runCommandCheckedImpl(
       "ps",
@@ -471,13 +509,14 @@ export function getProcessIdentity(pid, options = {}) {
 export function getSpawnedProcessIdentity(pid, options = {}) {
   return getProcessIdentity(pid, {
     ...options,
+    birthIdentity: true,
     bypassWindowsIdentityCircuit: true,
   });
 }
 
 export function validateProcessIdentity(pid, expectedIdentity, options = {}) {
   try {
-    return getProcessIdentity(pid, options) === expectedIdentity;
+    return getProcessIdentity(pid, { ...options, expectedIdentity }) === expectedIdentity;
   } catch {
     return false;
   }

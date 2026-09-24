@@ -21,6 +21,7 @@ import {
 import {
   getProcessIdentity,
   getSpawnedProcessIdentity,
+  isAmbiguousLegacyIdentity,
   isProcessAlive,
   isProcessGroupAlive,
   terminateProcessTreeIfIdentityMatches,
@@ -745,6 +746,11 @@ export class StreamParser {
 
   _handleStreamEvent(event) {
     const inner = event.event;
+    if (inner?.type === "message_start") {
+      // Keep terminal-tail recovery within this parent message, not prior progress.
+      this.state.finalMessage = "";
+      return null;
+    }
     const delta = inner?.delta;
     if (delta?.type === "text_delta" && delta.text) {
       this.state.finalMessage += delta.text;
@@ -782,6 +788,14 @@ export class StreamParser {
     // Tool use events
     if (inner?.type === "content_block_start") {
       const cb = inner.content_block;
+      if (cb?.type === "thinking" || cb?.type === "redacted_thinking") {
+        return {
+          kind: "thinking",
+          message: "Claude is thinking…",
+          phase: "thinking",
+          threadId: this.state.sessionId,
+        };
+      }
       if (cb?.type === "tool_use") {
         pushBoundedTail(
           this.state.toolUses,
@@ -1013,7 +1027,8 @@ function classifyClaudeTerminal(state) {
 
 export function validateTurnCompletion(state, exitCode, options = {}) {
   if (exitCode !== 0) {
-    return { status: "failed", exitCode };
+    const failure = state.receivedTerminalEvent ? classifyClaudeTerminal(state) : null;
+    return { status: "failed", exitCode, ...(failure ? { failure } : {}) };
   }
   if (!state.receivedTerminalEvent) {
     return {
@@ -1554,6 +1569,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     ...options,
   });
   const requestedModel = resolveModel(options.model) ?? null;
+  const requestedEffort = resolveEffort(options.effort) ?? null;
   const command = resolveClaudeCommand();
   if (command.error) {
     return {
@@ -1569,6 +1585,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       toolUses: [],
       touchedFiles: [],
       requestedModel,
+      requestedEffort,
       finalModel: null,
       contextWindow: null,
       modelEvents: [],
@@ -1719,6 +1736,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         toolUses: parser.state.toolUses,
         touchedFiles: parser.state.touchedFiles,
         requestedModel,
+        requestedEffort,
         finalModel,
         contextWindow,
         modelEvents,
@@ -1746,6 +1764,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         toolUses: [],
         touchedFiles: [],
         requestedModel,
+        requestedEffort,
         finalModel: null,
         contextWindow: null,
         modelEvents: [],
@@ -1796,6 +1815,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     receivedTerminalEvent: result.receivedTerminalEvent,
     sessionId: result.sessionId,
     requestedModel: result.requestedModel,
+    requestedEffort: result.requestedEffort,
     finalModel: result.finalModel,
     contextWindow: result.contextWindow,
     modelEvents: result.modelEvents,
@@ -1883,7 +1903,7 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
   // Verify PID identity to prevent killing recycled PIDs
   let actualIdentity;
   try {
-    actualIdentity = getIdentity(pid);
+    actualIdentity = getIdentity(pid, { expectedIdentity: pidIdentity });
   } catch (error) {
     if (isAlive(pid) || isGroupAlive(pid)) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -1895,6 +1915,9 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
     return { cancelled: true, note: "Process already exited" };
   }
   if (actualIdentity !== pidIdentity) {
+    if (isAmbiguousLegacyIdentity(pidIdentity, actualIdentity, platform) && isAlive(pid)) {
+      return { cancelled: false, note: "Unable to verify legacy process identity after a possible exec" };
+    }
     return {
       cancelled: true,
       note: "Process already exited (PID recycled)",
@@ -1928,7 +1951,11 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
   }
   if (isAlive(pid)) {
     try {
-      if (getIdentity(pid) !== pidIdentity) {
+      const currentIdentity = getIdentity(pid, { expectedIdentity: pidIdentity });
+      if (currentIdentity !== pidIdentity) {
+        if (isAmbiguousLegacyIdentity(pidIdentity, currentIdentity, platform)) {
+          return { cancelled: false, note: "Unable to re-verify legacy process identity before SIGKILL" };
+        }
         return {
           cancelled: true,
           note: "Process exited during SIGTERM wait (PID recycled)",

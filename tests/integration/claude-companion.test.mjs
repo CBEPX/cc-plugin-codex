@@ -1872,6 +1872,7 @@ describe("claude-companion integration", () => {
 
       assert.equal(payload.status, "completed");
       assert.equal(payload.requestedModel, "opus");
+      assert.equal(payload.requestedEffort, "xhigh");
       assert.equal(payload.finalModel, "claude-sonnet-5");
       assert.equal(payload.contextWindow, 1000000);
       assert.equal(payload.modelFallbacks.length, 1);
@@ -1936,6 +1937,7 @@ describe("claude-companion integration", () => {
 
       assert.equal(payload.status, "completed");
       assert.equal(payload.requestedModel, "fable");
+      assert.equal(payload.requestedEffort, null);
       assert.equal(payload.finalModel, "claude-fable-5");
       assert.equal(payload.contextWindow, 1000000);
       assert.deepEqual(payload.modelFallbacks, []);
@@ -2716,6 +2718,7 @@ describe("claude-companion integration", () => {
 
       assert.equal(payload.codex.status, "completed");
       assert.equal(payload.codex.requestedModel, "opus");
+      assert.equal(payload.codex.requestedEffort, "xhigh");
       assert.equal(payload.codex.finalModel, "claude-sonnet-5");
       assert.equal(payload.codex.contextWindow, 1000000);
       assert.equal(payload.codex.modelFallbacks.length, 1);

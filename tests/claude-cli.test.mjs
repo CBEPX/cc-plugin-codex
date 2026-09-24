@@ -72,6 +72,21 @@ function createFakeClaudeCommand(tmpDir, source) {
 // ===========================================================================
 
 describe("StreamParser", () => {
+  it("reports an empty thinking block start without adding answer text", () => {
+    const parser = new StreamParser();
+    const events = parser.feed(JSON.stringify({
+      type: "stream_event", session_id: "thinking-session",
+      event: { type: "content_block_start", index: 0,
+        content_block: { type: "thinking", thinking: "", signature: "private" } },
+    }) + "\n");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].phase, "thinking");
+    assert.equal(events[0].message, "Claude is thinking…");
+    assert.equal(JSON.stringify(events).includes("private"), false);
+    assert.equal(parser.state.finalMessage, "");
+    assert.equal(parser.state.receivedTerminalEvent, false);
+    assert.deepEqual(parser.state.toolUses, []);
+  });
   // ---- basic event parsing ------------------------------------------------
 
   it("parses a result event and marks receivedTerminalEvent", () => {
@@ -1502,13 +1517,14 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `process.stderr.write("HTTP 429 was retried successfully\\n");\nconst out = JSON.stringify({ type: "result", subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: "partial", session_id: "sess-failure" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `process.stderr.write("HTTP 429 was retried successfully\\n");\nconst out = JSON.stringify({ type: "result", subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: "partial", session_id: "sess-failure" });\nprocess.stdout.write(out + "\\n", () => process.exit(1));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
 
       const result = await runClaudeTurn(process.cwd(), "prompt");
 
       assert.equal(result.status, "failed");
+      assert.equal(result.exitCode, 1);
       assert.deepEqual(result.failure, {
         kind: "claude_max_turns",
         terminalCategory: "CLAUDE_MAX_TURNS",
@@ -2208,6 +2224,24 @@ describe("areModelIdsEquivalent", () => {
 // ===========================================================================
 
 describe("validateTurnCompletion", () => {
+  it("preserves terminal failure classification when the process also fails", () => {
+    const state = {
+      receivedTerminalEvent: true, terminalSubtype: "error_during_execution",
+      terminalReason: "api_error", terminalIsError: true,
+      unresolvedParseErrors: 0, unknownEvents: [],
+    };
+    assert.deepEqual(validateTurnCompletion(state, 1), {
+      status: "failed", exitCode: 1,
+      failure: { kind: "claude_api_error", terminalCategory: "CLAUDE_API_ERROR" },
+    });
+    assert.deepEqual(validateTurnCompletion({ ...state, receivedTerminalEvent: false }, 1), {
+      status: "failed", exitCode: 1,
+    });
+    assert.deepEqual(validateTurnCompletion({ ...state, terminalSubtype: "success",
+      terminalReason: "completed", terminalIsError: false }, 1), {
+      status: "failed", exitCode: 1,
+    });
+  });
   it("returns completed for exit 0 with terminal event", () => {
     const state = {
       receivedTerminalEvent: true,
@@ -2325,12 +2359,13 @@ describe("validateTurnCompletion", () => {
     const state = {
       receivedTerminalEvent: true,
       terminalSubtype: "success",
+      terminalReason: "completed",
+      terminalIsError: false,
       unresolvedParseErrors: 0,
       unknownEvents: [],
     };
     const result = validateTurnCompletion(state, 1);
-    assert.equal(result.status, "failed");
-    assert.equal(result.exitCode, 1);
+    assert.deepEqual(result, { status: "failed", exitCode: 1 });
   });
 
   it("returns unknown when there are unresolved parse errors", () => {
@@ -2791,5 +2826,37 @@ describe("SANDBOX_SETTINGS", () => {
     assert.equal(s.enabled, true);
     assert.deepEqual(s.filesystem.allowWrite, [".", SANDBOX_TEMP_DIR]);
     assert.deepEqual(s.network.allowedDomains, []);
+  });
+});
+
+describe("parent message final answer", () => {
+  const stream = (event, extra = {}) => JSON.stringify({ type: "stream_event", event, ...extra }) + "\n";
+  const start = () => stream({ type: "message_start", message: { role: "assistant", content: [] } });
+  const text = (value) => stream({ type: "content_block_delta", delta: { type: "text_delta", text: value } });
+  const result = (value) => JSON.stringify({ type: "result", result: value }) + "\n";
+
+  it("keeps progress live but excludes earlier messages from final JSON", () => {
+    const parser = new StreamParser();
+    const events = parser.feed(start() + text("I'll read the file.") + stream({ type: "message_stop" }) + start() + text('{"ok":true}') + result('{"ok":true}'));
+    assert.ok(events.some((event) => event.text === "I'll read the file."));
+    assert.equal(parser.state.finalMessage, '{"ok":true}');
+  });
+
+  it("preserves a truncated suffix only within the last parent message", () => {
+    const parser = new StreamParser();
+    parser.feed(start() + text("Progress.") + start() + text("Finding 1\nFinding 2") + result("Finding 2"));
+    assert.equal(parser.state.finalMessage, "Finding 1\nFinding 2");
+  });
+
+  it("does not recover earlier progress for a tool-only final message", () => {
+    const parser = new StreamParser();
+    parser.feed(start() + text("Starting.") + start() + stream({ type: "content_block_start", content_block: { type: "tool_use", name: "Read", input: {} } }) + result(""));
+    assert.equal(parser.state.finalMessage, "");
+  });
+
+  it("does not reset parent output at a subagent message boundary", () => {
+    const parser = new StreamParser();
+    parser.feed(start() + text("Parent") + stream({ type: "message_start", message: { role: "assistant" } }, { parent_tool_use_id: "child" }) + result("Parent"));
+    assert.equal(parser.state.finalMessage, "Parent");
   });
 });

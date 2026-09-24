@@ -1,6 +1,6 @@
 {
   "name": "cc",
-  "version": "1.7.6",
+  "version": "1.7.7",
   "description": "Claude Code Plugin for Codex. Run reviews, tracked tasks, and independent Codex-Claude design or research workflows.",
   "author": {
     "name": "CBEPX",
@@ -31,11 +31,8 @@
     "websiteURL": "https://github.com/CBEPX/cc-plugin-codex",
     "defaultPrompt": [
       "Use Claude Code to review my current changes through $cc:review",
-      "Use Claude Code to challenge this implementation through $cc:adversarial-review",
       "Use Claude Code to investigate and fix this issue through $cc:rescue",
-      "Compare this technical decision with independent Codex and Claude evidence through $cc:design",
-      "Research this repository question with independent Codex and Claude evidence through $cc:research",
-      "Transfer this Claude Code session into Codex through $cc:transfer"
+      "Research this repository question with independent Codex and Claude evidence through $cc:research"
     ],
     "brandColor": "#7B39FE",
     "composerIcon": "./assets/cc-small.svg",

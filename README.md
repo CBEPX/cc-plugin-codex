@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.7 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.7/cc-plugin-codex-1.7.7.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -145,6 +145,10 @@ $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 Fable 5.1 (`claude-fable-5-1`) has a native 1M context window and requires Claude Code 2.1.257 or newer. The bare `fable` alias remains floating and may still resolve to Fable 5 behind Claude Apps Gateway; use the full model ID when Fable 5.1 is required. No `[1m]` suffix or hidden Fable effort default is added. See Claude Code's [model configuration](https://code.claude.com/docs/en/model-config).
 
 JSON task and review results keep `requestedModel` as the forwarded alias or full ID, report `finalModel` from Claude's terminal result, and expose the terminal `contextWindow` reported in `modelUsage` (`null` when Claude does not provide it). The plugin does not infer a context limit from a floating alias.
+
+`requestedEffort` records the normalized effort actually forwarded to Claude Code, including plugin defaults; `null` means no effort was forwarded. Historical results may omit it. Peer memo and critique model metadata expose the same field. This is a request value, not a claim about the provider's effective effort after fallback.
+
+For model qualification, compare `--model claude-opus-5-5 --effort medium` against `high` and `xhigh`, and `--model claude-fable-5-1 --effort high` against `xhigh` on identical tasks. Defaults remain unchanged until local quality and latency measurements justify a change. See Anthropic's [Opus 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5) and [Fable 5.1](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1) prompting guides.
 
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
@@ -289,6 +293,8 @@ $cc:cancel task-abc123              # cancel a running job or peer workflow
 
 Workflow cancellation targets only its linked work. A missing or unverifiable process identity remains visible as `cancel_failed`; the plugin does not turn that state into a successful cancellation.
 
+On macOS, new jobs use process birth times to preserve identity across launcher `exec` transitions. The plugin reads these through the built-in `osascript` command. If a legacy record has the same start time but a different process name, cancellation preserves its handles and reports `cancel_failed`.
+
 ### `$cc:setup`
 
 ```text
@@ -376,7 +382,7 @@ The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
 codex plugin add cc@cbepx
 ```
 
@@ -397,8 +403,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.5 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.5/cc-plugin-codex-1.7.5.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.7 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.7/cc-plugin-codex-1.7.7.tgz install
 ```
 
 After install, run:
@@ -425,12 +431,14 @@ $cc:setup
 
 ### Update
 
+Before an upgrade or rollback across v1.7.7, finish active cc jobs and resolve any `cancel_failed` jobs. Older versions cannot interpret the new macOS identity format safely.
+
 Codex rejects re-adding an existing marketplace name when the pinned source/ref changes. Replace the existing marketplace and plugin, then install the exact release ref:
 
 ```bash
 codex plugin remove cc@cbepx
 codex plugin marketplace remove cbepx
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.5
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
 codex plugin add cc@cbepx
 ```
 
