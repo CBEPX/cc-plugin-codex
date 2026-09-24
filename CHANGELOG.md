@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve structured Claude terminal failure categories when the CLI also exits nonzero, and surface empty thinking blocks as content-free phase progress.
+- Keep the plugin's starter prompts within Codex's three-prompt limit.
+
+### Changed
+
+- Report the normalized `requestedEffort` in task, review, and peer model metadata; `null` denotes inherited effort and older records may omit it.
+- Clarify rescue scope, follow-through, targeted edits, independent reads, and model qualification guidance for Opus 5.5 and Fable 5.1.
+
 ## v1.7.6
 
 ### Changed

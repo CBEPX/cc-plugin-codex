@@ -48,7 +48,7 @@ input.on("line", (line) => {
 }
 
 function writeFakeClaude(filePath) {
-  fs.writeFileSync(filePath, `#!/usr/bin/env node
+  fs.writeFileSync(filePath, `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);

@@ -75,7 +75,7 @@ input.on("line", (line) => {
 
 function writeFakeClaude(binDir) {
   const filePath = path.join(binDir, "claude");
-  fs.writeFileSync(filePath, `#!/usr/bin/env node
+  fs.writeFileSync(filePath, `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
@@ -1541,6 +1541,7 @@ describe("peer companion with fake Claude", () => {
     assert.equal(result.target.status, "completed");
     assert.equal(result.target.branchId, "claude");
     assert.equal(stored.branches.claude.payload.model.requestedModel, "fable");
+    assert.equal(stored.branches.claude.payload.model.requestedEffort, null);
     assert.equal(stored.branches.claude.payload.model.finalModel, "claude-opus-5");
     assert.equal(stored.branches.claude.payload.model.fallbackModel, "opus");
     assert.equal(stored.branches.claude.payload.model.modelFallbacks.length, 1);

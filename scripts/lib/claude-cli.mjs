@@ -782,6 +782,14 @@ export class StreamParser {
     // Tool use events
     if (inner?.type === "content_block_start") {
       const cb = inner.content_block;
+      if (cb?.type === "thinking" || cb?.type === "redacted_thinking") {
+        return {
+          kind: "thinking",
+          message: "Claude is thinking…",
+          phase: "thinking",
+          threadId: this.state.sessionId,
+        };
+      }
       if (cb?.type === "tool_use") {
         pushBoundedTail(
           this.state.toolUses,
@@ -1013,7 +1021,8 @@ function classifyClaudeTerminal(state) {
 
 export function validateTurnCompletion(state, exitCode, options = {}) {
   if (exitCode !== 0) {
-    return { status: "failed", exitCode };
+    const failure = state.receivedTerminalEvent ? classifyClaudeTerminal(state) : null;
+    return { status: "failed", exitCode, ...(failure ? { failure } : {}) };
   }
   if (!state.receivedTerminalEvent) {
     return {
@@ -1554,6 +1563,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     ...options,
   });
   const requestedModel = resolveModel(options.model) ?? null;
+  const requestedEffort = resolveEffort(options.effort) ?? null;
   const command = resolveClaudeCommand();
   if (command.error) {
     return {
@@ -1569,6 +1579,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       toolUses: [],
       touchedFiles: [],
       requestedModel,
+      requestedEffort,
       finalModel: null,
       contextWindow: null,
       modelEvents: [],
@@ -1719,6 +1730,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         toolUses: parser.state.toolUses,
         touchedFiles: parser.state.touchedFiles,
         requestedModel,
+        requestedEffort,
         finalModel,
         contextWindow,
         modelEvents,
@@ -1746,6 +1758,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         toolUses: [],
         touchedFiles: [],
         requestedModel,
+        requestedEffort,
         finalModel: null,
         contextWindow: null,
         modelEvents: [],
@@ -1796,6 +1809,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     receivedTerminalEvent: result.receivedTerminalEvent,
     sessionId: result.sessionId,
     requestedModel: result.requestedModel,
+    requestedEffort: result.requestedEffort,
     finalModel: result.finalModel,
     contextWindow: result.contextWindow,
     modelEvents: result.modelEvents,

@@ -146,6 +146,10 @@ Fable 5.1 (`claude-fable-5-1`) has a native 1M context window and requires Claud
 
 JSON task and review results keep `requestedModel` as the forwarded alias or full ID, report `finalModel` from Claude's terminal result, and expose the terminal `contextWindow` reported in `modelUsage` (`null` when Claude does not provide it). The plugin does not infer a context limit from a floating alias.
 
+`requestedEffort` records the normalized effort actually forwarded to Claude Code, including plugin defaults; `null` means no effort was forwarded. Historical results may omit it. Peer memo and critique model metadata expose the same field. This is a request value, not a claim about the provider's effective effort after fallback.
+
+For model qualification, compare `--model claude-opus-5-5 --effort medium` against `high` and `xhigh`, and `--model claude-fable-5-1 --effort high` against `xhigh` on identical tasks. Defaults remain unchanged until local quality and latency measurements justify a change. See Anthropic's [Opus 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5) and [Fable 5.1](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1) prompting guides.
+
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
 In foreground, review returns the result directly. In background, the plugin uses a Codex built-in subagent, tracks the review as a job, and nudges you to open the result when it completes.

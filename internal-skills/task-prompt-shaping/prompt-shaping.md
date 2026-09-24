@@ -10,6 +10,11 @@ Core rules:
 - Use consistent XML tags when structure helps.
 - Add verification, grounding, or safety blocks only when the task needs them.
 - If the user is continuing an existing Claude Code thread, send only the delta instruction unless the direction changed materially.
+- For assessment, review, or diagnosis requests, the deliverable is the assessment; do not turn it into permission to edit.
+- For authorized implementation, define completion as the requested change plus its relevant verification. Continue reversible work already covered by the request; stop for a genuine blocker, protected action, or material scope decision. A progress report or promise of the next step is not completion.
+- Keep edits and tests within the requested scope. Prefer targeted edits to whole-file rewrites; preserve required project checks.
+- Batch independent reads or searches when their inputs are known; wait for results before dependent calls. Do not add subagents merely to parallelize a small task.
+- Preserve a requested exact-output or structured-output contract. Progress notes must not become extra final-answer text.
 
 Allowed additions:
 - `<task>`
