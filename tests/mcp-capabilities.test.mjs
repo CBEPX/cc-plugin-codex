@@ -869,8 +869,8 @@ describe("MCP capability discovery", () => {
       const serverPath = path.join(homeDir, "stubborn-server.mjs");
       fs.writeFileSync(serverPath, [
         'import fs from "node:fs";',
-        "fs.writeFileSync(process.env.FAKE_MCP_PID_FILE, String(process.pid));",
         "process.on('SIGTERM', () => {});",
+        "fs.writeFileSync(process.env.FAKE_MCP_PID_FILE, String(process.pid));",
         "setInterval(() => {}, 1000);",
       ].join("\n"), "utf8");
       fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({
@@ -885,7 +885,7 @@ describe("MCP capability discovery", () => {
 
       const result = await mcp.probeMcpCapabilities(
         mcp.collectConfiguredMcpServers(cwd, { homeDir }),
-        { timeoutMs: 80 }
+        { timeoutMs: 1000 }
       );
       assert.equal(result.diagnostics[0].code, "probe_timeout");
       const pid = Number(fs.readFileSync(pidFile, "utf8"));
