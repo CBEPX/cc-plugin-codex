@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v1.7.9
+
 ### Changed
 
 - Prepare for TypeScript 7 by replacing the mutation-range guard's TypeScript compiler API with Acorn 8.16.0 as an explicit devDependency; retain all 52 guarded function spans, including `export` wrapper boundaries.
@@ -9,6 +11,8 @@
 - Upgrade the TypeScript devDependency to 7.0.2 (native compiler with per-platform optional packages) and add the JSDoc hints and the `matchJobReference` default-predicate arity that its stricter JavaScript checking requires; no runtime behavior changes. Keep the unused `tsconfig.json` and `tsconfig.tests.json` out of the Stryker sandbox, because TypeScript 7 no longer exports the config-parsing API that Stryker's tsconfig preprocessor calls; mutants, thresholds, and the standalone typechecks are unchanged.
 
 - Upgrade the `@types/node` devDependency to 26.2.0 (with its required `undici-types` 8.3.0); no source changes were needed, and the Node >=18 runtime requirement is unchanged.
+
+- Pin `actions/checkout` to v7.0.1 and `actions/setup-node` to v7.0.0 by commit SHA in all GitHub Actions workflows that use them; `actions/upload-artifact` stays at v7.0.1, and triggers, permissions, caching, and Node matrix are unchanged.
 
 ## v1.7.8
 
