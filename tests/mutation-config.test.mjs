@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import * as acorn from "acorn";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
 const ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
@@ -70,16 +70,23 @@ test("mutation line ranges still contain their intended complete functions", () 
     assert.ok(config.includes(`"${spec}"`), `missing mutation range ${spec}`);
     const [, file, start, end] = spec.match(/^(.*):(\d+)-(\d+)$/);
     const source = fs.readFileSync(path.join(PROJECT_ROOT, file), "utf8");
-    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+    const program = acorn.parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      locations: true,
+    });
     const spans = functionNames.map((functionName) => {
-      const declaration = sourceFile.statements.find(
-        (node) => ts.isFunctionDeclaration(node) && node.name?.text === functionName
+      // Match the complete top-level statement so an `export` wrapper keeps its offsets.
+      const declaration = program.body.find(
+        (node) =>
+          (node.type === "FunctionDeclaration" && node.id.name === functionName) ||
+          (node.type === "ExportNamedDeclaration" &&
+            node.declaration?.type === "FunctionDeclaration" &&
+            node.declaration.id.name === functionName)
       );
       assert.ok(declaration, `${file} no longer declares ${functionName}`);
-      const firstLine =
-        sourceFile.getLineAndCharacterOfPosition(declaration.getStart(sourceFile)).line + 1;
-      const lastLine =
-        sourceFile.getLineAndCharacterOfPosition(declaration.end).line + 1;
+      const firstLine = declaration.loc.start.line;
+      const lastLine = declaration.loc.end.line;
       assert.ok(
         firstLine >= Number(start) && lastLine <= Number(end),
         `${spec} excludes part of ${functionName} (${firstLine}-${lastLine})`
