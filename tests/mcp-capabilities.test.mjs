@@ -228,7 +228,7 @@ describe("MCP capability discovery", () => {
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
       });
-      await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+      await /** @type {Promise<void>} */ (new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve())));
       try {
         const address = server.address();
         assert.ok(address && typeof address === "object");
@@ -283,7 +283,7 @@ describe("MCP capability discovery", () => {
         response.setHeader("content-type", "text/event-stream");
         response.end(`event: message\ndata: ${payload}\n\n`);
       });
-      await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+      await /** @type {Promise<void>} */ (new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve())));
       try {
         const address = server.address();
         assert.ok(address && typeof address === "object");
@@ -685,7 +685,7 @@ describe("MCP capability discovery", () => {
           result: { tools: [] },
         }));
       });
-      await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+      await /** @type {Promise<void>} */ (new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve())));
       try {
         const address = server.address();
         assert.ok(address && typeof address === "object");
@@ -807,10 +807,10 @@ describe("MCP capability discovery", () => {
         }, 10);
         response.once("close", () => clearInterval(timer));
       });
-      await new Promise((resolve, reject) => {
+      await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(0, "127.0.0.1", () => resolve());
-      });
+      }));
       try {
         const address = server.address();
         assert.ok(address && typeof address === "object");
@@ -839,10 +839,10 @@ describe("MCP capability discovery", () => {
         response.setHeader("content-type", "application/json");
         response.end("x".repeat(1024 * 1024 + 1));
       });
-      await new Promise((resolve, reject) => {
+      await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(0, "127.0.0.1", () => resolve());
-      });
+      }));
       try {
         const address = server.address();
         assert.ok(address && typeof address === "object");

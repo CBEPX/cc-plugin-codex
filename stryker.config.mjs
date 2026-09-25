@@ -4,6 +4,9 @@ export default {
     command: "npm run test:mutation:critical:unit",
   },
   coverageAnalysis: "off",
+  // The command runner never type-checks, and TypeScript 7 dropped the config-parsing API
+  // that Stryker's preprocessor calls when the root tsconfig.json is in the sandbox.
+  ignorePatterns: ["/tsconfig.json", "/tsconfig.tests.json"],
   mutate: [
     "scripts/lib/args.mjs",
     "scripts/lib/structured-output.mjs",

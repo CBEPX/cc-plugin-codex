@@ -2162,7 +2162,7 @@ async function outputRead(payload, options, { summary = false, render = null, ac
   } else {
     ({ text, complete } = boundedReadView(publiclyReadable, { summary, render, asJson: options.json }));
   }
-  await new Promise((resolve, reject) => process.stdout.write(text, (error) => error ? reject(error) : resolve()));
+  await /** @type {Promise<void>} */ (new Promise((resolve, reject) => process.stdout.write(text, (error) => error ? reject(error) : resolve())));
   if (complete && acknowledge) acknowledge(publiclyReadable);
 }
 

@@ -768,9 +768,9 @@ function startDirectSkillProvider({
       });
     },
     close() {
-      return new Promise((resolve) => {
+      return /** @type {Promise<void>} */ (new Promise((resolve) => {
         server.close(() => resolve());
-      });
+      }));
     },
   };
 }
@@ -1125,9 +1125,9 @@ function startMockProvider({
       });
     },
     close() {
-      return new Promise((resolve) => {
+      return /** @type {Promise<void>} */ (new Promise((resolve) => {
         server.close(() => resolve());
-      });
+      }));
     },
   };
 }
@@ -2390,9 +2390,9 @@ function startMarkerObservingProvider(markerPath) {
       });
     },
     close() {
-      return new Promise((resolve) => {
+      return /** @type {Promise<void>} */ (new Promise((resolve) => {
         server.close(() => resolve());
-      });
+      }));
     },
   };
 }

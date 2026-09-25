@@ -33,7 +33,7 @@ fs.readFileSync = function patchedReadFileSync(filePath, ...args) {
 if (Number.isInteger(cancelPid) && cancelPid > 0 && cancelRecord !== path.resolve("")) {
   if (process.platform === "win32") {
     const spawnSync = childProcess.spawnSync;
-    childProcess.spawnSync = function patchedSpawnSync(command, args, options) {
+    childProcess.spawnSync = /** @type {typeof childProcess.spawnSync} */ (function patchedSpawnSync(command, args, options) {
       if (
         command === "powershell.exe" &&
         args?.join(" ").includes(`taskkill.exe /PID ${cancelPid}`)
@@ -48,7 +48,7 @@ if (Number.isInteger(cancelPid) && cancelPid > 0 && cancelRecord !== path.resolv
         };
       }
       return spawnSync.call(this, command, args, options);
-    };
+    });
     syncBuiltinESMExports();
   } else {
     const kill = process.kill.bind(process);

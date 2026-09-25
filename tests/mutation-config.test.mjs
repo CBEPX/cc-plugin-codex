@@ -218,3 +218,46 @@ test("coverage and pull-request mutation preserve archived failure evidence", ()
     });
   }
 });
+
+test("mutation sandboxes drop the unused type configs before Stryker's tsconfig preprocessor runs", async () => {
+  // TypeScript 7 no longer exports the config-parsing API that the preprocessor calls,
+  // so the root tsconfig files must stay out of both inherited config entry points.
+  // ponytail: this regression uses Stryker internals; revisit the imports when upgrading Stryker.
+  const stryker = (relative) => import(new URL(`../node_modules/@stryker-mutator/core/dist/src/${relative}`, import.meta.url).href);
+  const [{ FileSystem, ProjectReader }, { defaultOptions }, { TSConfigPreprocessor }] = await Promise.all([
+    stryker("fs/index.js"),
+    stryker("config/index.js"),
+    stryker("sandbox/ts-config-preprocessor.js"),
+  ]);
+  const log = /** @type {any} */ ({ debug() {}, info() {}, warn() {}, error() {}, isDebugEnabled: () => false });
+  const previousShard = process.env.CC_MUTATION_SHARD;
+  const previousCwd = process.cwd();
+  process.env.CC_MUTATION_SHARD = "managed";
+  /** @type {Array<[string, string[]]>} */
+  const cases = [
+    ["stryker.critical.config.mjs", ["tests/args.test.mjs", "tests/structured-output.test.mjs"]],
+    ["stryker.shard.config.mjs?test-shard=managed-sandbox", ["tests/plugin-install-guard.test.mjs"]],
+  ];
+  process.chdir(PROJECT_ROOT);
+  const projectFs = new FileSystem();
+  try {
+    for (const [configName, unitTests] of cases) {
+      const options = /** @type {any} */ ({ ...defaultOptions, ...(await import(`../${configName}`)).default });
+      const project = await new ProjectReader(projectFs, log, options).read();
+      const absolute = (relative) => path.join(PROJECT_ROOT, relative);
+      assert.deepEqual([...project.filesToMutate.keys()].sort(), options.mutate.map(absolute).sort(), configName);
+      for (const required of ["package.json", "tests/test-env.mjs", ...unitTests]) {
+        assert.ok(project.files.has(absolute(required)), `${configName} sandbox lost ${required}`);
+      }
+      await new TSConfigPreprocessor(log, options).preprocess(project);
+      for (const typeConfig of ["tsconfig.json", "tsconfig.tests.json"]) {
+        assert.equal(project.files.has(absolute(typeConfig)), false, `${configName} sandbox copies ${typeConfig}`);
+      }
+    }
+  } finally {
+    projectFs.dispose();
+    process.chdir(previousCwd);
+    if (previousShard === undefined) delete process.env.CC_MUTATION_SHARD;
+    else process.env.CC_MUTATION_SHARD = previousShard;
+  }
+});
