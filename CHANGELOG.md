@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Run the stop-time review gate with the bundled read-only Git MCP under a strict MCP config instead of `Bash(git ...)` rules. Review, adversarial-review, and Stop runs now pass `--tools` derived from their allowlist, so Bash and other unlisted built-ins are no longer exposed and inherited user permission rules cannot approve them; selected MCP tools and inherited model/effort are unchanged.
+
+- Direct omitted large-diff context to Git MCP and file reads, with staged-only diff support so index changes remain reviewable without Bash.
+
 ## v1.7.7
 
 ### Fixed

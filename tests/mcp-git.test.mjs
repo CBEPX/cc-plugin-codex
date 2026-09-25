@@ -140,6 +140,22 @@ function callTool(name, args = {}) {
 }
 
 describe("tool: status", () => {
+  it("lists every nested untracked file even when user config hides them", () => {
+    const directory = path.join(repoRoot, "new-directory");
+    fs.mkdirSync(directory);
+    const files = Array.from({ length: 25 }, (_, i) => `new-directory/file-${i}.txt`);
+    try {
+      for (const file of files) fs.writeFileSync(path.join(repoRoot, file), "content");
+      git(repoRoot, ["config", "status.showUntrackedFiles", "no"]);
+      const result = callTool("status", { porcelain: true }).result;
+      assert.equal(result.isError, false);
+      assert.deepEqual(result.content[0].text.trim().split("\n").sort(), files.map((file) => `?? ${file}`).sort());
+    } finally {
+      git(repoRoot, ["config", "--unset", "status.showUntrackedFiles"]);
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("returns clean working tree text", () => {
     const res = callTool("status", {});
     assert.equal(res.result.isError, false);
@@ -202,6 +218,51 @@ describe("tool: diff", () => {
     const res = callTool("diff", { refs: "HEAD~1..HEAD", stat: true });
     assert.match(res.result.content[0].text, /hello\.txt/);
     assert.doesNotMatch(res.result.content[0].text, /\+added line/);
+  });
+
+  it("cached: true shows only staged changes when the worktree differs from the index", () => {
+    const guide = path.join(repoRoot, "guide.md");
+    try {
+      fs.writeFileSync(guide, "# Guide\nfirst line.\nstaged line\n");
+      git(repoRoot, ["add", "guide.md"]);
+      fs.writeFileSync(guide, "# Guide\nfirst line.\nstaged line\nworktree line\n");
+
+      const cached = callTool("diff", { cached: true });
+      assert.equal(cached.result.isError, false);
+      assert.match(cached.result.content[0].text, /\+staged line/);
+      assert.doesNotMatch(cached.result.content[0].text, /worktree line/);
+
+      const unstaged = callTool("diff", {});
+      assert.equal(unstaged.result.isError, false);
+      assert.match(unstaged.result.content[0].text, /\+worktree line/);
+      assert.doesNotMatch(unstaged.result.content[0].text, /\+staged line/);
+
+      const cachedStat = callTool("diff", { cached: true, stat: true, paths: ["guide.md"] });
+      assert.equal(cachedStat.result.isError, false);
+      assert.match(cachedStat.result.content[0].text, /guide\.md \| 1 \+/);
+
+      const cachedOtherPath = callTool("diff", { cached: true, paths: ["hello.txt"] });
+      assert.equal(cachedOtherPath.result.content[0].text, "(empty)");
+
+      const cachedAgainstRef = callTool("diff", { cached: true, refs: "HEAD~1" });
+      assert.equal(cachedAgainstRef.result.isError, false);
+      assert.match(cachedAgainstRef.result.content[0].text, /\+added line/);
+      assert.match(cachedAgainstRef.result.content[0].text, /\+staged line/);
+      assert.doesNotMatch(cachedAgainstRef.result.content[0].text, /worktree line/);
+
+      const badRef = callTool("diff", { cached: true, refs: "--ext-diff" });
+      assert.equal(badRef.result.isError, true);
+      const badPath = callTool("diff", { cached: true, paths: ["../escape"] });
+      assert.equal(badPath.result.isError, true);
+    } finally {
+      git(repoRoot, ["reset", "-q", "--hard", "HEAD"]);
+    }
+  });
+
+  it("declares cached as a boolean diff option", () => {
+    const diff = TOOL_DEFINITIONS.find((tool) => tool.name === "diff");
+    assert.equal(diff.inputSchema.properties.cached.type, "boolean");
+    assert.equal(diff.inputSchema.additionalProperties, false);
   });
 
   it("rejects paths that escape the git root", () => {
