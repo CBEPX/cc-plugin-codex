@@ -13,6 +13,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { resolveWorkspaceHash } from "../../scripts/lib/state.mjs";
 import { SESSION_ID_ENV } from "../../scripts/lib/tracked-jobs.mjs";
 
 const PROJECT_ROOT = path.resolve(
@@ -2276,6 +2277,173 @@ describe("Codex direct-skill E2E", () => {
       assert.ok(!fs.existsSync(hooksFile));
       assert.match(config, /hooks = true/);
       assert.doesNotMatch(config, /plugin_hooks/);
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+});
+
+function currentSessionMarkerPath(testEnv, workspaceDir) {
+  return path.join(
+    testEnv.codexHome,
+    "plugins",
+    "data",
+    "cc",
+    "state",
+    resolveWorkspaceHash(workspaceDir),
+    "current-session.json"
+  );
+}
+
+// Trust only the lifecycle hooks' exact current hashes; UserPromptSubmit also writes the
+// marker, so it stays untrusted to leave SessionStart as the only possible writer.
+function trustLifecycleHooks(testEnv, cwd) {
+  const clientPath = path.join(PROJECT_ROOT, "scripts", "lib", "codex-app-server.mjs");
+  const script = `
+import { callCodexAppServer } from ${JSON.stringify(clientPath)};
+const cwd = ${JSON.stringify(cwd)};
+const listPluginHooks = async () => {
+  const listed = await callCodexAppServer({ cwd, method: "hooks/list", params: { cwds: [cwd] } });
+  return (listed.data ?? [])
+    .flatMap((entry) => entry.hooks ?? [])
+    .filter((hook) => hook.pluginId === "cc@sendbird");
+};
+const lifecycle = (await listPluginHooks()).filter((hook) =>
+  ["sessionStart", "sessionEnd"].includes(hook.eventName)
+);
+await callCodexAppServer({
+  cwd,
+  method: "config/batchWrite",
+  params: {
+    edits: [{
+      keyPath: "hooks.state",
+      value: Object.fromEntries(lifecycle.map((hook) => [hook.key, { trusted_hash: hook.currentHash }])),
+      mergeStrategy: "upsert",
+    }],
+    filePath: null,
+    expectedVersion: null,
+    reloadUserConfig: true,
+  },
+});
+const trust = Object.fromEntries(
+  (await listPluginHooks()).map((hook) => [hook.eventName, hook.trustStatus])
+);
+process.stdout.write(JSON.stringify(trust));
+`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    cwd,
+    env: testEnv.env,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
+}
+
+function startMarkerObservingProvider(markerPath) {
+  const observations = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ object: "list", data: [{ id: "mock-model", object: "model" }] }));
+        return;
+      }
+      if (req.method !== "POST" || req.url !== "/v1/responses") {
+        res.writeHead(404);
+        res.end("not found");
+        return;
+      }
+
+      // Codex is still running here, so the marker must already exist.
+      let marker = null;
+      let markerError = null;
+      try {
+        marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+      } catch (error) {
+        markerError = error instanceof Error ? error.message : String(error);
+      }
+      observations.push({ headers: req.headers, marker, markerError });
+
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(
+        formatSse([
+          eventCreated("resp-session-end"),
+          eventAssistantMessage("msg-session-end", "ok"),
+          eventCompleted("resp-session-end"),
+        ])
+      );
+    });
+  });
+
+  return {
+    observations,
+    listen() {
+      return new Promise((resolve) => {
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          assert.ok(address && typeof address !== "string");
+          resolve(address.port);
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve) => {
+        server.close(() => resolve());
+      });
+    },
+  };
+}
+
+describe("Codex native hook dispatch E2E", () => {
+  it("removes the running session's marker through the installed plugin's native SessionEnd hook", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    // An inherited session id would make SessionStart treat this as nested and skip the marker.
+    delete testEnv.env[SESSION_ID_ENV];
+    const workspaceDir = path.join(testEnv.rootDir, "session-end-workspace");
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    setupGitWorkspace(workspaceDir);
+    installPlugin(testEnv);
+    const markerPath = currentSessionMarkerPath(testEnv, workspaceDir);
+
+    const provider = startMarkerObservingProvider(markerPath);
+    testEnv.providerPort = await provider.listen();
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      assert.deepEqual(trustLifecycleHooks(testEnv, workspaceDir), {
+        sessionStart: "trusted",
+        sessionEnd: "trusted",
+        stop: "untrusted",
+        userPromptSubmit: "untrusted",
+      });
+      assert.ok(!fs.existsSync(markerPath), "no session marker should exist before Codex starts");
+
+      const execResult = await runCodexExec(testEnv, "Reply with exactly: ok", {
+        cwd: workspaceDir,
+      });
+      assert.equal(execResult.status, 0, execResult.stderr || execResult.stdout);
+
+      assert.ok(provider.observations.length > 0, "Codex should call the local provider");
+      const [{ headers, marker, markerError }] = provider.observations;
+      assert.equal(markerError, null, `SessionStart marker should exist while Codex runs: ${markerError}`);
+      assert.equal(typeof headers["session-id"], "string");
+      assert.equal(
+        marker.sessionId,
+        headers["session-id"],
+        "the marker should belong to the running Codex session"
+      );
+      assert.ok(
+        !fs.existsSync(markerPath),
+        `native SessionEnd should remove the ${marker.sessionId} marker at ${markerPath}`
+      );
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);
