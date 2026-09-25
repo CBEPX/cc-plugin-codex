@@ -6,6 +6,8 @@
 
 - Prepare for TypeScript 7 by replacing the mutation-range guard's TypeScript compiler API with Acorn 8.16.0 as an explicit devDependency; retain all 52 guarded function spans, including `export` wrapper boundaries.
 
+- Upgrade the TypeScript devDependency to 7.0.2 (native compiler with per-platform optional packages) and add the JSDoc hints and the `matchJobReference` default-predicate arity that its stricter JavaScript checking requires; no runtime behavior changes.
+
 ## v1.7.8
 
 ### Added
