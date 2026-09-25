@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.8
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.7 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.7/cc-plugin-codex-1.7.7.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.8 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.8/cc-plugin-codex-1.7.8.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -154,7 +154,7 @@ Scope `auto` (the default) inspects `git status` and chooses between working-tre
 
 In foreground, review returns the result directly. In background, the plugin uses a Codex built-in subagent, tracks the review as a job, and nudges you to open the result when it completes.
 
-If the diff is too large to inline safely, the review prompt falls back to concise status/stat context and tells Claude to inspect the diff directly with read-only `git diff` commands instead of failing the run.
+If the diff is too large to inline safely, the review prompt falls back to concise status/stat context and tells Claude to inspect the diff directly with the read-only `mcp__gitReview__diff` tool instead of failing the run.
 
 By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted tools when reviewing untrusted diffs. Eligibility is based on the server's `readOnlyHint` declaration or the immutable four-ID audited annotationless registry: Context7 `mcp__context7__query-docs` and `mcp__context7__resolve-library-id`, plus Brave `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`. It is not an OS-enforced sandbox. A `destructiveHint` declaration is always vetoed. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
 
@@ -386,7 +386,7 @@ The snapshot is shared by sessions in the same workspace and is replaced by the 
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.8
 codex plugin add cc@cbepx
 ```
 
@@ -407,8 +407,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.7 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.7/cc-plugin-codex-1.7.7.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.8 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.8/cc-plugin-codex-1.7.8.tgz install
 ```
 
 After install, run:
@@ -442,7 +442,7 @@ Codex rejects re-adding an existing marketplace name when the pinned source/ref 
 ```bash
 codex plugin remove cc@cbepx
 codex plugin marketplace remove cbepx
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.7
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.8
 codex plugin add cc@cbepx
 ```
 
@@ -499,7 +499,7 @@ $cc:status --all
 If a finished result shows both a **Claude Code session** and an **Owning Codex session**, use the Claude Code session for `claude --resume ...`. The owning session is there only to explain which Codex thread owns the tracked job.
 
 **Large review diff caused a failure or was omitted**
-That is expected on very large diffs. The plugin now degrades to a compact review context and points Claude toward read-only `git diff` commands instead of trying to inline everything. If you want the full picture, run a narrower review such as:
+That is expected on very large diffs. The plugin now degrades to a compact review context and points Claude toward the read-only `mcp__gitReview__diff` tool instead of trying to inline everything. If you want the full picture, run a narrower review such as:
 ```text
 $cc:review --base main
 $cc:review --scope working-tree
