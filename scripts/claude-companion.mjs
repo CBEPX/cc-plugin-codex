@@ -1045,7 +1045,7 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}
   }
   if (!config.stopReviewGate) {
     nextSteps.push(
-      "Optional: run `$cc:setup --enable-review-gate` to require a fresh review before stop."
+      "Optional: run `$cc:setup --enable-review-gate` to review each edit-producing Codex turn before it ends."
     );
   }
 

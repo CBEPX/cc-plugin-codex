@@ -340,16 +340,20 @@ $cc:result task-abc123
 
 ## Review Gate
 
-The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C in Codex triggers a Claude Code review of the last Codex response before the stop is accepted.
+The review gate is an **optional** `Stop` hook. In Codex, `Stop` fires when an assistant turn ends, not when you close the session (that is the separate `SessionEnd` lifecycle hook). When enabled, each Codex turn that ends after making edits triggers a Claude Code review of that response before the turn is allowed to end.
 
-- Claude returns `ALLOW:` → stop proceeds normally.
-- Claude returns `BLOCK:` → stop is rejected; Codex continues.
+- Claude returns `ALLOW:` → the turn ends normally.
+- Claude returns `BLOCK:` → the turn end is rejected and Codex keeps working on the reported issues.
+
+Long inline `BLOCK` reasons keep a prefix of 1500 Unicode code points (including any running-task note), followed by `…` and a reference to the full `stop-review-last.json` snapshot, which always keeps the complete reason, raw Claude output, stderr, and running-task note; `stop-review-history.jsonl` keeps recent full records.
+
+The snapshot is shared by sessions in the same workspace and is replaced by the next review. If it has changed, find the completed review in the adjacent `stop-review-history.jsonl` using its session and run IDs.
 
 **Caveats:**
 
 - **Disabled by default.** Enable with `$cc:setup --enable-review-gate`.
-- **Token cost.** Every Ctrl+C triggers a Claude invocation. This can drain usage limits quickly if you stop often.
-- **15-minute timeout.** The gate has a hard timeout. If Claude doesn't respond, the stop is allowed.
+- **Token cost.** Every reviewed turn end triggers a Claude invocation. This can drain usage limits quickly in long edit-heavy sessions.
+- **15-minute timeout.** The gate has a hard timeout. If Claude doesn't respond, the turn is allowed to end.
 - **Skip-on-no-edits.** The gate computes a working-tree fingerprint baseline and skips review when the last Codex turn made no net edits.
 - **Requires a recorded user turn.** If the UserPromptSubmit hook did not record a baseline for this session, the gate skips review instead of reviewing unrelated or headless work.
 - **Not in nested sessions.** Child sessions (e.g., rescue subagents) suppress the gate to avoid feedback loops.
@@ -502,7 +506,7 @@ $cc:review --scope working-tree
 ```
 
 **Review gate draining tokens**
-Disable it: `$cc:setup --disable-review-gate`. The gate fires on every Ctrl+C, which adds up.
+Disable it: `$cc:setup --disable-review-gate`. The gate fires at the end of every edit-producing Codex turn, which adds up.
 
 **Background jobs not cleaned up**
 Jobs are terminated when the Codex session that owns them exits. If a session crashes without cleanup, use `$cc:status` and `$cc:cancel <job-id>` to clean up any leftovers.

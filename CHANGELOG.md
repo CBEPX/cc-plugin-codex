@@ -8,6 +8,8 @@
 
 - Direct omitted large-diff context to Git MCP and file reads, with staged-only diff support so index changes remain reviewable without Bash.
 
+- Limit long emitted stop-review `BLOCK` reasons (running-task note plus review or failure reason) to a 1500-Unicode-code-point prefix, appending `…` and the `stop-review-last.json` path when longer; the full reason, raw output, stderr, and note are persisted before the decision is emitted. Docs and hook wording now describe `Stop` as the end of a Codex turn, distinct from `SessionEnd`.
+
 ## v1.7.7
 
 ### Fixed

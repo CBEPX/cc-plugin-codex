@@ -6,6 +6,7 @@ description: 'Check whether Claude Code CLI is ready in this environment and opt
 # Claude Code Setup
 
 Use this skill when the user wants to verify Claude Code readiness or toggle the review gate.
+The review gate is a `Stop` hook: it reviews a Codex turn when that turn ends, not when the session closes (`SessionEnd` is a separate lifecycle hook).
 
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. The companion uses that shell's current directory as the workspace.
 
