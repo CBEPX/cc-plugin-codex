@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Prepare for TypeScript 7 by replacing the mutation-range guard's TypeScript compiler API with Acorn 8.16.0 as an explicit devDependency; retain all 52 guarded function spans, including `export` wrapper boundaries.
+
 ## v1.7.8
 
 ### Added
