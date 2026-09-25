@@ -19,6 +19,9 @@ const FINGERPRINT_GIT_TIMEOUT_MS = 30_000;
 const FINGERPRINT_SMALL_MAX_BUFFER = 64 * 1024;
 const FINGERPRINT_PATH_LIST_MAX_BUFFER = 64 * 1024 * 1024;
 const FINGERPRINT_WRITE_TREE_RETRIES = 8;
+// Review runs have no Bash; omitted-context guidance names the bundled git MCP
+// tools instead. Keep in sync with REVIEW_MCP_SERVER_NAME in claude-cli.mjs.
+const REVIEW_MCP_TOOL_PREFIX = "mcp__gitReview__";
 
 function git(cwd, args, options = {}) {
   return runCommand("git", args, { cwd, ...options });
@@ -388,7 +391,7 @@ function formatUntrackedFiles(cwd, relativePaths) {
       "### Omitted untracked files",
       `(skipped: ${omittedPaths.length} untracked file(s) omitted because the aggregate untracked-file context exceeds ${MAX_UNTRACKED_TOTAL_BYTES} bytes)`,
       ...displayedPaths,
-      "Inspect remaining untracked files directly with read-only git commands such as `git ls-files --others --exclude-standard`."
+      `List remaining untracked files with \`${REVIEW_MCP_TOOL_PREFIX}status\` with \`{ "porcelain": true }\` (\`??\` paths), then open them with \`Read\`.`
     ].join("\n"));
   }
 
@@ -427,13 +430,13 @@ function collectWorkingTreeContext(cwd, state) {
       "Staged Diff",
       inlineDiffs
         ? stagedDiff.text
-        : "Large diff omitted. Inspect staged changes directly with read-only git commands such as `git diff --cached --no-ext-diff --submodule=diff`."
+        : `Large diff omitted. Inspect staged changes with \`${REVIEW_MCP_TOOL_PREFIX}diff\` with \`{ "cached": true, "stat": true }\`, then \`{ "cached": true, "paths": [...] }\` per file (optionally \`head\`). \`Read\` shows the working tree, not the index.`
     ),
     formatSection(
       "Unstaged Diff",
       inlineDiffs
         ? unstagedDiff.text
-        : "Large diff omitted. Inspect unstaged changes directly with read-only git commands such as `git diff --no-ext-diff --submodule=diff`."
+        : `Large diff omitted. Inspect unstaged changes with \`${REVIEW_MCP_TOOL_PREFIX}diff\` with \`{ "stat": true }\`, then \`{ "paths": [...] }\` per file (optionally \`head\`), and \`Read\` for current file contents.`
     ),
     formatSection("Untracked Files", untrackedBody)
   ];
@@ -466,7 +469,7 @@ function collectBranchContext(cwd, baseRef) {
         "Branch Diff",
         inlineDiff
           ? diff.text
-          : `Large diff omitted. Inspect the branch diff directly with read-only git commands such as \`git diff --no-ext-diff --submodule=diff ${commitRange}\`.`
+          : `Large diff omitted. Inspect the branch diff with \`${REVIEW_MCP_TOOL_PREFIX}diff\` with \`{ "refs": "${commitRange}", "stat": true }\`, then \`{ "refs": "${commitRange}", "paths": [...] }\` per file (optionally \`head\`).`
       )
     ].join("\n")
   };

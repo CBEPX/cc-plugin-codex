@@ -9,9 +9,35 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
+import {
+  REVIEW_MCP_SERVER_NAME,
+  SANDBOX_REVIEW_TOOLS,
+  SANDBOX_STOP_REVIEW_TOOLS,
+} from "../scripts/lib/claude-cli.mjs";
 import { collectReviewContext, getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
 
 const tempRepos = [];
+const MCP_DIFF_TOOL = `mcp__${REVIEW_MCP_SERVER_NAME}__diff`;
+const MCP_STATUS_TOOL = `mcp__${REVIEW_MCP_SERVER_NAME}__status`;
+
+function extractSection(content, title) {
+  const match = content.match(new RegExp(`## ${title}\\n\\n([\\s\\S]*?)(?:\\n## |$)`));
+  assert.ok(match, `missing section ${title}`);
+  return match[1];
+}
+
+// Review runs expose no Bash built-in, so omitted-context guidance must only name
+// tools that review and stop-review runs actually receive.
+function assertNoShellFallback(content) {
+  assert.doesNotMatch(content, /read-only git commands/);
+  assert.doesNotMatch(content, /`git (?:diff|ls-files)\b/);
+  assert.doesNotMatch(content, /\bls_files\b/);
+  assert.doesNotMatch(content, /\bBash\b/);
+  for (const tool of [MCP_DIFF_TOOL, MCP_STATUS_TOOL, "Read"]) {
+    assert.ok(SANDBOX_REVIEW_TOOLS.includes(tool), `${tool} missing from review tools`);
+    assert.ok(SANDBOX_STOP_REVIEW_TOOLS.includes(tool), `${tool} missing from stop-review tools`);
+  }
+}
 
 function runGit(cwd, args) {
   const result = spawnSync("git", args, {
@@ -36,6 +62,19 @@ afterEach(() => {
     fs.rmSync(tempRepos.pop(), { recursive: true, force: true });
   }
 });
+
+function assertWorkingTreeMcpFallback(content) {
+  const staged = extractSection(content, "Staged Diff");
+  const unstaged = extractSection(content, "Unstaged Diff");
+  assert.match(staged, /^Large diff omitted\./);
+  assert.match(unstaged, /^Large diff omitted\./);
+  assert.ok(staged.includes(`\`${MCP_DIFF_TOOL}\` with \`{ "cached": true, "stat": true }\``));
+  assert.ok(staged.includes('`{ "cached": true, "paths": [...] }`'));
+  assert.ok(unstaged.includes(`\`${MCP_DIFF_TOOL}\` with \`{ "stat": true }\``));
+  assert.ok(unstaged.includes('`{ "paths": [...] }`'));
+  assert.doesNotMatch(unstaged, /cached/);
+  assertNoShellFallback(content);
+}
 
 describe("collectReviewContext", () => {
   it("avoids embedding full binary patches for working-tree diffs", () => {
@@ -127,7 +166,11 @@ describe("collectReviewContext", () => {
 
     assert.ok(Buffer.byteLength(context.content, "utf8") < 128 * 1024);
     assert.match(context.content, /Omitted untracked files/);
-    assert.match(context.content, /git ls-files --others --exclude-standard/);
+    const omitted = context.content.slice(context.content.indexOf("### Omitted untracked files"));
+    assert.ok(omitted.includes(`\`${MCP_STATUS_TOOL}\` with \`{ "porcelain": true }\``));
+    assert.match(omitted, /`\?\?` paths/);
+    assert.match(omitted, /`Read`/);
+    assertNoShellFallback(context.content);
   });
 
   it("continues inlining small untracked files after skipping a large untracked file", () => {
@@ -218,9 +261,7 @@ describe("collectReviewContext", () => {
       explicit: true,
     });
 
-    assert.match(context.content, /Large diff omitted\./);
-    assert.match(context.content, /git diff --cached --no-ext-diff --submodule=diff/);
-    assert.match(context.content, /git diff --no-ext-diff --submodule=diff/);
+    assertWorkingTreeMcpFallback(context.content);
   });
 
   it("omits very large branch diffs and tells the reviewer to inspect git directly", () => {
@@ -243,9 +284,40 @@ describe("collectReviewContext", () => {
       explicit: true,
     });
 
-    assert.match(context.content, /Large diff omitted\./);
-    assert.match(context.content, /git diff --no-ext-diff --submodule=diff/);
+    const mergeBase = runGit(repo, ["merge-base", "HEAD", "main"]);
+    const branchDiff = extractSection(context.content, "Branch Diff");
+    assert.match(branchDiff, /^Large diff omitted\./);
+    assert.ok(branchDiff.includes(`\`${MCP_DIFF_TOOL}\` with \`{ "refs": "${mergeBase}..HEAD", "stat": true }\``));
+    assert.ok(branchDiff.includes(`\`{ "refs": "${mergeBase}..HEAD", "paths": [...] }\``));
+    assertNoShellFallback(context.content);
     assert.doesNotMatch(context.content, /@@/);
+  });
+
+  it("points staged-only large changes at the cached MCP diff when the worktree differs from the index", () => {
+    const repo = createRepo();
+    const stagedText = `${"s".repeat(200)}\n`.repeat(500);
+
+    fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n", "utf8");
+    runGit(repo, ["add", "app.js"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+
+    fs.writeFileSync(path.join(repo, "app.js"), stagedText, "utf8");
+    runGit(repo, ["add", "app.js"]);
+    fs.writeFileSync(path.join(repo, "app.js"), "export const value = 2;\n", "utf8");
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.match(context.summary, /1 staged, 1 unstaged/);
+    assertWorkingTreeMcpFallback(context.content);
+    assert.match(
+      extractSection(context.content, "Staged Diff"),
+      /`Read` shows the working tree, not the index/
+    );
+    assert.doesNotMatch(context.content, /s{200}/);
   });
 
   it("degrades gracefully when working-tree diff output exceeds the process buffer", () => {
@@ -264,9 +336,7 @@ describe("collectReviewContext", () => {
       explicit: true,
     });
 
-    assert.match(context.content, /Large diff omitted\./);
-    assert.match(context.content, /git diff --cached --no-ext-diff --submodule=diff/);
-    assert.match(context.content, /git diff --no-ext-diff --submodule=diff/);
+    assertWorkingTreeMcpFallback(context.content);
   });
 
   it("computes a working-tree fingerprint without buffering the full diff text", () => {

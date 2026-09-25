@@ -1079,15 +1079,6 @@ export const SANDBOX_READ_ONLY_BASH_TOOLS = [
   "Bash(git config --get:*)",
 ];
 
-export const SANDBOX_STOP_REVIEW_TOOLS = [
-  "Read",
-  "Glob",
-  "Grep",
-  "Bash(git log:*)",
-  "Bash(git diff:*)",
-  "Bash(git show:*)",
-];
-
 /** read-only: file reading + read-only git + web + read-only agents. No writes, MCP, or skills. */
 export const SANDBOX_READ_ONLY_TOOLS = [
   "Read",
@@ -1119,6 +1110,14 @@ export const REVIEW_MCP_ALLOWED_TOOLS = REVIEW_MCP_TOOL_NAMES.map(
   (name) => `mcp__${REVIEW_MCP_SERVER_NAME}__${name}`
 );
 
+/** Stop-time review tools: file reads plus the bundled read-only git MCP, no Bash. */
+export const SANDBOX_STOP_REVIEW_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  ...REVIEW_MCP_ALLOWED_TOOLS,
+];
+
 /**
  * Tools exposed to review/adversarial-review runs. Bash is intentionally absent —
  * the Claude CLI does not strictly enforce `Bash(<pattern>:*)` sub-patterns, so any
@@ -1144,8 +1143,9 @@ export const SANDBOX_REVIEW_TOOLS = [
  *
  * read-only:       no file writes outside the OS temp dir. Network is allowed so
  *                  that `WebFetch`, `WebSearch`, and the Claude CLI's API path keep
- *                  working; the review allowlist excludes Bash entirely, so there
- *                  is no shell surface to exfiltrate or mutate state through.
+ *                  working; review runs expose no Bash built-in (`--tools` is
+ *                  derived from the allowlist), so there is no shell surface to
+ *                  exfiltrate or mutate state through.
  * workspace-write: Bash can write to cwd + OS temp dir only, no network from Bash.
  *                  All tools allowed (no allowedTools restriction).
  */
@@ -1796,14 +1796,26 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
  * MCP tool surface). Callers that want to run with an alternative allowlist —
  * e.g., legacy `SANDBOX_READ_ONLY_TOOLS` for back-compat — can override via
  * `options.allowedTools`. Bash is intentionally excluded by default.
+ *
+ * `--allowedTools` only pre-approves tools; every built-in stays exposed and the
+ * user's own permission rules can still approve it (e.g. `Bash(git diff:*)`).
+ * Unless `options.tools` is given, the exposed built-ins are therefore derived
+ * from the allowlist (MCP entries excluded, `Bash(...)` -> `Bash`).
  */
 export async function runClaudeReview(cwd, prompt, options = {}) {
+  const allowedTools = options.allowedTools ?? SANDBOX_REVIEW_TOOLS;
+  const tools = options.tools ?? [...new Set(
+    allowedTools
+      .filter((tool) => !tool.startsWith("mcp__"))
+      .map((tool) => tool.replace(/\(.*$/s, ""))
+  )];
   // Use streaming mode (same as runClaudeTurn) for progress reporting
   const result = await runClaudeTurn(cwd, prompt, {
     noSessionPersistence: true,
-    allowedTools: SANDBOX_REVIEW_TOOLS,
     allowTerminalWithParseErrors: true,
     ...options,
+    allowedTools,
+    tools,
   });
 
   return {

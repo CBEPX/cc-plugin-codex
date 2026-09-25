@@ -38,6 +38,10 @@ import {
   resolveClaudeCommand,
   cancelClaudeProcess,
   runClaudeTurn,
+  runClaudeReview,
+  runClaudeAdversarialReview,
+  SANDBOX_REVIEW_TOOLS,
+  SANDBOX_STOP_REVIEW_TOOLS,
 } from "../scripts/lib/claude-cli.mjs";
 
 function createFakeClaudeCommand(tmpDir, source) {
@@ -1682,6 +1686,60 @@ describe("runClaudeTurn", () => {
       } else {
         process.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = oldFlag;
       }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("limits built-in tools for review callers to the effective allowlist", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-review-tools-"));
+    const oldPath = process.env.PATH ?? "";
+    try {
+      createFakeClaudeCommand(
+        tmpDir,
+        `const result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+      );
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+      const optionValue = (args, name) => {
+        assert.equal(args.filter((arg) => arg === name).length, 1, `${name} must appear once`);
+        return args[args.indexOf(name) + 1];
+      };
+      const reviewArgs = async (options) =>
+        JSON.parse((await runClaudeReview(process.cwd(), "prompt", options)).result);
+
+      // --allowedTools only pre-approves; without --tools every built-in (Bash,
+      // Write, Edit, ...) stays exposed to inherited user permission rules.
+      const standard = await reviewArgs({ permissionMode: "dontAsk" });
+      assert.equal(optionValue(standard, "--tools"), "Read,Glob,Grep,WebSearch,WebFetch");
+      assert.ok(standard.includes("mcp__gitReview__diff"));
+      assert.equal(standard.includes("--model"), false);
+      assert.equal(standard.includes("--effort"), false);
+
+      const adversarial = JSON.parse(
+        (await runClaudeAdversarialReview(process.cwd(), "prompt", { type: "object" }, {})).result
+      );
+      assert.equal(optionValue(adversarial, "--tools"), "Read,Glob,Grep,WebSearch,WebFetch");
+      assert.ok(adversarial.includes("--json-schema"));
+
+      const stop = await reviewArgs({ allowedTools: SANDBOX_STOP_REVIEW_TOOLS });
+      assert.equal(optionValue(stop, "--tools"), "Read,Glob,Grep");
+
+      const userMcp = await reviewArgs({
+        allowedTools: [...SANDBOX_REVIEW_TOOLS, "mcp__context7__resolve-library-id"],
+      });
+      assert.equal(optionValue(userMcp, "--tools"), "Read,Glob,Grep,WebSearch,WebFetch");
+      assert.ok(userMcp.includes("mcp__context7__resolve-library-id"));
+
+      const legacy = await reviewArgs({ allowedTools: SANDBOX_READ_ONLY_TOOLS });
+      assert.equal(optionValue(legacy, "--tools"), "Read,Glob,Grep,Bash,WebSearch,WebFetch,Agent");
+      assert.ok(legacy.includes("Bash(git diff:*)"));
+
+      const mcpOnly = await reviewArgs({ allowedTools: ["mcp__gitReview__diff"] });
+      assert.equal(optionValue(mcpOnly, "--tools"), "");
+
+      const explicit = await reviewArgs({ tools: ["Read"] });
+      assert.equal(optionValue(explicit, "--tools"), "Read");
+    } finally {
+      process.env.PATH = oldPath;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });

@@ -2775,6 +2775,11 @@ describe("claude-companion integration", () => {
       assert.ok(allowedTools.includes("mcp__gitReview__diff"));
       assert.ok(allowedTools.includes("mcp__context7__resolve-library-id"));
       assert.ok(allowedTools.includes("mcp__serena__find__symbol"));
+      // Selected MCP tools stay allowed; only built-ins are limited by --tools.
+      assert.equal(
+        invocation.args[invocation.args.indexOf("--tools") + 1],
+        "Read,Glob,Grep,WebSearch,WebFetch"
+      );
       assert.equal(
         allowedTools.filter((tool) => tool.startsWith("mcp__context7__")).length,
         1
@@ -3341,6 +3346,11 @@ describe("claude-companion integration", () => {
         invocation.args[invocation.args.indexOf("--model") + 1],
         "haiku"
       );
+      assert.equal(
+        invocation.args[invocation.args.indexOf("--tools") + 1],
+        "Read,Glob,Grep,WebSearch,WebFetch"
+      );
+      assert.ok(invocation.args.includes("--json-schema"));
       assert.match(invocation.prompt, /focus on command injection/i);
       assert.match(result.stdout, /Adversarial Review/);
     } finally {

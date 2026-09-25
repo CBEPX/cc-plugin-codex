@@ -13,6 +13,7 @@ import {
   SANDBOX_READ_ONLY_BASH_TOOLS,
   SANDBOX_READ_ONLY_TOOLS,
   SANDBOX_REVIEW_TOOLS,
+  SANDBOX_STOP_REVIEW_TOOLS,
   SANDBOX_TEMP_DIR,
   SANDBOX_SETTINGS,
   REVIEW_MCP_SERVER_NAME,
@@ -367,6 +368,26 @@ describe("SANDBOX_REVIEW_TOOLS", () => {
   it("REVIEW_MCP_TOOL_NAMES covers diff, log, show, blame, status, grep, ls_files", () => {
     for (const expected of ["diff", "log", "show", "blame", "status", "grep", "ls_files"]) {
       assert.ok(REVIEW_MCP_TOOL_NAMES.includes(expected), `missing ${expected}`);
+    }
+  });
+});
+
+describe("SANDBOX_STOP_REVIEW_TOOLS", () => {
+  it("uses read tools plus the seven bundled git MCP tools without Bash", () => {
+    assert.deepEqual(SANDBOX_STOP_REVIEW_TOOLS, [
+      "Read",
+      "Glob",
+      "Grep",
+      "mcp__gitReview__diff",
+      "mcp__gitReview__log",
+      "mcp__gitReview__show",
+      "mcp__gitReview__blame",
+      "mcp__gitReview__status",
+      "mcp__gitReview__grep",
+      "mcp__gitReview__ls_files",
+    ]);
+    for (const t of SANDBOX_STOP_REVIEW_TOOLS) {
+      assert.ok(!/^Bash(\(|$)/.test(t), `stop review allowlist must not contain Bash: ${t}`);
     }
   });
 });

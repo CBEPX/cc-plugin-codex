@@ -148,7 +148,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "diff",
     description:
-      "Show a git diff inside the review worktree. Optional `refs` (e.g., 'HEAD~3..HEAD' or 'origin/main...HEAD') and optional `paths`. Use `stat: true` for a stat-only summary.",
+      "Show a git diff inside the review worktree. Optional `refs` (e.g., 'HEAD~3..HEAD' or 'origin/main...HEAD') and optional `paths`. Use `stat: true` for a stat-only summary and `cached: true` for staged changes only.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -160,6 +160,10 @@ export const TOOL_DEFINITIONS = [
           description: "Pathspecs relative to the review worktree.",
         },
         stat: { type: "boolean", description: "Return --stat summary instead of full diff." },
+        cached: {
+          type: "boolean",
+          description: "Show staged changes (git diff --cached): index against HEAD, or against `refs` when given.",
+        },
         head: {
           type: "integer",
           minimum: 1,
@@ -287,6 +291,7 @@ const HANDLERS = {
   diff(args, root) {
     const cmd = ["diff", "--no-color"];
     if (args?.stat === true) cmd.push("--stat");
+    if (args?.cached === true) cmd.push("--cached");
     if (args?.refs != null) cmd.push(ensureValidRef(args.refs, "refs"));
     const paths = ensureValidPathList(args?.paths, root);
     if (paths.length > 0) cmd.push("--", ...paths);
@@ -332,7 +337,7 @@ const HANDLERS = {
   },
 
   status(args, root) {
-    const cmd = ["status"];
+    const cmd = ["status", "--untracked-files=all"];
     if (args?.porcelain === true) cmd.push("--porcelain");
     return formatResult(runGit(root, cmd), { label: "status" });
   },

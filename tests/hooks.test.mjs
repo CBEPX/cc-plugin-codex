@@ -48,6 +48,12 @@ const args = process.argv.slice(2);
 if (process.env.CLAUDE_ARGS_FILE) {
   fs.writeFileSync(process.env.CLAUDE_ARGS_FILE, JSON.stringify(args, null, 2) + "\\n", "utf8");
 }
+if (process.env.CLAUDE_MCP_CONFIG_FILE) {
+  const mcpConfigIndex = args.indexOf("--mcp-config");
+  if (mcpConfigIndex >= 0 && args[mcpConfigIndex + 1]) {
+    fs.copyFileSync(args[mcpConfigIndex + 1], process.env.CLAUDE_MCP_CONFIG_FILE);
+  }
+}
 
   if (args[0] === "-p") {
   if (process.env.CLAUDE_SILENT_FAIL === "1") {
@@ -407,8 +413,80 @@ function writeStaleTurnBaseline(testEnv, sessionId) {
   });
 }
 
+// Literal expectations keep these tests independent of the production constant.
+const EXPECTED_STOP_REVIEW_MCP_SERVER = "gitReview";
+const EXPECTED_STOP_REVIEW_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  "mcp__gitReview__diff",
+  "mcp__gitReview__log",
+  "mcp__gitReview__show",
+  "mcp__gitReview__blame",
+  "mcp__gitReview__status",
+  "mcp__gitReview__grep",
+  "mcp__gitReview__ls_files",
+];
+
+function readAllowedTools(claudeArgs) {
+  const allowedTools = [];
+  for (let i = 0; i < claudeArgs.length; i++) {
+    if (claudeArgs[i] === "--allowedTools") {
+      allowedTools.push(claudeArgs[i + 1]);
+    }
+  }
+  return allowedTools;
+}
+
+function runStopHookCapturingClaude(testEnv, cwd, extraEnv = {}) {
+  const argsFile = path.join(testEnv.rootDir, "claude-args.json");
+  const mcpConfigCaptureFile = path.join(testEnv.rootDir, "claude-mcp-config.json");
+  const result = runHook(
+    STOP_HOOK,
+    [],
+    {
+      cwd,
+      session_id: "hook-session",
+      last_assistant_message: "review me",
+    },
+    {
+      ...testEnv.env,
+      CLAUDE_ARGS_FILE: argsFile,
+      CLAUDE_MCP_CONFIG_FILE: mcpConfigCaptureFile,
+      ...extraEnv,
+    }
+  );
+  const claudeArgs = JSON.parse(fs.readFileSync(argsFile, "utf8"));
+  return { result, claudeArgs, mcpConfigCaptureFile };
+}
+
+function assertStrictGitMcpDeliveredAndCleaned(testEnv, claudeArgs, mcpConfigCaptureFile, expectedGitRoot) {
+  const mcpConfigIndex = claudeArgs.indexOf("--mcp-config");
+  assert.ok(mcpConfigIndex >= 0, "stop review must pass --mcp-config");
+  assert.ok(claudeArgs.includes("--strict-mcp-config"), "stop review must pass --strict-mcp-config");
+  assert.ok(fs.existsSync(mcpConfigCaptureFile), "Claude must receive a readable MCP config");
+
+  const capturedMcpConfig = JSON.parse(fs.readFileSync(mcpConfigCaptureFile, "utf8"));
+  assert.deepEqual(Object.keys(capturedMcpConfig.mcpServers), [EXPECTED_STOP_REVIEW_MCP_SERVER]);
+  const server = capturedMcpConfig.mcpServers[EXPECTED_STOP_REVIEW_MCP_SERVER];
+  assert.equal(server.command, process.execPath);
+  assert.deepEqual(server.args, [
+    path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs"),
+    "mcp-git",
+  ]);
+  assert.equal(
+    fs.realpathSync.native(server.env.CC_GIT_ROOT),
+    fs.realpathSync.native(expectedGitRoot)
+  );
+
+  assert.equal(fs.existsSync(claudeArgs[mcpConfigIndex + 1]), false);
+  const mcpRuntimeDir = path.join(testEnv.homeDir, ".codex", "plugins", "data", "cc", "runtime", "mcp");
+  const leftovers = fs.existsSync(mcpRuntimeDir) ? fs.readdirSync(mcpRuntimeDir) : [];
+  assert.deepEqual(leftovers, []);
+}
+
 describe("hooks", () => {
-  it("stop-review hook uses read-only sandbox settings when review gate is enabled", () => {
+  it("stop-review hook uses read-only sandbox and strict git MCP when review gate is enabled", () => {
     const testEnv = createHookEnvironment();
 
     try {
@@ -421,6 +499,7 @@ describe("hooks", () => {
       );
 
       const argsFile = path.join(testEnv.rootDir, "claude-args.json");
+      const mcpConfigCaptureFile = path.join(testEnv.rootDir, "claude-mcp-config.json");
       const result = runHook(
         STOP_HOOK,
         [],
@@ -431,6 +510,7 @@ describe("hooks", () => {
         {
           ...testEnv.env,
           CLAUDE_ARGS_FILE: argsFile,
+          CLAUDE_MCP_CONFIG_FILE: mcpConfigCaptureFile,
         }
       );
 
@@ -447,13 +527,88 @@ describe("hooks", () => {
       assert.equal(claudeArgs[permissionModeIndex + 1], "dontAsk");
       assert.ok(claudeArgs.includes("--settings"));
 
-      const allowedTools = [];
-      for (let i = 0; i < claudeArgs.length; i++) {
-        if (claudeArgs[i] === "--allowedTools") {
-          allowedTools.push(claudeArgs[i + 1]);
-        }
-      }
+      const allowedTools = readAllowedTools(claudeArgs);
+      assert.deepEqual(allowedTools, EXPECTED_STOP_REVIEW_TOOLS);
       assert.deepEqual(allowedTools, SANDBOX_STOP_REVIEW_TOOLS);
+      for (const allowedTool of allowedTools) {
+        assert.ok(
+          !/^Bash(\(|$)/.test(allowedTool),
+          `stop review allowlist must not contain Bash: ${allowedTool}`
+        );
+      }
+      // --allowedTools alone leaves every built-in exposed to inherited user
+      // permission rules; --tools must restrict the built-in set itself.
+      assert.equal(claudeArgs.filter((arg) => arg === "--tools").length, 1);
+      assert.equal(claudeArgs[claudeArgs.indexOf("--tools") + 1], "Read,Glob,Grep");
+
+      // The gate inherits the user's Claude model and effort.
+      for (const forcedFlag of ["--model", "--fallback-model", "--effort"]) {
+        assert.equal(claudeArgs.includes(forcedFlag), false, `unexpected ${forcedFlag}`);
+      }
+
+      assertStrictGitMcpDeliveredAndCleaned(
+        testEnv,
+        claudeArgs,
+        mcpConfigCaptureFile,
+        testEnv.workspaceDir
+      );
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook removes the git MCP config after ALLOW, BLOCK and failed reviews", async (t) => {
+    for (const scenario of [
+      { name: "allow", env: {}, decision: null },
+      { name: "block", env: { CLAUDE_BLOCK_RESULT: "1" }, decision: "block" },
+      { name: "failed", env: { CLAUDE_SILENT_FAIL: "1" }, decision: "block" },
+    ]) {
+      await t.test(scenario.name, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          enableReviewGate(testEnv);
+          const { result, claudeArgs, mcpConfigCaptureFile } = runStopHookCapturingClaude(
+            testEnv,
+            testEnv.workspaceDir,
+            scenario.env
+          );
+
+          if (scenario.decision) {
+            assert.equal(JSON.parse(result.stdout).decision, scenario.decision);
+          } else {
+            assert.equal(result.stdout.trim(), "");
+          }
+          assertStrictGitMcpDeliveredAndCleaned(
+            testEnv,
+            claudeArgs,
+            mcpConfigCaptureFile,
+            testEnv.workspaceDir
+          );
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
+    }
+  });
+
+  it("stop-review hook scopes git MCP to the linked worktree that contains cwd", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const linkedWorktreeDir = path.join(testEnv.rootDir, "linked-worktree");
+      runGitChecked(["worktree", "add", "-b", "linked", linkedWorktreeDir], testEnv.workspaceDir);
+      const nestedCwd = path.join(linkedWorktreeDir, "nested");
+      fs.mkdirSync(nestedCwd);
+      enableReviewGate({ ...testEnv, workspaceDir: linkedWorktreeDir });
+
+      const { claudeArgs, mcpConfigCaptureFile } = runStopHookCapturingClaude(testEnv, nestedCwd);
+
+      assertStrictGitMcpDeliveredAndCleaned(
+        testEnv,
+        claudeArgs,
+        mcpConfigCaptureFile,
+        linkedWorktreeDir
+      );
     } finally {
       cleanupHookEnvironment(testEnv);
     }
