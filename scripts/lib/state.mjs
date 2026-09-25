@@ -248,7 +248,7 @@ function resolveSessionCleanupMarkerFile(cwd, sessionId) {
   );
 }
 
-function resolveStopReviewLastFile(cwd) {
+export function resolveStopReviewLastFile(cwd) {
   return path.join(resolveStateDir(cwd), STOP_REVIEW_LAST_FILE_NAME);
 }
 

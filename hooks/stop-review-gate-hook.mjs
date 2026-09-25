@@ -13,7 +13,9 @@
  * 2. If Claude Code is not ready, log setup guidance and allow stop to continue.
  * 3. Run a targeted stop-time review of the previous Codex response.
  * 4. Parse ALLOW:/BLOCK: from Claude's output.
- * 5. If the review returns BLOCK, reject the stop.
+ * 5. If the review returns BLOCK, reject the stop (the end of this assistant
+ *    turn; SessionEnd is a separate lifecycle hook). The emitted reason is
+ *    bounded; the full reason stays in the stop-review-last.json snapshot.
  */
 
 import process from "node:process";
@@ -31,6 +33,7 @@ import {
   listJobs,
   nowIso,
   readTurnBaseline,
+  resolveStopReviewLastFile,
   writeStopReviewSnapshot
 } from "../scripts/lib/state.mjs";
 import {
@@ -55,6 +58,16 @@ const STOP_REVIEW_NO_EDIT_NOTE =
   "Claude Code stop-time review skipped: the most recent turn made no net edits.";
 const STOP_REVIEW_NO_BASELINE_NOTE =
   "Claude Code stop-time review skipped: no user turn was recorded for this Codex session.";
+// Codex shows the Stop reason inline; longer reasons stay in the persisted snapshot.
+const STOP_REVIEW_REASON_LIMIT = 1500;
+
+function boundStopReviewReason(reason, snapshotFile) {
+  const codePoints = Array.from(String(reason ?? ""));
+  if (codePoints.length <= STOP_REVIEW_REASON_LIMIT) {
+    return reason;
+  }
+  return `${codePoints.slice(0, STOP_REVIEW_REASON_LIMIT).join("")}… [truncated; full reason in ${snapshotFile}]`;
+}
 
 function emitDecision(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -138,7 +151,7 @@ function parseStopReviewOutput(rawOutput) {
       ok: false,
       rawOutput: text,
       firstLine,
-      reason: `Claude Code stop-time review found issues that still need fixes before ending the session: ${reason}`
+      reason: `Claude Code stop-time review found issues that still need fixes before this turn can end: ${reason}`
     };
   }
   if (contractFirstLine.startsWith("ALLOW:")) {
@@ -151,7 +164,7 @@ function parseStopReviewOutput(rawOutput) {
       ok: false,
       rawOutput: text,
       firstLine: contractFirstLine,
-      reason: `Claude Code stop-time review found issues that still need fixes before ending the session: ${reason}`
+      reason: `Claude Code stop-time review found issues that still need fixes before this turn can end: ${reason}`
     };
   }
 
@@ -254,7 +267,7 @@ function checkRunningJobs(workspaceRoot, sessionId = null) {
     (job) => job.status === "queued" || job.status === "running"
   );
   return runningJob
-    ? `Claude Code task ${runningJob.id} is still running. Check $cc:status and use $cc:cancel ${runningJob.id} if you want to stop it before ending the session.`
+    ? `Claude Code task ${runningJob.id} is still running and will keep running after this turn ends. Check $cc:status and use $cc:cancel ${runningJob.id} if you want to stop it.`
     : null;
 }
 
@@ -442,9 +455,10 @@ async function main() {
     });
     emitDecision({
       decision: "block",
-      reason: runningTaskNote
-        ? `${runningTaskNote} ${review.reason}`
-        : review.reason,
+      reason: boundStopReviewReason(
+        runningTaskNote ? `${runningTaskNote} ${review.reason}` : review.reason,
+        resolveStopReviewLastFile(workspaceRoot)
+      ),
     });
     return;
   }

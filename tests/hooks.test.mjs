@@ -83,6 +83,20 @@ if (process.env.CLAUDE_MCP_CONFIG_FILE) {
     }) + "\\n");
     process.exit(0);
   }
+  if (process.env.CLAUDE_BLOCK_REASON_FILE) {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      subtype: "success",
+      is_error: false,
+      result: "BLOCK: " + fs.readFileSync(process.env.CLAUDE_BLOCK_REASON_FILE, "utf8")
+    }) + "\\n");
+    process.exit(0);
+  }
+  if (process.env.CLAUDE_FAIL_STDERR_FILE) {
+    process.stderr.write(fs.readFileSync(process.env.CLAUDE_FAIL_STDERR_FILE, "utf8"));
+    process.exit(3);
+  }
   if (process.env.CLAUDE_PREFIXED_BLOCK_RESULT === "1") {
     process.stdout.write(JSON.stringify({
       type: "result",
@@ -2545,6 +2559,217 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         }
       });
     }
+  });
+
+  // Literal expectations keep these tests independent of the production constants.
+  const EXPECTED_STOP_REASON_LIMIT = 1500;
+  const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const STOP_REVIEW_BLOCK_PREFIX =
+    "Claude Code stop-time review found issues that still need fixes before this turn can end: ";
+
+  function stopReviewSnapshotPath(testEnv) {
+    return path.join(stateDirFor(testEnv.homeDir, testEnv.workspaceDir), "stop-review-last.json");
+  }
+
+  function readLastStopReviewHistoryEntry(testEnv) {
+    const lines = fs
+      .readFileSync(
+        path.join(stateDirFor(testEnv.homeDir, testEnv.workspaceDir), "stop-review-history.jsonl"),
+        "utf8"
+      )
+      .split(/\r?\n/)
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  function writeQueuedStopJob(testEnv, jobId) {
+    const now = new Date().toISOString();
+    writeStateJob(testEnv, jobId, {
+      id: jobId,
+      status: "queued",
+      phase: "queued",
+      sessionId: "hook-session",
+      workspaceRoot: testEnv.workspaceDir,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  function runStopHookWithFile(testEnv, envName, fileName, content) {
+    const filePath = path.join(testEnv.rootDir, fileName);
+    fs.writeFileSync(filePath, content, "utf8");
+    return runHook(
+      STOP_HOOK,
+      [],
+      {
+        cwd: testEnv.workspaceDir,
+        session_id: "hook-session",
+        last_assistant_message: "review me",
+      },
+      {
+        ...testEnv.env,
+        [envName]: filePath,
+      }
+    );
+  }
+
+  function assertBoundedStopReason(testEnv, payload, expectedFullReason) {
+    const fullPoints = Array.from(expectedFullReason);
+    assert.ok(fullPoints.length > EXPECTED_STOP_REASON_LIMIT);
+    const expectedPrefix = fullPoints.slice(0, EXPECTED_STOP_REASON_LIMIT).join("");
+    const expectedSuffix = `… [truncated; full reason in ${stopReviewSnapshotPath(testEnv)}]`;
+    assert.equal(payload.reason, `${expectedPrefix}${expectedSuffix}`);
+    assert.doesNotMatch(payload.reason, LONE_SURROGATE_RE);
+    assert.ok(fs.existsSync(stopReviewSnapshotPath(testEnv)));
+  }
+
+  it("stop-review hook bounds a long Unicode BLOCK reason and keeps the full snapshot", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      enableReviewGate(testEnv);
+      const longReason = `Fix these findings: ${"🧪".repeat(1600)}${"é中".repeat(40)}`;
+      const result = runStopHookWithFile(
+        testEnv,
+        "CLAUDE_BLOCK_REASON_FILE",
+        "claude-block-reason.txt",
+        longReason
+      );
+
+      const payload = JSON.parse(result.stdout);
+      assert.equal(payload.decision, "block");
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "blocked");
+      assert.equal(snapshot.runningTaskNote, null);
+      assert.equal(snapshot.reason, `${STOP_REVIEW_BLOCK_PREFIX}${longReason}`);
+      assert.equal(snapshot.rawOutput, `BLOCK: ${longReason}`);
+      assert.equal(snapshot.firstLine, `BLOCK: ${longReason}`);
+      assertBoundedStopReason(testEnv, payload, snapshot.reason);
+      assert.equal(readLastStopReviewHistoryEntry(testEnv).reason, snapshot.reason);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook bounds a long failure reason and keeps the full stderr", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      enableReviewGate(testEnv);
+      const longStderr = `claude exploded: ${"💥".repeat(1800)}\n`;
+      const result = runStopHookWithFile(
+        testEnv,
+        "CLAUDE_FAIL_STDERR_FILE",
+        "claude-fail-stderr.txt",
+        longStderr
+      );
+
+      const payload = JSON.parse(result.stdout);
+      assert.equal(payload.decision, "block");
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "blocked");
+      assert.equal(snapshot.claudeStatus, "failed");
+      assert.equal(snapshot.claudeExitCode, 3);
+      assert.equal(snapshot.claudeStderr, longStderr);
+      assert.equal(
+        snapshot.reason,
+        `The stop-time Claude Code review failed: ${longStderr.trim()}`
+      );
+      assertBoundedStopReason(testEnv, payload, snapshot.reason);
+      assert.equal(readLastStopReviewHistoryEntry(testEnv).claudeStderr, longStderr);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook bounds the combined running-task note and reason", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      enableReviewGate(testEnv);
+      writeQueuedStopJob(testEnv, "queued-stop-job");
+      const reasonBody = "🧪".repeat(1400);
+      const result = runStopHookWithFile(
+        testEnv,
+        "CLAUDE_BLOCK_REASON_FILE",
+        "claude-block-reason.txt",
+        reasonBody
+      );
+
+      const payload = JSON.parse(result.stdout);
+      assert.equal(payload.decision, "block");
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.match(snapshot.runningTaskNote ?? "", /queued-stop-job is still running/);
+      assert.equal(snapshot.reason, `${STOP_REVIEW_BLOCK_PREFIX}${reasonBody}`);
+      assert.ok(Array.from(snapshot.reason).length <= EXPECTED_STOP_REASON_LIMIT);
+      assertBoundedStopReason(testEnv, payload, `${snapshot.runningTaskNote} ${snapshot.reason}`);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook applies the reason limit at exactly 1500 code points", async (t) => {
+    for (const length of [1500, 1501]) {
+      await t.test(`${length} code points`, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          enableReviewGate(testEnv);
+          const body = "🧪".repeat(length - Array.from(STOP_REVIEW_BLOCK_PREFIX).length);
+          const result = runStopHookWithFile(
+            testEnv, "CLAUDE_BLOCK_REASON_FILE", "boundary-reason.txt", body
+          );
+          const payload = JSON.parse(result.stdout);
+          const fullReason = `${STOP_REVIEW_BLOCK_PREFIX}${body}`;
+          assert.equal(readStopReviewSnapshot(testEnv).reason, fullReason);
+          if (length === 1500) {
+            assert.equal(payload.reason, fullReason);
+          } else {
+            assertBoundedStopReason(testEnv, payload, fullReason);
+          }
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
+    }
+  });
+
+  it("stop-review hook emits short reasons unchanged", async (t) => {
+    await t.test("without a running task", () => {
+      const testEnv = createHookEnvironment();
+      try {
+        enableReviewGate(testEnv);
+        const result = runStopHookWithFile(
+          testEnv,
+          "CLAUDE_BLOCK_REASON_FILE",
+          "claude-block-reason.txt",
+          "short reason 🧪"
+        );
+        const payload = JSON.parse(result.stdout);
+        const snapshot = readStopReviewSnapshot(testEnv);
+        assert.equal(snapshot.reason, `${STOP_REVIEW_BLOCK_PREFIX}short reason 🧪`);
+        assert.equal(payload.reason, snapshot.reason);
+      } finally {
+        cleanupHookEnvironment(testEnv);
+      }
+    });
+
+    await t.test("with a running task", () => {
+      const testEnv = createHookEnvironment();
+      try {
+        enableReviewGate(testEnv);
+        writeQueuedStopJob(testEnv, "queued-stop-job");
+        const result = runStopHookWithFile(
+          testEnv,
+          "CLAUDE_BLOCK_REASON_FILE",
+          "claude-block-reason.txt",
+          "short reason"
+        );
+        const payload = JSON.parse(result.stdout);
+        const snapshot = readStopReviewSnapshot(testEnv);
+        assert.match(snapshot.runningTaskNote ?? "", /queued-stop-job is still running/);
+        assert.equal(payload.reason, `${snapshot.runningTaskNote} ${snapshot.reason}`);
+        assert.doesNotMatch(payload.reason, /…/);
+      } finally {
+        cleanupHookEnvironment(testEnv);
+      }
+    });
   });
 
   it("stop-review hook blocks empty and unauthenticated Claude results", async (t) => {
