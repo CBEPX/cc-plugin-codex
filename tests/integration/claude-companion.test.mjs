@@ -1275,6 +1275,62 @@ describe("claude-companion integration", () => {
     }
   });
 
+  for (const withCurrent of [false, true]) {
+    it(`setup --check leaves ${withCurrent ? "current and legacy" : "legacy-only"} plugin data untouched`, () => {
+      const snapshot = (root) =>
+        fs.existsSync(root)
+          ? Object.fromEntries(
+              fs.readdirSync(root, { recursive: true }).map((name) => {
+                const file = path.join(root, String(name));
+                const stat = fs.statSync(file);
+                return [
+                  String(name),
+                  stat.isDirectory() ? "dir" : `${fs.readFileSync(file, "utf8")}@${stat.mtimeMs}`,
+                ];
+              })
+            )
+          : null;
+      const writeState = (dir, name, value, mtime) => {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, name), value);
+        fs.utimesSync(path.join(dir, name), mtime, mtime);
+      };
+      const testEnv = createTestEnvironment();
+      const currentStateDir = stateDirFor(testEnv);
+      const pluginsDir = path.join(testEnv.homeDir, ".codex", "plugins");
+      const legacyStateDir = path.join(
+        pluginsDir,
+        "data",
+        "claude-code",
+        "state",
+        path.basename(currentStateDir)
+      );
+      const older = new Date("2026-01-01T00:00:00.000Z");
+      const newer = new Date("2026-02-01T00:00:00.000Z");
+      writeState(legacyStateDir, "config.json", '{"version":1,"stopReviewGate":true}\n', newer);
+      writeState(legacyStateDir, "armed-legacy-session", "", older);
+      if (withCurrent) {
+        writeState(currentStateDir, "config.json", '{"version":1,"stopReviewGate":false}\n', older);
+        writeState(currentStateDir, "armed-current-session", "", older);
+      }
+      const before = snapshot(pluginsDir);
+
+      try {
+        const report = runCompanionJson(
+          ["setup", "--cwd", testEnv.workspaceDir, "--check", "--json"],
+          { env: testEnv.env }
+        );
+
+        assert.deepEqual(snapshot(pluginsDir), before);
+        assert.equal(fs.existsSync(currentStateDir), withCurrent);
+        assert.equal(report.reviewGateEnabled, false);
+        assert.deepEqual(report.actionsTaken, []);
+      } finally {
+        cleanupTestEnvironment(testEnv);
+      }
+    });
+  }
+
   it("rejects mutating review-gate flags in setup --check mode", () => {
     const testEnv = createTestEnvironment();
     try {

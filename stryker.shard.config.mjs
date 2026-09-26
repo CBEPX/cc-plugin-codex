@@ -21,13 +21,13 @@ const shards = {
     command: "npm run test:mutation:state:unit",
     mutate: [
       // Persistence lifecycle, session lookup, and terminal job transitions.
-      "scripts/lib/state.mjs:189-229",
-      "scripts/lib/state.mjs:298-389",
-      "scripts/lib/state.mjs:421-471",
-      "scripts/lib/state.mjs:548-934",
-      "scripts/lib/state.mjs:983-1156",
-      "scripts/lib/state.mjs:1222-1287",
-      "scripts/lib/state.mjs:1293-1339",
+      "scripts/lib/state.mjs:87-108",
+      "scripts/lib/state.mjs:177-268",
+      "scripts/lib/state.mjs:300-350",
+      "scripts/lib/state.mjs:427-813",
+      "scripts/lib/state.mjs:862-1035",
+      "scripts/lib/state.mjs:1101-1166",
+      "scripts/lib/state.mjs:1172-1218",
     ],
   },
   "tracked-jobs": {
