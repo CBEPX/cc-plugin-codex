@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 
 export const PLUGIN_DATA_NAMESPACE = "cc";
-export const LEGACY_PLUGIN_DATA_NAMESPACES = ["claude-code"];
 
 export function normalizePathSlashes(value) {
   return value.replace(/\\/g, "/");

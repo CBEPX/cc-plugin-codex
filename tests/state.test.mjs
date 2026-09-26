@@ -15,8 +15,8 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 // State paths are workspace-hash based and resolveWorkspaceRoot() shells out to
-// git, so most tests use a real git repo cwd. A dedicated subprocess test below
-// covers the HOME/CODEX_HOME-specific migration path.
+// git, so most tests use a real git repo cwd. Subprocess tests below cover
+// reads against a disposable CODEX_HOME with legacy plugin data.
 
 import {
   MAX_STOP_REVIEW_HISTORY_ENTRIES,
@@ -176,79 +176,156 @@ describe("loadConfig / saveConfig", () => {
     const cfg = getConfig(PROJECT_CWD);
     assert.equal(cfg.stopReviewGate, true);
   });
+});
 
-  it("migrates legacy claude-code plugin state into the cc plugin namespace and prunes old armed markers", () => {
-    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-state-migrate-"));
-    const codexHome = path.join(homeDir, ".codex");
-    const repoDir = createTempGitRepo();
+// ---------------------------------------------------------------------------
+// Read-only state resolution (subprocesses use a disposable CODEX_HOME)
+// ---------------------------------------------------------------------------
 
-    try {
-      const realWorkspace = fs.realpathSync.native(repoDir);
-      const workspaceHash = createHash("sha256")
-        .update(realWorkspace)
-        .digest("hex")
-        .slice(0, 12);
-      const legacyStateDir = path.join(
-        codexHome,
-        "plugins",
-        "data",
-        "claude-code",
-        "state",
-        workspaceHash
-      );
-      const nextStateDir = path.join(
-        codexHome,
-        "plugins",
-        "data",
-        "cc",
-        "state",
-        workspaceHash
-      );
+describe("state reads with legacy plugin data", () => {
+  const OLDER = new Date("2026-01-01T00:00:00.000Z");
+  const NEWER = new Date("2026-02-01T00:00:00.000Z");
+  let codexHome;
+  let repoDir;
+  let hash;
 
-      fs.mkdirSync(legacyStateDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(legacyStateDir, "config.json"),
-        JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
-        "utf8"
-      );
-      fs.writeFileSync(path.join(legacyStateDir, "armed-old-session"), "", "utf8");
+  beforeEach(() => {
+    codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "cc-state-reads-"));
+    repoDir = createTempGitRepo();
+    hash = resolveWorkspaceHash(repoDir);
+  });
 
-      const result = spawnSync(
-        process.execPath,
-        [
-          "--input-type=module",
-          "-e",
-          `
-            const mod = await import(${JSON.stringify(STATE_MODULE_URL)});
-            const cwd = ${JSON.stringify(repoDir)};
-            console.log(JSON.stringify({
-              stateDir: mod.resolveStateDir(cwd),
-              config: mod.getConfig(cwd)
-            }));
-          `,
-        ],
-        {
-          env: {
-            ...process.env,
-            HOME: homeDir,
-            USERPROFILE: homeDir,
-            CODEX_HOME: codexHome,
-          },
-          encoding: "utf8",
-        }
-      );
+  afterEach(() => {
+    fs.rmSync(codexHome, { recursive: true, force: true });
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  });
 
-      assert.equal(result.status, 0, result.stderr || result.stdout);
-      const payload = JSON.parse(result.stdout);
-      assert.equal(payload.stateDir, nextStateDir);
-      assert.equal(payload.config.stopReviewGate, true);
-      assert.equal(fs.existsSync(path.join(nextStateDir, "config.json")), true);
-      assert.equal(fs.existsSync(path.join(legacyStateDir, "config.json")), false);
-      assert.equal(fs.existsSync(path.join(nextStateDir, "armed-old-session")), false);
-    } finally {
-      fs.rmSync(homeDir, { recursive: true, force: true });
-      fs.rmSync(repoDir, { recursive: true, force: true });
-    }
+  function dataRoot(namespace) {
+    return path.join(codexHome, "plugins", "data", namespace);
+  }
+
+  function writeStateFile(namespace, name, value, mtime = OLDER) {
+    const file = path.join(dataRoot(namespace), "state", hash, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, typeof value === "string" ? value : `${JSON.stringify(value)}\n`);
+    fs.utimesSync(file, mtime, mtime);
+  }
+
+  function snapshotTree(root) {
+    const entries = {};
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        const stat = fs.statSync(full);
+        entries[path.relative(root, full)] = entry.isDirectory()
+          ? { dir: true, mode: stat.mode }
+          : {
+              sha256: createHash("sha256").update(fs.readFileSync(full)).digest("hex"),
+              mode: stat.mode,
+              mtimeMs: stat.mtimeMs,
+            };
+        if (entry.isDirectory()) walk(full);
+      }
+    };
+    if (fs.existsSync(root)) walk(root);
+    return entries;
+  }
+
+  function runStateChild(body) {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `const mod = await import(${JSON.stringify(STATE_MODULE_URL)});
+         const cwd = ${JSON.stringify(repoDir)};
+         const read = () => ({
+           stateDir: mod.resolveStateDir(cwd),
+           config: mod.getConfig(cwd),
+           session: mod.getCurrentSession(cwd),
+           jobs: mod.listJobs(cwd).map((job) => job.id),
+         });
+         ${body}`,
+      ],
+      { env: { ...process.env, CODEX_HOME: codexHome }, encoding: "utf8" }
+    );
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return result.stdout ? JSON.parse(result.stdout) : null;
+  }
+
+  // Two processes with two reads each defeat any per-process "already ensured" cache.
+  function readRepeatedly() {
+    const reads = [
+      ...runStateChild("console.log(JSON.stringify([read(), read()]));"),
+      ...runStateChild("console.log(JSON.stringify([read(), read()]));"),
+    ];
+    for (const read of reads) assert.deepEqual(read, reads[0]);
+    return reads[0];
+  }
+
+  function writeCurrentConfig() {
+    runStateChild('mod.setConfig(cwd, "stopReviewGate", true);');
+    return JSON.parse(
+      fs.readFileSync(path.join(dataRoot("cc"), "state", hash, "config.json"), "utf8")
+    );
+  }
+
+  it("does not create plugin data when no state exists", () => {
+    const read = readRepeatedly();
+
+    assert.equal(read.stateDir, path.join(dataRoot("cc"), "state", hash));
+    assert.deepEqual(read.config, { version: 1, stopReviewGate: false });
+    assert.equal(read.session, null);
+    assert.deepEqual(read.jobs, []);
+    assert.equal(fs.existsSync(path.join(codexHome, "plugins")), false);
+
+    assert.equal(writeCurrentConfig().stopReviewGate, true);
+    assert.equal(fs.statSync(path.join(dataRoot("cc"), "state", hash, "jobs")).isDirectory(), true);
+  });
+
+  it("neither imports nor changes legacy-only claude-code state", () => {
+    writeStateFile("claude-code", "config.json", { version: 1, stopReviewGate: true });
+    writeStateFile("claude-code", "current-session.json", { sessionId: "legacy-session" });
+    writeStateFile("claude-code", "armed-legacy-session", "");
+    writeStateFile("claude-code", "jobs/legacy-job.json", {
+      id: "legacy-job",
+      status: "completed",
+      createdAt: OLDER.toISOString(),
+    });
+    const legacyBefore = snapshotTree(dataRoot("claude-code"));
+
+    const read = readRepeatedly();
+
+    assert.deepEqual(snapshotTree(dataRoot("claude-code")), legacyBefore);
+    assert.equal(fs.existsSync(dataRoot("cc")), false);
+    assert.deepEqual(read.config, { version: 1, stopReviewGate: false });
+    assert.equal(read.session, null);
+    assert.deepEqual(read.jobs, []);
+
+    assert.equal(writeCurrentConfig().stopReviewGate, true);
+    assert.deepEqual(snapshotTree(dataRoot("claude-code")), legacyBefore);
+  });
+
+  it("keeps colliding current and legacy files and armed markers in both mtime directions", () => {
+    // Legacy config is newer, legacy session marker is older than current.
+    writeStateFile("cc", "config.json", { version: 1, stopReviewGate: false, owner: "cc" }, OLDER);
+    writeStateFile("claude-code", "config.json", { version: 1, stopReviewGate: true }, NEWER);
+    writeStateFile("cc", "current-session.json", { sessionId: "current-session" }, NEWER);
+    writeStateFile("claude-code", "current-session.json", { sessionId: "legacy-session" }, OLDER);
+    writeStateFile("cc", "armed-current-session", "");
+    writeStateFile("claude-code", "armed-legacy-session", "");
+    const pluginsBefore = snapshotTree(path.join(codexHome, "plugins"));
+
+    const read = readRepeatedly();
+
+    assert.deepEqual(snapshotTree(path.join(codexHome, "plugins")), pluginsBefore);
+    assert.deepEqual(read.config, { version: 1, stopReviewGate: false, owner: "cc" });
+    assert.equal(read.session, "current-session");
+
+    const legacyBefore = snapshotTree(dataRoot("claude-code"));
+    assert.deepEqual(writeCurrentConfig(), { version: 1, stopReviewGate: true, owner: "cc" });
+    assert.deepEqual(snapshotTree(dataRoot("claude-code")), legacyBefore);
+    assert.equal(fs.existsSync(path.join(dataRoot("cc"), "state", hash, "armed-current-session")), true);
   });
 });
 
