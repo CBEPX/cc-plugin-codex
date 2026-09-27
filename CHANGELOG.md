@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Stop state path and config reads from migrating or deleting plugin data. Resolving a workspace state path, reading config (including `setup --check`), or reading the session marker no longer moves or mtime-merges the legacy `plugins/data/claude-code` root into `plugins/data/cc`, deletes either root's files, or removes `armed-*` markers, and no longer creates `plugins/data` when no state exists. Reads use only the current `cc` state and return defaults when it is absent; legacy-only data stays untouched and is not imported. Explicit writes still create the current state directories, and identity-checked job reaping is unchanged.
+
 ## v1.7.9
 
 ### Changed
