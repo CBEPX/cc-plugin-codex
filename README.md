@@ -48,7 +48,7 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 Install the fork release from the CBEPX marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.11
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.12
 codex plugin add cc@cbepx
 ```
 
@@ -61,8 +61,8 @@ The optional `npx` helper can install this fork release and enable the required 
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.11 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.11/cc-plugin-codex-1.7.11.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.12 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.12/cc-plugin-codex-1.7.12.tgz install
 ```
 
 On Windows, prefer the marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
@@ -391,7 +391,7 @@ The snapshot is shared by sessions in the same workspace and is replaced by the 
 Install from the fork's marketplace snapshot:
 
 ```bash
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.11
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.12
 codex plugin add cc@cbepx
 ```
 
@@ -412,8 +412,8 @@ This fork does not install from the upstream Sendbird marketplace. Use the CBEPX
 ```bash
 CC_PLUGIN_CODEX_MARKETPLACE_NAME=cbepx \
 CC_PLUGIN_CODEX_MARKETPLACE_SOURCE=CBEPX/cc-plugin-codex \
-CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.11 \
-npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.11/cc-plugin-codex-1.7.11.tgz install
+CC_PLUGIN_CODEX_MARKETPLACE_REF=v1.7.12 \
+npx -y https://github.com/CBEPX/cc-plugin-codex/releases/download/v1.7.12/cc-plugin-codex-1.7.12.tgz install
 ```
 
 After install, run:
@@ -447,7 +447,7 @@ Codex rejects re-adding an existing marketplace name when the pinned source/ref 
 ```bash
 codex plugin remove cc@cbepx
 codex plugin marketplace remove cbepx
-codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.11
+codex plugin marketplace add CBEPX/cc-plugin-codex --ref v1.7.12
 codex plugin add cc@cbepx
 ```
 
