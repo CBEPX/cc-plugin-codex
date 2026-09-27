@@ -615,6 +615,85 @@ function readStoredJobById(testEnv, jobId) {
   );
 }
 
+/**
+ * @param {{rootDir: string}} testEnv
+ * @param {string} name
+ * @param {string} logPath
+ */
+function writeFakeMcpServer(testEnv, name, logPath) {
+  const serverPath = path.join(testEnv.rootDir, `fake-mcp-${name}.mjs`);
+  fs.writeFileSync(
+    serverPath,
+    `import fs from "node:fs";
+import readline from "node:readline";
+
+const logPath = ${JSON.stringify(logPath)};
+const name = ${JSON.stringify(name)};
+fs.appendFileSync(logPath, name + ":start\\n", "utf8");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  fs.appendFileSync(logPath, name + ":" + request.method + "\\n", "utf8");
+  if (request.id == null) return;
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name, version: "1" } }
+    : { tools: [{ name: "search", description: "Search " + name, annotations: { readOnlyHint: true } }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`,
+    "utf8"
+  );
+  return serverPath;
+}
+
+/**
+ * User servers `docs` and `unused`, an ignored project server `localdocs`,
+ * and a disabled plugin server `plugindocs`; every server logs its start.
+ * @param {{rootDir: string, homeDir: string, workspaceDir: string}} testEnv
+ */
+function seedMcpSelectionFixture(testEnv) {
+  const logPath = path.join(testEnv.rootDir, "fake-mcp-starts.log");
+  const stdio = (name) => ({
+    command: process.execPath,
+    args: [writeFakeMcpServer(testEnv, name, logPath)],
+  });
+  fs.writeFileSync(
+    path.join(testEnv.homeDir, ".claude.json"),
+    JSON.stringify({ mcpServers: { docs: stdio("docs"), unused: stdio("unused") } }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(testEnv.workspaceDir, ".mcp.json"),
+    JSON.stringify({ mcpServers: { localdocs: stdio("localdocs") } }),
+    "utf8"
+  );
+  const pluginId = "plugindocs@example";
+  const installPath = path.join(testEnv.homeDir, ".claude", "plugins", "cache", "plugindocs");
+  fs.mkdirSync(installPath, { recursive: true });
+  fs.writeFileSync(
+    path.join(testEnv.homeDir, ".claude", "settings.json"),
+    JSON.stringify({ enabledPlugins: { [pluginId]: false } }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(testEnv.homeDir, ".claude", "plugins", "installed_plugins.json"),
+    JSON.stringify({ version: 2, plugins: { [pluginId]: [{ scope: "user", installPath }] } }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(installPath, ".mcp.json"),
+    JSON.stringify({ plugindocs: stdio("plugindocs") }),
+    "utf8"
+  );
+  return logPath;
+}
+
+/** @param {string} logPath */
+function readFakeMcpLog(logPath) {
+  return fs.existsSync(logPath)
+    ? fs.readFileSync(logPath, "utf8").split("\n").filter(Boolean)
+    : [];
+}
+
 function runCompanion(args, options = {}) {
   const result = spawnSync(
     process.execPath,
@@ -3104,6 +3183,113 @@ describe("claude-companion integration", () => {
       assert.deepEqual(payload.selected.map((tool) => tool.toolId), ["mcp__docs__search"]);
       assert.deepEqual(payload.diagnostics, []);
       assert.doesNotMatch(JSON.stringify(payload), /SECRET_DIAGNOSTIC_TOKEN|DOCS_TOKEN/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("starts only the pinned MCP server with and without --no-auto-tools", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const logPath = seedMcpSelectionFixture(testEnv);
+      for (const extraArgs of [[], ["--no-auto-tools"]]) {
+        fs.rmSync(logPath, { force: true });
+        const payload = runCompanionJson(
+          [
+            "mcp-diagnose",
+            "--cwd",
+            testEnv.workspaceDir,
+            "--json",
+            "--user-mcp-tool",
+            "mcp__docs__search",
+            ...extraArgs,
+          ],
+          { env: testEnv.env }
+        );
+
+        assert.deepEqual(readFakeMcpLog(logPath), [
+          "docs:start",
+          "docs:initialize",
+          "docs:notifications/initialized",
+          "docs:tools/list",
+        ]);
+        assert.deepEqual(payload.availableServers.map((server) => server.name), ["docs", "unused"]);
+        assert.deepEqual(payload.discoveredServers.map((server) => server.name), ["docs"]);
+        assert.deepEqual(payload.discovered.map((tool) => tool.toolId), ["mcp__docs__search"]);
+        assert.deepEqual(payload.selectedServers, ["docs"]);
+        assert.ok(payload.allowedTools.includes("mcp__docs__search"));
+      }
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("starts no MCP server for an unknown pin", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const logPath = seedMcpSelectionFixture(testEnv);
+      const payload = runCompanionJson(
+        [
+          "mcp-diagnose",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "--user-mcp-tool",
+          "mcp__missing__search",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.deepEqual(readFakeMcpLog(logPath), []);
+      assert.deepEqual(payload.availableServers.map((server) => server.name), ["docs", "unused"]);
+      assert.deepEqual(payload.discoveredServers, []);
+      assert.equal(payload.requestedTools[0].found, false);
+      assert.deepEqual(payload.diagnostics.map((entry) => entry.code), ["explicit_tool_missing"]);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("starts no MCP server with --no-auto-tools and no pins", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const logPath = seedMcpSelectionFixture(testEnv);
+      const payload = runCompanionJson(
+        ["mcp-diagnose", "--cwd", testEnv.workspaceDir, "--json", "--no-auto-tools"],
+        { env: testEnv.env }
+      );
+
+      assert.deepEqual(readFakeMcpLog(logPath), []);
+      assert.deepEqual(payload.availableServers.map((server) => server.name), ["docs", "unused"]);
+      assert.deepEqual(payload.discoveredServers, []);
+      assert.deepEqual(payload.discovered, []);
+      assert.deepEqual(payload.diagnostics, []);
+      assert.deepEqual(payload.selectedServers, []);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("keeps probing every in-scope MCP server without pins or --no-auto-tools", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const logPath = seedMcpSelectionFixture(testEnv);
+      const payload = runCompanionJson(
+        ["mcp-diagnose", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env }
+      );
+
+      const log = readFakeMcpLog(logPath);
+      assert.ok(log.includes("docs:start"));
+      assert.ok(log.includes("unused:start"));
+      assert.ok(log.every((line) => line.startsWith("docs:") || line.startsWith("unused:")));
+      assert.ok(log.every((line) => !line.endsWith(":tools/call")));
+      assert.deepEqual(payload.discoveredServers.map((server) => server.name), ["docs", "unused"]);
+      assert.deepEqual(payload.selectedServers, []);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

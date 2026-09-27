@@ -167,7 +167,7 @@ $cc:mcp-diagnose --user-mcp-tool mcp__context7__resolve-library-id
 $cc:mcp-diagnose --allow-project-mcp-servers --user-mcp-tool mcp__localdocs__search
 ```
 
-The diagnostic actively starts/probes every configured server in scope (or sends HTTP initialize and tool-list requests), with a five-second absolute deadline per server. Treat that discovery as potentially side-effecting. The output lists server names and config sources only; it does not print raw MCP server configs or secrets. Once a peer workflow freezes its selected manifest, later turn revalidation probes only those selected servers.
+The diagnostic actively starts/probes servers (or sends HTTP initialize and tool-list requests), with a five-second absolute deadline per server. With `--user-mcp-tool` pins it probes only the servers those pins name; with `--no-auto-tools` and no pins it probes none; without either it probes every configured server in scope. Treat that discovery as potentially side-effecting. The output lists server names and config sources only; it does not print raw MCP server configs or secrets. Once a peer workflow freezes its selected manifest, later turn revalidation probes only those selected servers.
 
 ### Peer design and research
 
