@@ -246,26 +246,38 @@ function readWorkflow(testEnv, id) {
 }
 
 function readStateText(testEnv) {
-  const values = [];
-  const visit = (directory) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const candidate = path.join(directory, entry.name);
-      if (entry.isDirectory()) visit(candidate);
-      else if (entry.isFile()) values.push(fs.readFileSync(candidate, "utf8"));
-    }
-  };
-  visit(stateDir(testEnv));
-  return values.join("\n");
+  const root = stateDir(testEnv);
+  fs.accessSync(root);
+  return readTreeText(root);
 }
 
+// Entries captured by readdirSync may vanish before they are read (companion
+// processes create and remove *.json.lock and *.tmp.* files while tests scan).
+// Only ENOENT from the two filesystem read calls is tolerated; every other
+// error, including errors thrown by `include`, propagates.
 function readTreeText(root, include = (_filePath) => true) {
-  if (!fs.existsSync(root)) return "";
   const values = [];
   const visit = (directory) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error && error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
       const candidate = path.join(directory, entry.name);
       if (entry.isDirectory()) visit(candidate);
-      else if (entry.isFile() && include(candidate)) values.push(fs.readFileSync(candidate, "utf8"));
+      else if (entry.isFile() && include(candidate)) {
+        let text;
+        try {
+          text = fs.readFileSync(candidate, "utf8");
+        } catch (error) {
+          if (error && error.code === "ENOENT") continue;
+          throw error;
+        }
+        values.push(text);
+      }
     }
   };
   visit(root);
@@ -638,5 +650,149 @@ test("peer workflow acceptance covers aggregate surfaces, retry, lifecycle, and 
     assert.equal(after, before);
   } finally {
     fs.rmSync(testEnv.rootDir, { recursive: true, force: true });
+  }
+});
+
+function scannerFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-scanner-"));
+  const nested = path.join(root, "nested");
+  fs.mkdirSync(nested);
+  fs.writeFileSync(path.join(root, "keep.json"), "KEEP_MARKER_1F3B7A\n", "utf8");
+  fs.writeFileSync(path.join(root, "keep.json.lock"), "LOCK_MARKER_5C9D2E\n", "utf8");
+  fs.writeFileSync(path.join(root, `keep.json.tmp.${process.pid}.abc.0123beef`), "TMP_MARKER_8E4A61\n", "utf8");
+  fs.writeFileSync(path.join(root, "keep.log"), "LOG_MARKER_2B7C90\n", "utf8");
+  fs.writeFileSync(path.join(nested, "inner.json"), "NESTED_MARKER_9D1E44\n", "utf8");
+  return { root, nested };
+}
+
+function fsError(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+test("scanner tolerates a file removed after readdir captured it", (t) => {
+  const { root } = scannerFixture();
+  const readdirSync = fs.readdirSync;
+  let removed = false;
+  t.mock.method(fs, "readdirSync", /** @type {any} */ ((directory, options) => {
+    const entries = readdirSync(directory, options);
+    if (!removed && directory === root) {
+      removed = true;
+      fs.rmSync(path.join(root, "keep.json.lock"));
+    }
+    return entries;
+  }));
+  try {
+    const text = readTreeText(root);
+    assert.match(text, /KEEP_MARKER_1F3B7A/);
+    assert.match(text, /TMP_MARKER_8E4A61/);
+    assert.match(text, /LOG_MARKER_2B7C90/);
+    assert.match(text, /NESTED_MARKER_9D1E44/);
+    assert.doesNotMatch(text, /LOCK_MARKER_5C9D2E/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scanner tolerates a nested directory removed after readdir captured it", (t) => {
+  const { root, nested } = scannerFixture();
+  const readdirSync = fs.readdirSync;
+  let removed = false;
+  t.mock.method(fs, "readdirSync", /** @type {any} */ ((directory, options) => {
+    const entries = readdirSync(directory, options);
+    if (!removed && directory === root) {
+      removed = true;
+      fs.rmSync(nested, { recursive: true, force: true });
+    }
+    return entries;
+  }));
+  try {
+    const text = readTreeText(root);
+    assert.match(text, /KEEP_MARKER_1F3B7A/);
+    assert.match(text, /LOCK_MARKER_5C9D2E/);
+    assert.match(text, /TMP_MARKER_8E4A61/);
+    assert.doesNotMatch(text, /NESTED_MARKER_9D1E44/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scanner returns empty text for an optional missing root", () => {
+  const missing = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-scanner-")), "absent");
+  try {
+    assert.equal(readTreeText(missing), "");
+  } finally {
+    fs.rmSync(path.dirname(missing), { recursive: true, force: true });
+  }
+});
+
+test("scanner throws when the mandatory state root is missing", () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-scanner-"));
+  const workspaceDir = path.join(rootDir, "workspace");
+  fs.mkdirSync(workspaceDir);
+  const testEnv = { rootDir, workspaceDir, env: { CODEX_HOME: path.join(rootDir, "absent-codex-home") } };
+  try {
+    assert.throws(() => readStateText(testEnv), { code: "ENOENT" });
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("scanner keeps persistent normal, lock, and tmp markers visible to leak assertions", () => {
+  const { root } = scannerFixture();
+  try {
+    const text = readTreeText(root);
+    for (const marker of ["KEEP_MARKER_1F3B7A", "LOCK_MARKER_5C9D2E", "TMP_MARKER_8E4A61", "NESTED_MARKER_9D1E44"]) {
+      assert.throws(() => assert.doesNotMatch(text, new RegExp(marker)), assert.AssertionError);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scanner honors include filters", () => {
+  const { root } = scannerFixture();
+  try {
+    const json = readTreeText(root, (file) => file.endsWith(".json"));
+    assert.match(json, /KEEP_MARKER_1F3B7A/);
+    assert.match(json, /NESTED_MARKER_9D1E44/);
+    assert.doesNotMatch(json, /LOCK_MARKER_5C9D2E/);
+    assert.doesNotMatch(json, /TMP_MARKER_8E4A61/);
+    assert.doesNotMatch(json, /LOG_MARKER_2B7C90/);
+    const logs = readTreeText(root, (file) => file.endsWith(".log"));
+    assert.equal(logs, "LOG_MARKER_2B7C90\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scanner propagates non-ENOENT filesystem errors", (t) => {
+  const { root, nested } = scannerFixture();
+  const readFileSync = fs.readFileSync;
+  const readdirSync = fs.readdirSync;
+  t.mock.method(fs, "readFileSync", /** @type {any} */ ((file, options) => {
+    if (file === path.join(root, "keep.json")) throw fsError("EACCES");
+    return readFileSync(file, options);
+  }));
+  let failNested = false;
+  t.mock.method(fs, "readdirSync", /** @type {any} */ ((directory, options) => {
+    if (failNested && directory === nested) throw fsError("EIO");
+    return readdirSync(directory, options);
+  }));
+  try {
+    assert.throws(() => readTreeText(root), { code: "EACCES" });
+    failNested = true;
+    assert.throws(() => readTreeText(nested), { code: "EIO" });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scanner propagates include callback errors even when they look like ENOENT", () => {
+  const { root } = scannerFixture();
+  try {
+    const failure = fsError("ENOENT");
+    assert.throws(() => readTreeText(root, () => { throw failure; }), (error) => error === failure);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
