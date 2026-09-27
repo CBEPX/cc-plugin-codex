@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v1.7.11
+
+### Fixed
+
+- Limit `mcp-diagnose` probes to the servers the request selects, matching peer workflow selection before any server starts. With `--user-mcp-tool` pins, only the servers those pins name are started or sent HTTP initialize and tool-list requests; with `--no-auto-tools` and no pins, no server is probed and the result reports no discovered servers, tools, or selection; without either flag, every configured server in scope is still probed as before. Unprobed servers remain listed as available with their config sources, and a pin naming an unconfigured server still reports `explicit_tool_missing` without starting anything. The `mcp-diagnose` skill and README now list the already-accepted `--no-auto-tools` argument, and they and the peer runtime guidance now describe the per-flag probe scope.
+
+- Test-only: make the peer workflow E2E state scanner tolerate `*.json.lock` and `*.tmp.*` files, or nested directories, that companion processes remove between the directory listing and the following read, skipping only `ENOENT` from those two filesystem calls. Every other error, including `include` callback errors, still propagates; a missing mandatory state root still fails; and persistent lock, tmp, and normal files stay visible to the leak assertions. No runtime behavior changes.
+
 ## v1.7.10
 
 ### Fixed
