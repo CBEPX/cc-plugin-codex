@@ -16,6 +16,7 @@ Output:
 - Present the companion stdout exactly as returned.
 - Do not add extra prose or reformat it.
 - By default, status overview is scoped to the current Codex session, shows each peer workflow once, and hides its linked implementation jobs. `--all` widens the overview to the repository workspace and includes linked jobs.
+- If no owning Codex session resolves, the default overview is empty and explains why; it never falls back to other sessions or unowned jobs.
 - A specific ID may identify either a tracked job or a peer design/research workflow.
 - Status inspection may reconcile stale owned jobs. Process cleanup remains PID-identity checked; healthy active jobs are not rewritten.
 

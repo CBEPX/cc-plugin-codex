@@ -16,7 +16,6 @@ import { resolvePluginStateRoot } from "./codex-paths.mjs";
 
 import {
   getConfig,
-  getCurrentSession,
   listJobs,
   readJobFile,
   resolveJobsDir,
@@ -25,7 +24,7 @@ import {
   TERMINAL_JOB_STATUSES,
   sanitizeId,
 } from "./state.mjs";
-import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
+import { resolveSessionOwner, SESSION_OWNER_REQUIRED } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { listWorkflows } from "./workflows.mjs";
 
@@ -38,18 +37,18 @@ export function sortJobsNewestFirst(jobs) {
   );
 }
 
-function getCurrentSessionId(options = {}) {
-  return (
-    options.env?.[SESSION_ID_ENV] ??
-    process.env[SESSION_ID_ENV] ??
-    (options.cwd ? getCurrentSession(options.cwd) : null)
-  );
-}
+const NO_OWNER_NOTICE =
+  "No owning Codex session was found, so no jobs or workflows are shown. " +
+  "Run from the owning Codex session, pass an explicit job or workflow id, or use --all.";
 
-function filterJobsForCurrentSession(jobs, options = {}) {
-  const sessionId = getCurrentSessionId(options);
-  if (!sessionId) return jobs;
-  return jobs.filter((job) => job.sessionId === sessionId);
+function resolveRequiredOwnerSessionId(workspaceRoot) {
+  const { ownerSessionId } = resolveSessionOwner({ cwd: workspaceRoot });
+  if (!ownerSessionId) {
+    throw new Error(
+      `${SESSION_OWNER_REQUIRED}: No owning Codex session was found. Pass an explicit job or workflow id, or run from the owning Codex session.`
+    );
+  }
+  return ownerSessionId;
 }
 
 function getJobTypeLabel(job) {
@@ -273,18 +272,35 @@ function resolveReferencedJob(workspaceRoot, jobs, reference) {
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
-  const sessionId = getCurrentSessionId({ ...options, cwd: workspaceRoot });
+  const owner = options.all
+    ? { ownerSessionId: null, ownerSource: null, markerStatus: null }
+    : resolveSessionOwner({ env: options.env, cwd: workspaceRoot });
+  const sessionId = owner.ownerSessionId;
+  if (!options.all && !sessionId) {
+    return {
+      workspaceRoot,
+      config,
+      ...owner,
+      ownerNotice: NO_OWNER_NOTICE,
+      workflows: [],
+      running: [],
+      latestFinished: null,
+      recent: [],
+      needsReview: Boolean(config.stopReviewGate),
+      totalJobs: 0,
+      totalWorkflows: 0,
+      omittedJobs: 0,
+      omittedWorkflows: 0,
+    };
+  }
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const jobs = sortJobsNewestFirst(
     options.all
       ? listJobs(workspaceRoot)
-      : filterJobsForCurrentSession(listJobs(workspaceRoot), {
-          ...options,
-          cwd: workspaceRoot,
-        }).filter((job) => !job.workflowId)
+      : listJobs(workspaceRoot).filter((job) => job.sessionId === sessionId && !job.workflowId)
   );
   const allWorkflows = listWorkflows(workspaceRoot)
-    .filter((workflow) => options.all || !sessionId || workflow.currentOwnerSessionId === sessionId);
+    .filter((workflow) => options.all || workflow.currentOwnerSessionId === sessionId);
   const workflows = allWorkflows.map(summarizeWorkflow)
     .slice(0, options.all ? undefined : maxJobs);
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
@@ -305,6 +321,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
   return {
     workspaceRoot,
     config,
+    ...owner,
     workflows,
     running,
     latestFinished,
@@ -365,10 +382,11 @@ export function buildSingleStatusSnapshot(cwd, reference, options = {}) {
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const ownerSessionId = reference ? null : resolveRequiredOwnerSessionId(workspaceRoot);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const resolved = reference
     ? resolveReferencedJob(workspaceRoot, jobs, reference)
-    : { workspaceRoot, job: matchJobReference(jobs, reference) };
+    : { workspaceRoot, job: matchJobReference(jobs.filter((job) => job.sessionId === ownerSessionId), reference) };
   if (!resolved.job) throw new Error(`No job found for "${reference}".`);
   return {
     workspaceRoot: resolved.workspaceRoot,
@@ -378,12 +396,11 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 
 export function resolveResultJob(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const ownerSessionId = reference ? null : resolveRequiredOwnerSessionId(workspaceRoot);
   const jobs = sortJobsNewestFirst(
     reference
       ? listJobs(workspaceRoot)
-      : filterJobsForCurrentSession(listJobs(workspaceRoot), {
-          cwd: workspaceRoot,
-        })
+      : listJobs(workspaceRoot).filter((job) => job.sessionId === ownerSessionId)
   );
   if (reference) {
     const resolved = resolveReferencedJob(workspaceRoot, jobs, reference);
@@ -429,9 +446,9 @@ export function resolveResultTarget(cwd, reference) {
     };
   }
 
-  const sessionId = getCurrentSessionId({ cwd: workspaceRoot });
+  const sessionId = resolveRequiredOwnerSessionId(workspaceRoot);
   const workflowTargets = listWorkflows(workspaceRoot)
-    .filter((workflow) => !sessionId || workflow.currentOwnerSessionId === sessionId)
+    .filter((workflow) => workflow.currentOwnerSessionId === sessionId)
     .filter((workflow) => workflow.checkpoint || workflow.finalResult || workflow.status === "incomplete")
     .map((workflow) => ({
       targetType: "workflow",
@@ -440,8 +457,8 @@ export function resolveResultTarget(cwd, reference) {
       updatedAt: workflow.updatedAt,
       state: "available",
     }));
-  const jobTargets = filterJobsForCurrentSession(listJobs(workspaceRoot), { cwd: workspaceRoot })
-    .filter((job) => !job.workflowId && TERMINAL_JOB_STATUSES.has(job.status))
+  const jobTargets = listJobs(workspaceRoot)
+    .filter((job) => job.sessionId === sessionId && !job.workflowId && TERMINAL_JOB_STATUSES.has(job.status))
     .map((job) => ({
       targetType: "job",
       workspaceRoot,
@@ -457,6 +474,7 @@ export function resolveResultTarget(cwd, reference) {
 
 export function resolveCancelableJob(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const ownerSessionId = reference ? null : resolveRequiredOwnerSessionId(workspaceRoot);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const activeJobs = jobs.filter((job) => job.status === "running" || job.status === "queued");
   if (reference) {
@@ -472,8 +490,9 @@ export function resolveCancelableJob(cwd, reference) {
     }
     return resolved;
   }
-  if (activeJobs.length === 1) return { workspaceRoot, job: activeJobs[0] };
-  if (activeJobs.length > 1) throw new Error("Multiple Claude Code jobs are active. Pass a job id to $cc:cancel.");
+  const ownedJobs = activeJobs.filter((job) => job.sessionId === ownerSessionId);
+  if (ownedJobs.length === 1) return { workspaceRoot, job: ownedJobs[0] };
+  if (ownedJobs.length > 1) throw new Error("Multiple Claude Code jobs are active. Pass a job id to $cc:cancel.");
   throw new Error("No active Claude Code jobs to cancel.");
 }
 
@@ -493,11 +512,13 @@ export function resolveCancelableTarget(cwd, reference) {
     return resolved;
   }
 
+  const sessionId = resolveRequiredOwnerSessionId(workspaceRoot);
   const workflows = listWorkflows(workspaceRoot)
     .filter(({ status }) => ["queued", "running", "awaiting_user", "incomplete", "cancel_failed"].includes(status))
+    .filter((workflow) => workflow.currentOwnerSessionId === sessionId)
     .map((workflow) => ({ targetType: "workflow", workspaceRoot, workflow: enrichWorkflow(workflow) }));
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot))
-    .filter((job) => !job.workflowId && (job.status === "running" || job.status === "queued"))
+    .filter((job) => job.sessionId === sessionId && !job.workflowId && (job.status === "running" || job.status === "queued"))
     .map((job) => ({ targetType: "job", workspaceRoot, job: enrichJob(job) }));
   const targets = [...workflows, ...jobs];
   if (targets.length === 1) return targets[0];

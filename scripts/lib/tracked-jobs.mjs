@@ -17,7 +17,7 @@ import {
   getSpawnedProcessIdentity,
   terminateProcessTree,
 } from "./process.mjs";
-import { nowIso, ensureStateDir, getCurrentSession, readJobFile, resolveJobLogFile, sanitizeId, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
+import { nowIso, ensureStateDir, getUsableCurrentSession, readJobFile, resolveJobLogFile, sanitizeId, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
 
 export { nowIso };
 
@@ -305,12 +305,54 @@ export function createWorkerLogStdio(logFile) {
   };
 }
 
-export function createJobRecord(base, options = {}) {
+export const SESSION_OWNER_REQUIRED = "SESSION_OWNER_REQUIRED";
+
+function validOwnerId(value) {
+  if (value.startsWith("--")) {
+    throw new Error(`Invalid session ID: ${value}`);
+  }
+  return sanitizeId(value, "session ID");
+}
+
+/**
+ * Resolve the owning session: explicit > session env > valid CODEX_THREAD_ID >
+ * usable current-session marker (only when `cwd` is given).
+ * @returns {{ ownerSessionId: string | null, ownerSource: "explicit" | "session-env" | "codex-thread" | "marker" | null, markerStatus: "usable" | "stale-age" | "invalid-clock" | "missing" | null }}
+ */
+export function resolveSessionOwner(options = {}) {
   const env = options.env ?? process.env;
-  const sessionId =
-    options.sessionId ??
-    env[options.sessionIdEnv ?? SESSION_ID_ENV] ??
-    (options.cwd ? getCurrentSession(options.cwd) : null);
+  const explicit = String(options.explicit ?? "").trim();
+  if (explicit) {
+    return { ownerSessionId: validOwnerId(explicit), ownerSource: "explicit", markerStatus: null };
+  }
+  const envSessionId = String(env[options.sessionIdEnv ?? SESSION_ID_ENV] ?? "").trim();
+  if (envSessionId) {
+    return { ownerSessionId: validOwnerId(envSessionId), ownerSource: "session-env", markerStatus: null };
+  }
+  const threadId = String(env.CODEX_THREAD_ID ?? "").trim();
+  if (threadId && !threadId.startsWith("--")) {
+    try {
+      return { ownerSessionId: sanitizeId(threadId, "parent thread ID"), ownerSource: "codex-thread", markerStatus: null };
+    } catch {}
+  }
+  if (!options.cwd) {
+    return { ownerSessionId: null, ownerSource: null, markerStatus: null };
+  }
+  const marker = getUsableCurrentSession(options.cwd, options.now ?? Date.now());
+  return {
+    ownerSessionId: marker.sessionId && validOwnerId(marker.sessionId),
+    ownerSource: marker.sessionId ? "marker" : null,
+    markerStatus: marker.markerStatus,
+  };
+}
+
+export function createJobRecord(base, options = {}) {
+  const sessionId = resolveSessionOwner({
+    explicit: options.sessionId,
+    env: options.env,
+    sessionIdEnv: options.sessionIdEnv,
+    cwd: options.cwd,
+  }).ownerSessionId;
   const hasWorkflowId = base.workflowId != null;
   const hasWorkflowStage = base.workflowStage != null;
   if (hasWorkflowId !== hasWorkflowStage) {

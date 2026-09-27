@@ -806,6 +806,54 @@ test("does not replace an existing parent marker from an unmarked child prompt",
   }
 });
 
+test("does not replace a stale marker from another session or write under a held marker lock", () => {
+  const testEnv = createEnv();
+  try {
+    const stateDir = stateDirFor(testEnv);
+    fs.mkdirSync(stateDir, { recursive: true });
+    const markerFile = path.join(stateDir, "current-session.json");
+    fs.writeFileSync(
+      markerFile,
+      JSON.stringify({ sessionId: "old-session", updatedAt: "2000-01-01T00:00:00.000Z" }),
+      "utf8"
+    );
+    const stale = fs.readFileSync(markerFile, "utf8");
+    runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit", cwd: testEnv.workspaceDir,
+      session_id: "new-session", prompt: "continue",
+    });
+    assert.equal(fs.readFileSync(markerFile, "utf8"), stale);
+
+    fs.writeFileSync(
+      markerFile,
+      JSON.stringify({ sessionId: "same-session", updatedAt: "2000-01-01T00:00:00.000Z" }),
+      "utf8"
+    );
+    const held = fs.readFileSync(markerFile, "utf8");
+    fs.writeFileSync(
+      `${markerFile}.lock`,
+      JSON.stringify({ pid: process.pid, identity: null, timestamp: Date.now(), token: "held-by-test" }),
+      "utf8"
+    );
+    runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit", cwd: testEnv.workspaceDir,
+      session_id: "same-session", prompt: "continue",
+    });
+    assert.equal(fs.readFileSync(markerFile, "utf8"), held);
+
+    fs.rmSync(`${markerFile}.lock`);
+    runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit", cwd: testEnv.workspaceDir,
+      session_id: "same-session", prompt: "continue",
+    });
+    const refreshed = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+    assert.equal(refreshed.sessionId, "same-session");
+    assert.notEqual(refreshed.updatedAt, "2000-01-01T00:00:00.000Z");
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
 test("does not record a turn baseline when the review gate is disabled", () => {
   const testEnv = createEnv();
   try {

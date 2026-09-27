@@ -44,7 +44,7 @@ Main-thread routing rules:
   `node "<plugin-root>/scripts/claude-companion.mjs" session-routing-context --json`
 - If that helper returns a non-empty `ownerSessionId`, pass it into the resume probe:
   `node "<plugin-root>/scripts/claude-companion.mjs" task-resume-candidate --owner-session-id <owner-session-id> --json`
-- If it returns an empty `ownerSessionId`, skip the resume probe and delegate normally.
+- If it returns an empty `ownerSessionId`, do not delegate: new Claude Code tasks require an owning Codex session and fail with `SESSION_OWNER_REQUIRED`. Report that the rescue must run from a Codex session or with `CLAUDE_COMPANION_SESSION_ID` set.
 - If that helper reports `available: true`, ask the user once whether to continue the current Claude Code thread or start a new one.
 - Use exactly these two choices:
   - `Continue current Claude Code thread`
@@ -71,8 +71,8 @@ Subagent launch:
 - Before spawning the built-in child, capture the task job id plus routing context in one call:
   `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind task --json`
 - Treat the helper's non-empty `workspaceRoot` as the canonical workspace for the forwarding child. Pass it back as `--cwd "<workspaceRoot>"`; never substitute `<plugin-root>` or the child's default working directory.
-- If that helper returns a non-empty `ownerSessionId`, include `--owner-session-id <owner-session-id>` in the companion command so tracked Claude Code jobs stay attached to the user-facing parent session for `$cc:status` / `$cc:result`.
-- If it returns an empty `ownerSessionId`, omit `--owner-session-id` entirely. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.
+- Include the helper's `ownerSessionId` as `--owner-session-id <owner-session-id>` in the companion command so tracked Claude Code jobs stay attached to the user-facing parent session for `$cc:status` / `$cc:result`.
+- If that helper fails with `SESSION_OWNER_REQUIRED`, no owning Codex session was found and no job id was reserved; surface that failure and do not spawn the child. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
 - Add an internal companion routing flag that reflects whether the user will see this result in the current turn:
   - Foreground rescue must add `--view-state on-terminal`

@@ -28,7 +28,6 @@ import { loadPromptTemplate, interpolateTemplate } from "../scripts/lib/prompts.
 import {
   appendStopReviewHistory,
   generateJobId,
-  getCurrentSession,
   getConfig,
   listJobs,
   nowIso,
@@ -47,7 +46,7 @@ import {
   SANDBOX_STOP_REVIEW_TOOLS,
 } from "../scripts/lib/claude-cli.mjs";
 import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
-import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
+import { resolveSessionOwner } from "../scripts/lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -348,11 +347,13 @@ async function main() {
   const input = readHookInput();
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const sessionId =
-    input.session_id ||
-    process.env[SESSION_ID_ENV] ||
-    getCurrentSession(workspaceRoot) ||
-    null;
+  let owner = { ownerSessionId: null, ownerSource: null, markerStatus: null };
+  try {
+    owner = resolveSessionOwner({ explicit: input.session_id, cwd: workspaceRoot });
+  } catch {
+    // An invalid hook session id leaves the Stop run without an owner.
+  }
+  const sessionId = owner.ownerSessionId;
   const stopReviewRun = {
     runId: generateJobId("stop"),
     startedAt: nowIso(),
@@ -361,6 +362,8 @@ async function main() {
     cwd,
     workspaceRoot,
     sessionId,
+    ownerSource: owner.ownerSource,
+    markerStatus: owner.markerStatus,
     hookSuppressed: process.env[SKIP_INTERACTIVE_HOOKS_ENV] === "1",
     hasLastAssistantMessage: Boolean(
       String(input.last_assistant_message ?? "").trim()
@@ -394,6 +397,15 @@ async function main() {
     persistFinal({
       status: "skipped_config_disabled",
       reason: "stopReviewGate is disabled for this workspace.",
+    });
+    return;
+  }
+
+  if (!sessionId) {
+    // Without an owner, neither review nor job enumeration (and its reaper) may run.
+    persistFinal({
+      status: "skipped_missing_owner_session",
+      reason: "No owning Codex session id was available for this Stop hook.",
     });
     return;
   }

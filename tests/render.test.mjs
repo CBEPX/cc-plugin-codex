@@ -500,6 +500,18 @@ describe("renderStatusReport", () => {
     assert.equal(output, "No Claude Code jobs recorded yet.\n");
   });
 
+  it("explains an empty owner scope instead of reporting no jobs", () => {
+    const output = renderStatusReport({
+      config: { stopReviewGate: false },
+      workflows: [],
+      running: [],
+      latestFinished: null,
+      recent: [],
+      ownerNotice: "No owning Codex session was found.",
+    });
+    assert.equal(output, "No owning Codex session was found.\n");
+  });
+
   it("renders overview as a compact markdown table", () => {
     const report = {
       config: { stopReviewGate: false },

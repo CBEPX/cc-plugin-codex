@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SESSION_ID_ENV } from "../../scripts/lib/tracked-jobs.mjs";
 
@@ -323,9 +323,17 @@ function createTestEnvironment() {
       USERPROFILE: homeDir,
       CODEX_HOME: path.join(homeDir, ".codex"),
       CODEX_THREAD_ID: "",
+      // Successful delegation requires an owner; ownerless tests delete this.
+      [SESSION_ID_ENV]: "integration-owner",
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
+}
+
+function ownerlessEnvOf(testEnv, extra = {}) {
+  const env = { ...testEnv.env, CODEX_THREAD_ID: "", ...extra };
+  delete env[SESSION_ID_ENV];
+  return env;
 }
 
 function createFakeCodexAppServer(testEnv, hooks) {
@@ -812,30 +820,37 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createSlowParentPsShim(testEnv, delayMs) {
-  const shimDir = path.join(testEnv.rootDir, "slow-parent-ps");
-  const shimPath = path.join(shimDir, "ps");
-  fs.mkdirSync(shimDir, { recursive: true });
-  fs.writeFileSync(
-    shimPath,
-    [
-      "#!/usr/bin/env node",
-      'const { spawnSync } = require("node:child_process");',
-      "const args = process.argv.slice(2);",
-      'const parent = spawnSync("/bin/ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8" });',
-      'if (!/\\b(?:task|review)-worker\\b/.test(parent.stdout || "")) {',
-      `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delayMs});`,
-      "}",
-      'const result = spawnSync("/bin/ps", args, { encoding: "utf8" });',
-      'process.stdout.write(result.stdout || "");',
-      'process.stderr.write(result.stderr || "");',
-      "process.exitCode = result.status ?? 1;",
-      "",
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(shimPath, 0o755);
-  return shimDir;
+function createParentIdentityBarrier(testEnv) {
+  const preload = path.join(testEnv.rootDir, "parent-identity-barrier.mjs");
+  const observed = path.join(testEnv.rootDir, "child-published.json");
+  fs.writeFileSync(preload, `
+    import childProcess from "node:child_process";
+    import fs from "node:fs";
+    import path from "node:path";
+    import { syncBuiltinESMExports } from "node:module";
+    const original = childProcess.spawnSync;
+    childProcess.spawnSync = function(command, args, ...rest) {
+      if (process.argv[2] === "task" && command === "/usr/bin/osascript") {
+        const workerPid = Number(args.at(-1));
+        const jobsDir = ${JSON.stringify(path.join(stateDirFor(testEnv), "jobs"))};
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const job = fs.readdirSync(jobsDir).filter(name => name.endsWith(".json"))
+            .map(name => JSON.parse(fs.readFileSync(path.join(jobsDir, name), "utf8")))
+            .find(job => job.workerPid === workerPid && job.status === "running" && job.pid !== workerPid);
+          if (job) {
+            fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify(job));
+            return original.call(this, command, args, ...rest);
+          }
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        }
+        throw new Error("Claude child was not published before the parent identity lookup");
+      }
+      return original.call(this, command, args, ...rest);
+    };
+    syncBuiltinESMExports();
+  `, "utf8");
+  return { preload, observed };
 }
 
 function runGit(cwd, args) {
@@ -3781,7 +3796,7 @@ describe("claude-companion integration", () => {
       writeCurrentSessionMarker(testEnv, "session-a");
       const statusPayload = runCompanionJson(
         ["status", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
 
       assert.equal(statusPayload.latestFinished.id, "status-fallback-a");
@@ -3904,7 +3919,7 @@ describe("claude-companion integration", () => {
 
       const statusPayload = runCompanionJson(
         ["status", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
       assert.equal(statusPayload.latestFinished?.id, launch.jobId);
 
@@ -3959,7 +3974,7 @@ describe("claude-companion integration", () => {
 
       const statusPayload = runCompanionJson(
         ["status", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
       assert.equal(statusPayload.latestFinished?.id, launch.jobId);
     } finally {
@@ -4379,7 +4394,7 @@ describe("claude-companion integration", () => {
           "session-b",
           "--json",
         ],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
       assert.equal(explicitCandidateB.available, true);
       assert.equal(explicitCandidateB.ownerSessionId, "session-b");
@@ -4394,7 +4409,7 @@ describe("claude-companion integration", () => {
 
       const noSessionContextCandidate = runCompanionJson(
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
       assert.equal(noSessionContextCandidate.available, false);
       assert.equal(noSessionContextCandidate.sessionId, "session-a");
@@ -4404,7 +4419,7 @@ describe("claude-companion integration", () => {
       writeCurrentSessionMarker(testEnv, "session-a");
       const markerCandidateA = runCompanionJson(
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
       assert.equal(markerCandidateA.available, false);
       assert.equal(markerCandidateA.sessionId, "session-a");
@@ -4414,7 +4429,7 @@ describe("claude-companion integration", () => {
       writeCurrentSessionMarker(testEnv, "session-c");
       const markerCandidateC = runCompanionJson(
         ["task-resume-candidate", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
       assert.equal(markerCandidateC.available, false);
       assert.equal(markerCandidateC.sessionId, "session-c");
@@ -4503,9 +4518,9 @@ describe("claude-companion integration", () => {
           "--json",
           "ownerless-task delay=20",
         ],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
-      await waitForTerminalResult(testEnv, launch.jobId, testEnv.env);
+      await waitForTerminalResult(testEnv, launch.jobId, ownerlessEnvOf(testEnv));
       assert.equal(
         readStoredJobById(testEnv, launch.jobId).sessionId,
         "stale-marker-session"
@@ -4520,7 +4535,7 @@ describe("claude-companion integration", () => {
           "--quiet-progress",
           "marker-follow-up delay=20",
         ],
-        { env: testEnv.env }
+        { env: ownerlessEnvOf(testEnv) }
       );
       assert.match(resume.stdout, /completed:marker-follow-up/);
     } finally {
@@ -6055,15 +6070,16 @@ describe("claude-companion integration", () => {
 
   it("does not overwrite a running Claude child when parent worker identity resolves late", async (t) => {
     if (process.platform !== "darwin") {
-      t.skip("Darwin ps shim reproduces the post-spawn identity race");
+      t.skip("Darwin birth-identity barrier reproduces the post-spawn identity race");
       return;
     }
     const testEnv = createTestEnvironment();
-    const shimDir = createSlowParentPsShim(testEnv, 1_000);
+    const { preload, observed } = createParentIdentityBarrier(testEnv);
     const sessionEnv = {
       ...testEnv.env,
       [SESSION_ID_ENV]: "session-late-parent-worker-identity",
-      PATH: `${shimDir}${path.delimiter}${testEnv.env.PATH}`,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preload).href}`]
+        .filter(Boolean).join(" "),
     };
 
     try {
@@ -6079,8 +6095,11 @@ describe("claude-companion integration", () => {
         { env: sessionEnv }
       );
       const runningJob = readStoredJobById(testEnv, launch.jobId);
+      const publishedChild = JSON.parse(fs.readFileSync(observed, "utf8"));
       assert.equal(runningJob.status, "running");
       assert.notEqual(runningJob.pid, runningJob.workerPid);
+      assert.equal(runningJob.pid, publishedChild.pid);
+      assert.equal(runningJob.pidIdentity, publishedChild.pidIdentity);
 
       const result = await waitForTerminalResult(
         testEnv,
@@ -6249,6 +6268,172 @@ describe("claude-companion integration", () => {
       ).stdout;
       assert.match(rendered, /# Claude Code Review/);
       assert.match(rendered, /Target: working tree diff/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+});
+
+describe("session owner contract", () => {
+  const HOUR_MS = 3_600_000;
+  const DAY_MS = 86_400_000;
+
+  const ownerlessEnv = ownerlessEnvOf;
+
+  function markerPath(testEnv) {
+    return path.join(stateDirFor(testEnv), "current-session.json");
+  }
+
+  function writeAgedMarker(testEnv, sessionId, ageMs) {
+    writeCurrentSessionMarker(testEnv, sessionId);
+    fs.writeFileSync(
+      markerPath(testEnv),
+      JSON.stringify({ sessionId, updatedAt: new Date(Date.now() - ageMs).toISOString() }, null, 2) + "\n",
+      "utf8"
+    );
+    return fs.readFileSync(markerPath(testEnv), "utf8");
+  }
+
+  it("refuses ownerless task and review delegation before Claude, jobs, or leaked reservations", () => {
+    const testEnv = createTestEnvironment();
+    const invocationLog = path.join(testEnv.rootDir, "claude-invocations.ndjson");
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      const markerBytes = writeAgedMarker(testEnv, "stale-owner", DAY_MS);
+      const env = ownerlessEnv(testEnv, { CLAUDE_INVOCATION_LOG: invocationLog });
+      for (const [reserveCommand, args] of [
+        ["task-reserve-job", ["task", "--background", "investigate something"]],
+        ["review-reserve-job", ["review", "--scope", "working-tree"]],
+        ["review-reserve-job", ["adversarial-review", "--scope", "working-tree"]],
+      ]) {
+        const reserved = runCompanionJson(
+          [reserveCommand, "--cwd", testEnv.workspaceDir, "--json"],
+          { env }
+        );
+        assert.equal(fs.existsSync(reservationPathFor(testEnv, reserved.jobId)), true);
+        const [command, ...rest] = args;
+        const result = runCompanionExpectFailure(
+          [command, "--cwd", testEnv.workspaceDir, "--job-id", reserved.jobId, ...rest],
+          { env }
+        );
+        assert.match(result.stderr, /SESSION_OWNER_REQUIRED/);
+        assert.match(result.stderr, /--owner-session-id/);
+        assert.equal(fs.existsSync(reservationPathFor(testEnv, reserved.jobId)), false);
+      }
+      assert.equal(fs.existsSync(invocationLog), false);
+      assert.deepEqual(listStoredJobs(testEnv), []);
+      assert.equal(fs.readFileSync(markerPath(testEnv), "utf8"), markerBytes);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("requires an owner before background routing reserves a job id", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const staleBytes = writeAgedMarker(testEnv, "stale-owner", DAY_MS + 1);
+      const env = ownerlessEnv(testEnv);
+      const result = runCompanionExpectFailure(
+        ["background-routing-context", "--kind", "task", "--cwd", testEnv.workspaceDir, "--json"],
+        { env }
+      );
+      assert.match(result.stderr, /SESSION_OWNER_REQUIRED/);
+      const jobsDir = path.join(stateDirFor(testEnv), "jobs");
+      assert.deepEqual(fs.existsSync(jobsDir) ? fs.readdirSync(jobsDir) : [], []);
+
+      const routing = runCompanionJson(
+        ["session-routing-context", "--cwd", testEnv.workspaceDir, "--json"],
+        { env }
+      );
+      assert.equal(routing.ownerSessionId, null);
+      assert.equal(routing.ownerSource, null);
+      assert.equal(routing.markerStatus, "stale-age");
+      assert.equal(fs.readFileSync(markerPath(testEnv), "utf8"), staleBytes);
+
+      writeAgedMarker(testEnv, "fresh-owner", HOUR_MS);
+      const fresh = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env }
+      );
+      assert.equal(fresh.ownerSessionId, "fresh-owner");
+      assert.equal(fresh.ownerSource, "marker");
+      assert.equal(fresh.markerStatus, "usable");
+      assert.match(fresh.jobId, /^review-/);
+
+      const fromEnv = runCompanionJson(
+        ["session-routing-context", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: { ...env, CODEX_THREAD_ID: "thread-owner" } }
+      );
+      assert.equal(fromEnv.ownerSessionId, "thread-owner");
+      assert.equal(fromEnv.ownerSource, "codex-thread");
+      assert.equal(fromEnv.markerStatus, null);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("does not renew the marker for same-owner delegation or reads", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      seedWorkingTreeDiff(testEnv.workspaceDir);
+      const markerBytes = writeAgedMarker(testEnv, "owner-a", HOUR_MS);
+      const env = ownerlessEnv(testEnv);
+      for (const args of [
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree"],
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree", "--owner-session-id", "owner-a"],
+        ["task", "--cwd", testEnv.workspaceDir, "--owner-session-id", "owner-a", "investigate something"],
+        ["status", "--cwd", testEnv.workspaceDir, "--json"],
+        ["result", "--cwd", testEnv.workspaceDir, "--json"],
+      ]) {
+        runCompanion(args, { env });
+        assert.equal(fs.readFileSync(markerPath(testEnv), "utf8"), markerBytes, args.join(" "));
+      }
+      assert.deepEqual(
+        [...new Set(listStoredJobs(testEnv).map((job) => job.sessionId))],
+        ["owner-a"]
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("explains an ownerless status scope and refuses implicit result and cancel", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      runCompanion(
+        ["task", "--cwd", testEnv.workspaceDir, "--owner-session-id", "owner-b", "investigate something"],
+        { env: ownerlessEnv(testEnv) }
+      );
+      // Explicit delegation aligned a marker; remove it to model an ownerless caller.
+      fs.rmSync(markerPath(testEnv));
+      const env = ownerlessEnv(testEnv);
+      const status = runCompanionJson(["status", "--cwd", testEnv.workspaceDir, "--json"], { env });
+      assert.equal(status.ownerSessionId, null);
+      assert.equal(status.ownerSource, null);
+      assert.equal(status.markerStatus, "missing");
+      assert.equal(status.totalJobs, 0);
+      assert.match(status.ownerNotice, /No owning Codex session/);
+      const text = runCompanion(["status", "--cwd", testEnv.workspaceDir], { env });
+      assert.match(text.stdout, /No owning Codex session/);
+
+      const all = runCompanionJson(["status", "--all", "--cwd", testEnv.workspaceDir, "--json"], { env });
+      assert.equal(all.totalJobs, 1);
+      for (const command of ["result", "cancel"]) {
+        const refused = runCompanionExpectFailure([command, "--cwd", testEnv.workspaceDir], { env });
+        assert.match(refused.stderr, /SESSION_OWNER_REQUIRED/);
+      }
+      const owned = runCompanionJson(
+        ["status", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: { ...env, [SESSION_ID_ENV]: "owner-b" } }
+      );
+      assert.equal(owned.ownerSource, "session-env");
+      assert.equal(owned.totalJobs, 1);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

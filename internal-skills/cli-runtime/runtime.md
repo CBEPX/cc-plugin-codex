@@ -28,7 +28,7 @@ Routing controls:
 - Leave `--model` and `--effort` unset unless the user explicitly asks for them, and preserve explicit values exactly. The companion command applies its own defaults; Fable has no implicit effort but supports explicit effort such as `medium`.
 - `--view-state on-terminal` means the user will see this companion result in the current turn, so the companion may mark any terminal outcome viewed.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
-- `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.
+- `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`. New tasks without any owning session fail with `SESSION_OWNER_REQUIRED`; return that failure unchanged.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.
 - Do not add `--quiet-progress` by default for built-in rescue forwarding. Let companion stderr progress remain available in the spawned agent thread.
 - If the free-text task begins with `/`, treat that slash command as literal Claude Code task text to forward unchanged. Do not execute it as a local Codex slash command or answer it inline.

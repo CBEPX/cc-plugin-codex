@@ -15,7 +15,6 @@ import { detectExternalHostOrigin } from "./lib/host-origin.mjs";
 import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
 import {
   getConfig,
-  getCurrentSessionMarker,
   listJobs,
   setCurrentSession,
   TERMINAL_JOB_STATUSES,
@@ -229,12 +228,12 @@ async function main() {
 
   const config = getConfig(workspaceRoot);
   try {
-    const currentSession = getCurrentSessionMarker(workspaceRoot);
-    if (!currentSession || currentSession.sessionId === sessionId) {
-      setCurrentSession(workspaceRoot, sessionId, {
-        hostOrigin: detectExternalHostOrigin(),
-      });
-    }
+    // Refresh only a missing or same-session marker, never a stale foreign one.
+    setCurrentSession(workspaceRoot, sessionId, {
+      hostOrigin: detectExternalHostOrigin(),
+      shouldWrite: (current) => !current || current.sessionId === sessionId,
+      lock: { deadlineAt: notificationDeadlineAt, skipLockOwnerIdentity: process.platform === "win32" },
+    });
   } catch {
     // Best effort: an invalid session id must not fail a user prompt.
   }

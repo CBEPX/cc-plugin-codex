@@ -177,11 +177,18 @@ export function getConfig(cwd) {
 export function setCurrentSession(cwd, sessionId, options = {}) {
   sanitizeId(sessionId, "session ID");
   ensureStateDir(cwd);
-  writeAtomic(resolveCurrentSessionFile(cwd), {
-    sessionId,
-    ...(options.hostOrigin ? { hostOrigin: String(options.hostOrigin) } : {}),
-    updatedAt: nowIso(),
-  });
+  const filePath = resolveCurrentSessionFile(cwd);
+  return withStateFileLock(filePath, () => {
+    if (options.shouldWrite && !options.shouldWrite(readCurrentSessionPayload(cwd))) {
+      return false;
+    }
+    writeAtomic(filePath, {
+      sessionId,
+      ...(options.hostOrigin ? { hostOrigin: String(options.hostOrigin) } : {}),
+      updatedAt: nowIso(),
+    });
+    return true;
+  }, options.lock);
 }
 
 function readCurrentSessionPayload(cwd) {
@@ -199,6 +206,27 @@ export function getCurrentSession(cwd) {
   return readCurrentSessionPayload(cwd)?.sessionId ?? null;
 }
 
+export const CURRENT_SESSION_MAX_AGE_MS = 86_400_000;
+
+// Owner fallback only: raw readers above stay age-independent.
+/** @returns {{ sessionId: string | null, markerStatus: "usable" | "stale-age" | "invalid-clock" | "missing" }} */
+export function getUsableCurrentSession(cwd, now = Date.now()) {
+  const payload = readCurrentSessionPayload(cwd);
+  if (!payload) {
+    return { sessionId: null, markerStatus: "missing" };
+  }
+  const updatedAt =
+    typeof payload.updatedAt === "string" ? Date.parse(payload.updatedAt) : NaN;
+  const ageMs = now - updatedAt;
+  if (!Number.isFinite(ageMs) || ageMs < 0) {
+    return { sessionId: null, markerStatus: "invalid-clock" };
+  }
+  if (ageMs >= CURRENT_SESSION_MAX_AGE_MS) {
+    return { sessionId: null, markerStatus: "stale-age" };
+  }
+  return { sessionId: payload.sessionId, markerStatus: "usable" };
+}
+
 export function getCurrentSessionMarker(cwd) {
   const payload = readCurrentSessionPayload(cwd);
   if (!payload) {
@@ -210,17 +238,19 @@ export function getCurrentSessionMarker(cwd) {
   };
 }
 
-export function clearCurrentSession(cwd, sessionId = null) {
+export function clearCurrentSession(cwd, sessionId = null, lockOptions = {}) {
   const filePath = resolveCurrentSessionFile(cwd);
-  if (sessionId != null) {
-    const current = getCurrentSession(cwd);
-    if (current !== sessionId) {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+  withStateFileLock(filePath, () => {
+    if (sessionId != null && getCurrentSession(cwd) !== sessionId) {
       return;
     }
-  }
-  try {
-    fs.unlinkSync(filePath);
-  } catch {}
+    try {
+      fs.unlinkSync(filePath);
+    } catch {}
+  }, lockOptions);
 }
 
 export function markSessionCleanupPending(cwd, sessionId) {

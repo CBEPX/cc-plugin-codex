@@ -47,6 +47,11 @@ function createTempGitRepo() {
   return repoDir;
 }
 
+/** Tests read the expected branch of a read-model union directly. @param {unknown} value @returns {any} */
+function anyTarget(value) {
+  return value;
+}
+
 function withTempJobRepo(run) {
   const repoDir = createTempGitRepo();
   try {
@@ -329,7 +334,7 @@ describe("unified workflow target resolution", () => {
       assert.equal(status.targetType, "workflow");
       assert.equal(status.workflow.id, workflow.id);
 
-      const result = resolveResultTarget(repoDir, workflow.id);
+      const result = anyTarget(resolveResultTarget(repoDir, workflow.id));
       assert.equal(result.targetType, "workflow");
       assert.equal(result.workflow.id, workflow.id);
 
@@ -352,6 +357,7 @@ describe("unified workflow target resolution", () => {
         createdAt: "2026-09-01T10:00:00Z",
         updatedAt: "2026-09-01T10:00:00Z",
       });
+      setCurrentSession(repoDir, "session-a");
 
       const resolved = resolveCancelableTarget(repoDir, "");
       assert.equal(resolved.targetType, "workflow");
@@ -388,11 +394,11 @@ describe("unified workflow target resolution", () => {
         updatedAt: "2026-09-01T10:00:00Z",
       });
 
-      const crossWorkspace = [
+      const crossWorkspace = anyTarget([
         buildSingleStatusSnapshot(sourceRepo, globalJobId),
         resolveResultTarget(sourceRepo, globalJobId),
         resolveCancelableTarget(sourceRepo, globalJobId),
-      ];
+      ]);
       assert.deepEqual(
         crossWorkspace.map(({ targetType, workspaceRoot, job }) => [targetType, workspaceRoot, job?.id]),
         Array(3).fill(["job", otherRepo, globalJobId])
@@ -407,11 +413,11 @@ describe("unified workflow target resolution", () => {
         createdAt: "2026-09-01T10:00:00Z",
         updatedAt: "2026-09-01T10:00:00Z",
       });
-      const localExact = [
+      const localExact = anyTarget([
         buildSingleStatusSnapshot(sourceRepo, localWorkflowId),
         resolveResultTarget(sourceRepo, localWorkflowId),
         resolveCancelableTarget(sourceRepo, localWorkflowId),
-      ];
+      ]);
       assert.deepEqual(
         localExact.map(({ targetType, workspaceRoot, workflow: resolved }) => [
           targetType,
@@ -705,10 +711,12 @@ describe("buildSingleJobSnapshot", () => {
           id,
           status: "completed",
           jobClass: "review",
+          sessionId: "session-a",
           createdAt: updatedAt,
           updatedAt,
         });
       }
+      setCurrentSession(repoDir, "session-a");
 
       assert.equal(buildSingleJobSnapshot(repoDir).job.id, "review-beta");
       assert.equal(buildSingleJobSnapshot(repoDir, "review-alpha").job.id, "review-alpha");
@@ -844,9 +852,11 @@ describe("resolveResultJob", () => {
       writeJobAt(repoDir, {
         id: "paused",
         status: "paused",
+        sessionId: "session-a",
         createdAt: "2026-04-03T09:00:00Z",
         updatedAt: "2026-04-03T09:00:00Z",
       });
+      setCurrentSession(repoDir, "session-a");
 
       assert.throws(
         () => resolveResultJob(repoDir, "paused"),
@@ -866,11 +876,13 @@ describe("resolveCancelableJob", () => {
     for (const status of ["running", "queued"]) {
       withTempJobRepo((repoDir) => {
         const createdAt = new Date().toISOString();
+        const sessionId = "session-a";
+        setCurrentSession(repoDir, sessionId);
         for (const inactive of ["completed", "failed", "cancelled", "cancelling", "cancel_failed"]) {
-          writeJobAt(repoDir, { id: `inactive-${inactive}`, status: inactive, createdAt });
+          writeJobAt(repoDir, { id: `inactive-${inactive}`, status: inactive, sessionId, createdAt });
         }
         assert.throws(() => resolveCancelableJob(repoDir), /No active Claude Code jobs/);
-        writeJobAt(repoDir, { id: "cancel-only", status, createdAt });
+        writeJobAt(repoDir, { id: "cancel-only", status, sessionId, createdAt });
         for (const reference of [undefined, "cancel-only", "cancel-o"]) {
           const selected = resolveCancelableJob(repoDir, reference);
           assert.equal(selected.job.id, "cancel-only");
@@ -887,15 +899,155 @@ describe("resolveCancelableJob", () => {
   it("requires an unambiguous active reference when several jobs can be cancelled", () => {
     withTempJobRepo((repoDir) => {
       const createdAt = new Date().toISOString();
+      const sessionId = "session-a";
+      setCurrentSession(repoDir, sessionId);
       assert.throws(() => resolveCancelableJob(repoDir), /No active Claude Code jobs/);
       for (const [id, status] of [["cancel-alpha", "running"], ["cancel-beta", "queued"]]) {
-        writeJobAt(repoDir, { id, status, createdAt });
+        writeJobAt(repoDir, { id, status, sessionId, createdAt });
       }
       assert.throws(() => resolveCancelableJob(repoDir), /Multiple Claude Code jobs/);
       assert.throws(() => resolveCancelableJob(repoDir, "cancel-"), /ambiguous/);
       assert.throws(() => resolveCancelableJob(repoDir, "cancel-missing"), /No job found/);
       assert.equal(resolveCancelableJob(repoDir, "cancel-alpha").job.id, "cancel-alpha");
       assert.equal(resolveCancelableJob(repoDir, "cancel-b").job.id, "cancel-beta");
+    });
+  });
+});
+
+describe("owner-scoped implicit selection", () => {
+  const OLD = "2026-04-03T10:00:00Z";
+
+  function seedOwners(repoDir) {
+    writePeerWorkflow(repoDir, { id: "workflow-owner-a" });
+    reserveWorkflow(repoDir, {
+      id: "workflow-owner-b",
+      mode: "design",
+      brief: "Owner B workflow",
+      originSessionId: "session-b",
+      currentOwnerSessionId: "session-b",
+      stages: ["checkpoint"],
+      branches: ["codex", "claude"],
+    });
+    const now = new Date().toISOString();
+    for (const [id, status, sessionId, updatedAt] of [
+      ["job-a-done", "completed", "session-a", "2026-04-03T10:00:00Z"],
+      ["job-b-done", "completed", "session-b", "2026-04-03T11:00:00Z"],
+      ["job-unowned-done", "completed", null, "2026-04-03T12:00:00Z"],
+      ["job-b-run", "running", "session-b", now],
+      ["job-unowned-stale", "queued", null, OLD],
+    ]) {
+      writeJobAt(repoDir, {
+        id,
+        status,
+        jobClass: "task",
+        workspaceRoot: repoDir,
+        ...(sessionId ? { sessionId } : {}),
+        createdAt: updatedAt,
+        updatedAt,
+      });
+    }
+  }
+
+  function rawJob(repoDir, id) {
+    return JSON.parse(fs.readFileSync(path.join(resolveJobsDir(repoDir), `${id}.json`), "utf8"));
+  }
+
+  function writeMarker(repoDir, sessionId, updatedAt) {
+    fs.writeFileSync(
+      path.join(path.dirname(resolveJobsDir(repoDir)), "current-session.json"),
+      JSON.stringify({ sessionId, updatedAt })
+    );
+  }
+
+  it("keeps --all available with invalid owner input", () => {
+    withTempJobRepo((repoDir) => {
+      seedOwners(repoDir);
+      writeMarker(repoDir, "--invalid-marker", new Date().toISOString());
+      for (const env of [{}, { CLAUDE_COMPANION_SESSION_ID: "--invalid-env" }]) {
+        const snapshot = buildStatusSnapshot(repoDir, { all: true, env });
+        assert.equal(snapshot.totalJobs, 5);
+        assert.equal(snapshot.totalWorkflows, 2);
+        assert.equal(snapshot.ownerSessionId, null);
+        assert.equal(snapshot.ownerSource, null);
+        assert.equal(snapshot.markerStatus, null);
+      }
+    });
+  });
+
+  it("returns an empty explained status without enumerating jobs when no owner resolves", () => {
+    withTempJobRepo((repoDir) => {
+      seedOwners(repoDir);
+      for (const [marker, markerStatus] of [
+        [null, "missing"],
+        ["2000-01-01T00:00:00.000Z", "stale-age"],
+        ["2999-01-01T00:00:00.000Z", "invalid-clock"],
+      ]) {
+        if (marker) writeMarker(repoDir, "session-a", marker);
+        const snapshot = anyTarget(buildStatusSnapshot(repoDir));
+        assert.deepEqual(
+          [snapshot.running, snapshot.latestFinished, snapshot.recent, snapshot.workflows, snapshot.totalJobs, snapshot.totalWorkflows],
+          [[], null, [], [], 0, 0]
+        );
+        assert.equal(snapshot.ownerSessionId, null);
+        assert.equal(snapshot.ownerSource, null);
+        assert.equal(snapshot.markerStatus, markerStatus);
+        assert.match(snapshot.ownerNotice, /No owning Codex session/);
+        // The reaper did not run: the stale queued job is untouched.
+        assert.equal(rawJob(repoDir, "job-unowned-stale").status, "queued");
+      }
+      const all = buildStatusSnapshot(repoDir, { all: true });
+      assert.equal(all.totalJobs, 5);
+      assert.equal(all.totalWorkflows, 2);
+    });
+  });
+
+  it("refuses implicit result, cancel, and latest selection without an owner", () => {
+    withTempJobRepo((repoDir) => {
+      seedOwners(repoDir);
+      for (const select of [
+        () => resolveResultTarget(repoDir, ""),
+        () => resolveCancelableTarget(repoDir, ""),
+        () => buildSingleJobSnapshot(repoDir),
+        () => resolveResultJob(repoDir),
+        () => resolveCancelableJob(repoDir),
+      ]) {
+        assert.throws(select, /SESSION_OWNER_REQUIRED/);
+      }
+      // Explicit references still work without an owner.
+      assert.equal(anyTarget(resolveResultTarget(repoDir, "job-b-done")).job.id, "job-b-done");
+      assert.equal(buildSingleStatusSnapshot(repoDir, "workflow-owner-b").workflow.id, "workflow-owner-b");
+      assert.equal(anyTarget(resolveCancelableTarget(repoDir, "job-b-run")).job.id, "job-b-run");
+      assert.equal(buildSingleJobSnapshot(repoDir, "job-unowned-done").job.id, "job-unowned-done");
+      assert.throws(() => buildSingleJobSnapshot(repoDir, "job-"), /ambiguous/);
+    });
+  });
+
+  it("scopes status, result, and implicit cancel to the resolved owner only", () => {
+    withTempJobRepo((repoDir) => {
+      seedOwners(repoDir);
+      setCurrentSession(repoDir, "session-a");
+      const statusA = anyTarget(buildStatusSnapshot(repoDir));
+      assert.equal(statusA.ownerSessionId, "session-a");
+      assert.equal(statusA.ownerSource, "marker");
+      assert.equal(statusA.markerStatus, "usable");
+      assert.equal(statusA.ownerNotice, undefined);
+      assert.equal(statusA.latestFinished.id, "job-a-done");
+      assert.deepEqual(statusA.recent, []);
+      assert.deepEqual(statusA.running, []);
+      assert.deepEqual(statusA.workflows.map(({ id }) => id), ["workflow-owner-a"]);
+      assert.equal(anyTarget(resolveResultTarget(repoDir, "")).job.id, "job-a-done");
+      assert.equal(resolveResultJob(repoDir).job.id, "job-a-done");
+      assert.equal(buildSingleJobSnapshot(repoDir).job.id, "job-a-done");
+      assert.equal(anyTarget(resolveCancelableTarget(repoDir, "")).workflow.id, "workflow-owner-a");
+      assert.throws(() => resolveCancelableJob(repoDir), /No active Claude Code jobs/);
+
+      setCurrentSession(repoDir, "session-b");
+      assert.throws(() => resolveCancelableTarget(repoDir, ""), /Multiple Claude Code jobs or peer workflows/);
+      assert.equal(resolveCancelableJob(repoDir).job.id, "job-b-run");
+
+      setCurrentSession(repoDir, "session-c");
+      assert.throws(() => resolveCancelableTarget(repoDir, ""), /No active Claude Code jobs or peer workflows/);
+      assert.throws(() => buildSingleJobSnapshot(repoDir), /No job found/);
     });
   });
 });

@@ -16,3 +16,4 @@ Output:
 - Present the companion stdout exactly as returned.
 - Do not add extra prose unless the command itself failed before producing output.
 - Workflow cancellation targets only linked jobs and preserves `cancel_failed` when process identity cannot be verified.
+- Without an ID, only the owning Codex session's active jobs and workflows are considered; if no owner resolves, the command fails with `SESSION_OWNER_REQUIRED` and an explicit ID is needed.
