@@ -170,7 +170,7 @@ test("full mutation runs every force shard independently and merges available re
 
   assert.deepEqual(shards, expectedShards);
   assert.match(full, /^ {6}fail-fast: false$/mu);
-  assert.match(full, /^ {4}timeout-minutes: 45$/mu);
+  assert.match(full, /^ {4}timeout-minutes: \$\{\{ matrix\.shard == 'state' && 60 \|\| 45 \}\}$/mu);
   assert.match(full, /^ {6}- run: npm run \$\{\{ matrix\.script \}\}$/mu);
   assert.doesNotMatch(full, /test:mutation:full:force/u);
 
