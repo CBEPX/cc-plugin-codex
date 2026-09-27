@@ -111,7 +111,6 @@ import {
   TERMINAL_JOB_STATUSES,
   generateJobId,
   getConfig,
-  getCurrentSession,
   getCurrentSessionMarker,
   listJobs,
   patchJob,
@@ -145,8 +144,10 @@ import {
   createProgressReporter,
   createWorkerLogStdio,
   nowIso,
+  resolveSessionOwner,
   runTrackedJob,
-  SESSION_ID_ENV
+  SESSION_ID_ENV,
+  SESSION_OWNER_REQUIRED
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
@@ -333,15 +334,6 @@ function resolveExplicitJobId(value, workspaceRoot) {
   return safeJobId;
 }
 
-function resolveOwnerSessionId(value) {
-  const trimmed = value == null ? "" : String(value).trim();
-  if (!trimmed) return null;
-  if (trimmed.startsWith("--")) {
-    throw new Error(`Invalid session ID: ${trimmed}`);
-  }
-  return sanitizeId(trimmed, "session ID");
-}
-
 function resolveParentThreadId() {
   const threadId = String(process.env.CODEX_THREAD_ID ?? "").trim();
   if (!threadId) {
@@ -359,34 +351,30 @@ function resolveParentThreadId() {
 
 function buildSessionRoutingContext(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const parentThreadId = resolveParentThreadId();
   return {
     workspaceRoot,
-    ownerSessionId: resolveOwnerSessionId(
-      process.env[SESSION_ID_ENV] ??
-        parentThreadId ??
-        getCurrentSession(workspaceRoot)
-    ),
-    parentThreadId,
+    ...resolveSessionOwner({ cwd: workspaceRoot }),
+    parentThreadId: resolveParentThreadId(),
   };
 }
 
 function resolveCommandOwnerSessionId(value, workspaceRoot) {
-  return resolveOwnerSessionId(
-    value ??
-      process.env[SESSION_ID_ENV] ??
-      resolveParentThreadId() ??
-      getCurrentSession(workspaceRoot)
-  );
+  return resolveSessionOwner({ explicit: value, cwd: workspaceRoot }).ownerSessionId;
+}
+
+function requireOwnerSession(ownerSessionId, workLabel) {
+  if (!ownerSessionId) {
+    throw new Error(
+      `${SESSION_OWNER_REQUIRED}: New ${workLabel} delegation needs an owning Codex session. ` +
+        "Run it from a Codex session, pass --owner-session-id <session-id>, or set CLAUDE_COMPANION_SESSION_ID."
+    );
+  }
 }
 
 function alignCurrentSessionToOwner(workspaceRoot, ownerSessionId) {
-  if (!ownerSessionId) {
-    return;
-  }
-  const marker = getCurrentSessionMarker(workspaceRoot);
+  // Same-owner delegation must not renew the marker's age.
   setCurrentSession(workspaceRoot, ownerSessionId, {
-    hostOrigin: marker?.sessionId === ownerSessionId ? marker.hostOrigin : undefined,
+    shouldWrite: (current) => current?.sessionId !== ownerSessionId,
   });
 }
 
@@ -2676,10 +2664,6 @@ async function handleReviewCommand(argv, config) {
     scope: options.scope
   });
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
-  const ownerSessionId = resolveCommandOwnerSessionId(
-    options["owner-session-id"],
-    workspaceRoot
-  );
   const markViewedOnTerminal = resolveMarkViewedOnTerminal(
     options["view-state"],
     Boolean(options.background)
@@ -2690,6 +2674,10 @@ async function handleReviewCommand(argv, config) {
   const resolvedEffort = resolveDefaultEffort(resolvedModel, options.effort);
 
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
+    const ownerSessionId = resolveCommandOwnerSessionId(
+      options["owner-session-id"],
+      workspaceRoot
+    );
     // Validate inside the reservation guard so failures do not leak markers.
     config.validateRequest?.(target, focusText);
     const workflowBinding = resolveWorkflowJobBinding(
@@ -2699,6 +2687,7 @@ async function handleReviewCommand(argv, config) {
       ownerSessionId
     );
     assertDelegationAllowed(workspaceRoot, ownerSessionId, "review");
+    requireOwnerSession(ownerSessionId, "review");
     const userMcpTools = normalizeUserMcpTools(options["user-mcp-tool"]);
     if (userMcpTools.length > 0) {
       process.stderr.write(
@@ -2855,32 +2844,27 @@ async function handleTask(argv) {
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
-  const ownerSessionId = resolveCommandOwnerSessionId(
-    options["owner-session-id"],
-    workspaceRoot
-  );
-  if (resumeLast && !ownerSessionId) {
-    throw new Error(
-      "Cannot resume without an owning Codex session. Run from the original session or use --fresh."
-    );
-  }
-
   // Validate before arming: ensure we have a prompt or resume target
   if (!prompt && !resumeLast) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume.");
   }
-  ensureClaudeReady(cwd);
 
   const write = Boolean(options.write);
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
+    const ownerSessionId = resolveCommandOwnerSessionId(
+      options["owner-session-id"],
+      workspaceRoot
+    );
+    assertDelegationAllowed(workspaceRoot, ownerSessionId, "task");
+    requireOwnerSession(ownerSessionId, "task");
+    ensureClaudeReady(cwd);
     const workflowBinding = resolveWorkflowJobBinding(
       workspaceRoot,
       options["workflow-id"],
       options["workflow-stage"],
       ownerSessionId
     );
-    assertDelegationAllowed(workspaceRoot, ownerSessionId, "task");
     const taskMetadata = buildTaskRunMetadata({
       prompt,
       resumeLast
@@ -3230,8 +3214,10 @@ function handleBackgroundRoutingContext(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace({ cwd });
+  const routing = buildSessionRoutingContext(cwd);
+  requireOwnerSession(routing.ownerSessionId, kind);
   const payload = {
-    ...buildSessionRoutingContext(cwd),
+    ...routing,
     jobId: reserveUniqueJobId(workspaceRoot, prefix, prefix),
   };
   const rendered =
@@ -3751,9 +3737,7 @@ async function handlePeerCreate(argv) {
     : positionals;
   const route = normalizePeerRequest(options.mode, options, briefPositionals);
   const ownerSessionId = resolveCommandOwnerSessionId(options["owner-session-id"], workspaceRoot);
-  if (!ownerSessionId) {
-    throw new Error("PEER_OWNER_REQUIRED: Run from a persistent Codex session.");
-  }
+  requireOwnerSession(ownerSessionId, "peer");
   ensureClaudeReady(cwd);
   const discovery = collectConfiguredMcpServers(cwd, {
     allowProjectMcpServers: route.allowProjectMcpServers,

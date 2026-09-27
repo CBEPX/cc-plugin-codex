@@ -16,6 +16,9 @@ const testCodexHome = fs.mkdtempSync(
 process.env.CODEX_HOME = testCodexHome;
 delete process.env.CLAUDECODE;
 delete process.env.CLAUDE_CODE_ENTRYPOINT;
+// Owner resolution must not inherit the session running the test suite.
+delete process.env.CLAUDE_COMPANION_SESSION_ID;
+delete process.env.CODEX_THREAD_ID;
 
 process.once("exit", () => {
   fs.rmSync(testCodexHome, { recursive: true, force: true });

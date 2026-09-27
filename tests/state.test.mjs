@@ -39,7 +39,10 @@ import {
   setCurrentSession,
   getCurrentSession,
   getCurrentSessionMarker,
+  getUsableCurrentSession,
+  CURRENT_SESSION_MAX_AGE_MS,
   clearCurrentSession,
+  withStateFileLock,
   markSessionCleanupPending,
   listPendingSessionCleanups,
   clearSessionCleanupPending,
@@ -1304,6 +1307,119 @@ describe("current session marker", () => {
     setCurrentSession(repoDir, "newer-session");
     clearCurrentSession(repoDir, sessionId);
     assert.equal(getCurrentSession(repoDir), "newer-session");
+  });
+
+  function markerFile() {
+    return path.join(resolveStateDir(repoDir), "current-session.json");
+  }
+
+  function writeMarker(payload) {
+    fs.mkdirSync(resolveStateDir(repoDir), { recursive: true });
+    fs.writeFileSync(markerFile(), JSON.stringify(payload), "utf8");
+  }
+
+  it("uses the marker fallback only while it is younger than one day", () => {
+    const updatedAt = "2026-09-27T00:00:00.000Z";
+    const updatedMs = Date.parse(updatedAt);
+    writeMarker({ sessionId, hostOrigin: "claude-code", updatedAt });
+
+    assert.equal(CURRENT_SESSION_MAX_AGE_MS, 86_400_000);
+    assert.deepEqual(getUsableCurrentSession(repoDir, updatedMs), {
+      sessionId,
+      markerStatus: "usable",
+    });
+    assert.deepEqual(
+      getUsableCurrentSession(repoDir, updatedMs + CURRENT_SESSION_MAX_AGE_MS - 1),
+      { sessionId, markerStatus: "usable" }
+    );
+    assert.deepEqual(
+      getUsableCurrentSession(repoDir, updatedMs + CURRENT_SESSION_MAX_AGE_MS),
+      { sessionId: null, markerStatus: "stale-age" }
+    );
+    assert.deepEqual(
+      getUsableCurrentSession(repoDir, updatedMs + CURRENT_SESSION_MAX_AGE_MS + 1),
+      { sessionId: null, markerStatus: "stale-age" }
+    );
+    // Moving the clock back makes the same marker usable again; nothing was deleted.
+    assert.equal(getUsableCurrentSession(repoDir, updatedMs + 1).markerStatus, "usable");
+    // Raw readers stay age-independent and keep the anti-loop origin.
+    assert.equal(getCurrentSession(repoDir), sessionId);
+    assert.deepEqual(getCurrentSessionMarker(repoDir), {
+      sessionId,
+      hostOrigin: "claude-code",
+    });
+  });
+
+  it("rejects the marker fallback for missing, malformed, or future timestamps", () => {
+    const now = Date.parse("2026-09-27T12:00:00.000Z");
+    for (const updatedAt of [undefined, null, 42, "", "not-a-date", "2026-09-27T12:00:00.001Z"]) {
+      writeMarker({ sessionId, ...(updatedAt === undefined ? {} : { updatedAt }) });
+      assert.deepEqual(
+        getUsableCurrentSession(repoDir, now),
+        { sessionId: null, markerStatus: "invalid-clock" },
+        `updatedAt=${String(updatedAt)}`
+      );
+    }
+    // The file mtime is never used as a clock.
+    writeMarker({ sessionId });
+    fs.utimesSync(markerFile(), new Date(now), new Date(now));
+    assert.equal(getUsableCurrentSession(repoDir, now).sessionId, null);
+    assert.equal(getCurrentSession(repoDir), sessionId);
+  });
+
+  it("reports a missing marker without creating state directories", () => {
+    const stateDir = resolveStateDir(repoDir);
+    assert.equal(fs.existsSync(stateDir), false);
+    assert.deepEqual(getUsableCurrentSession(repoDir, Date.now()), {
+      sessionId: null,
+      markerStatus: "missing",
+    });
+    writeMarker({ sessionId: "bad id", updatedAt: new Date().toISOString() });
+    assert.equal(getUsableCurrentSession(repoDir, Date.now()).markerStatus, "missing");
+    fs.rmSync(stateDir, { recursive: true, force: true });
+    clearCurrentSession(repoDir, sessionId);
+    clearCurrentSession(repoDir);
+    assert.equal(fs.existsSync(stateDir), false);
+  });
+
+  it("writes only when the conditional marker predicate accepts the current marker", () => {
+    setCurrentSession(repoDir, "session-a", { hostOrigin: "claude-code" });
+    const before = fs.readFileSync(markerFile(), "utf8");
+    assert.equal(
+      setCurrentSession(repoDir, "session-b", {
+        shouldWrite: (current) => !current || current.sessionId === "session-b",
+      }),
+      false
+    );
+    assert.equal(fs.readFileSync(markerFile(), "utf8"), before);
+    assert.equal(
+      setCurrentSession(repoDir, "session-a", {
+        shouldWrite: (current) => current?.sessionId === "session-a",
+      }),
+      true
+    );
+    assert.equal(getCurrentSession(repoDir), "session-a");
+  });
+
+  it("serializes marker writes and owner-checked clears on the marker lock", () => {
+    setCurrentSession(repoDir, "session-b");
+    const before = fs.readFileSync(markerFile(), "utf8");
+    withStateFileLock(markerFile(), () => {
+      for (const attempt of [
+        () => clearCurrentSession(repoDir, "session-b", { deadlineAt: performance.now() + 30 }),
+        () => setCurrentSession(repoDir, "session-c", { lock: { deadlineAt: performance.now() + 30 } }),
+      ]) {
+        assert.throws(attempt, (error) =>
+          ["ELOCKTIMEOUT", "ELOCKBUSY"].includes(/** @type {any} */ (error).code)
+        );
+        assert.equal(fs.readFileSync(markerFile(), "utf8"), before);
+      }
+    });
+    clearCurrentSession(repoDir, "session-a");
+    assert.equal(getCurrentSession(repoDir), "session-b");
+    clearCurrentSession(repoDir, "session-b");
+    assert.equal(getCurrentSession(repoDir), null);
+    assert.equal(fs.existsSync(`${markerFile()}.lock`), false);
   });
 });
 

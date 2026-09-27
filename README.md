@@ -270,7 +270,7 @@ By default, `$cc:status` shows current-session jobs plus one aggregate row per o
 ### `$cc:result`
 
 ```text
-$cc:result                          # open the latest job or workflow result for this session/repo
+$cc:result                          # open the latest job or workflow result for this session
 $cc:result task-abc123              # show job output or a workflow checkpoint/final result
 $cc:result task-abc123 --output /tmp/new-result.json  # full private JSON export
 ```
@@ -317,7 +317,11 @@ All review and rescue commands support `--background`. Background jobs are track
    The nudge is intentionally just a pointer. The actual stored result still opens through `$cc:result`.
 4. **Unread-result fallback** — when you submit your next prompt after a finished unread job, Codex can remind you that a result is waiting and point you to `$cc:status` / `$cc:result`.
 5. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
-6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
+6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time. Cleanup uses only the session id from the `SessionEnd` hook input or `CLAUDE_COMPANION_SESSION_ID`, never the workspace marker.
+
+The owning session is resolved from `--owner-session-id`, then `CLAUDE_COMPANION_SESSION_ID`, then Codex's `CODEX_THREAD_ID`, then the workspace's `current-session.json` marker, which is used only while its `updatedAt` is less than 24 hours old. Reads and same-owner delegation never refresh that marker's age. New `task`, `review`, `adversarial-review`, and peer runs require an owner and fail with `SESSION_OWNER_REQUIRED` before contacting Claude Code, creating jobs, or reserving job ids. If you run the companion's `task` or `review` directly outside a Codex session, pass `--owner-session-id <session-id>` or set `CLAUDE_COMPANION_SESSION_ID`. Without an owner, plain `$cc:status` shows an empty, explained scope; `$cc:result` and `$cc:cancel` need an explicit id; `$cc:status --all` still lists every workspace job.
+
+Request validation and the Claude Code loop guard still take precedence over missing-owner errors. If marker alignment cannot acquire its lock, delegation fails and releases an accepted reservation. `status --all` skips owner lookup, including invalid owner values.
 
 Public `status`, `result`, `workflow-read`, `workflow-list` and `peer-wait` output is capped at 8192 UTF-8 bytes, including JSON. JSON reports `truncated` and omissions; workflow lists wrap rows as `{workflows,total,truncated,omissions}`. Status/list/poll omit memo and result bodies. Use `--output <new-path>` for full public JSON (workflow-list exports an array): a new mode-0600 file is created exclusively and the receipt includes `outputFile`, `bytes` and `sha256`. Existing files and symlinks are refused. Read large exports in sections and remove temporary exports when finished.
 
@@ -356,6 +360,7 @@ The snapshot is shared by sessions in the same workspace and is replaced by the 
 - **15-minute timeout.** The gate has a hard timeout. If Claude doesn't respond, the turn is allowed to end.
 - **Skip-on-no-edits.** The gate computes a working-tree fingerprint baseline and skips review when the last Codex turn made no net edits.
 - **Requires a recorded user turn.** If the UserPromptSubmit hook did not record a baseline for this session, the gate skips review instead of reviewing unrelated or headless work.
+- **Requires an owning session.** If no session id resolves, the gate records `skipped_missing_owner_session` without listing jobs or invoking Claude.
 - **Not in nested sessions.** Child sessions (e.g., rescue subagents) suppress the gate to avoid feedback loops.
 
 **Only enable when you're actively monitoring the session.**

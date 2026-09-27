@@ -511,6 +511,7 @@ describe("hooks", () => {
         JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
         "utf8"
       );
+      writeStaleTurnBaseline(testEnv, "hook-session");
 
       const argsFile = path.join(testEnv.rootDir, "claude-args.json");
       const mcpConfigCaptureFile = path.join(testEnv.rootDir, "claude-mcp-config.json");
@@ -519,6 +520,7 @@ describe("hooks", () => {
         [],
         {
           cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
           last_assistant_message: "review me",
         },
         {
@@ -533,7 +535,7 @@ describe("hooks", () => {
       const snapshot = readStopReviewSnapshot(testEnv);
       assert.equal(snapshot.status, "allow");
       assert.equal(snapshot.claudeInvoked, true);
-      assert.equal(snapshot.sessionId, null);
+      assert.equal(snapshot.sessionId, "hook-session");
       assert.equal(snapshot.hasLastAssistantMessage, true);
       const claudeArgs = JSON.parse(fs.readFileSync(argsFile, "utf8"));
       const permissionModeIndex = claudeArgs.indexOf("--permission-mode");
@@ -3009,21 +3011,31 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
     }
   });
 
-  it("session lifecycle hook falls back to the current-session marker on SessionEnd", () => {
+  function writeMarkerFile(testEnv, payload) {
+    const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+    fs.mkdirSync(stateDir, { recursive: true });
+    const markerFile = path.join(stateDir, "current-session.json");
+    fs.writeFileSync(markerFile, JSON.stringify(payload, null, 2) + "\n", "utf8");
+    return markerFile;
+  }
+
+  function holdMarkerLock(markerFile) {
+    fs.writeFileSync(
+      `${markerFile}.lock`,
+      JSON.stringify({ pid: process.pid, identity: null, timestamp: Date.now(), token: "held-by-test" }),
+      "utf8"
+    );
+  }
+
+  it("SessionEnd without a session id never falls back to the current-session marker", () => {
     const testEnv = createHookEnvironment();
 
     try {
       const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
-      fs.mkdirSync(stateDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(stateDir, "current-session.json"),
-        JSON.stringify(
-          { sessionId: "hook-session", updatedAt: "2026-04-04T01:00:00Z" },
-          null,
-          2
-        ) + "\n",
-        "utf8"
-      );
+      const markerFile = writeMarkerFile(testEnv, {
+        sessionId: "hook-session",
+        updatedAt: new Date().toISOString(),
+      });
       writeStateJob(testEnv, "queued-hook-job", {
         id: "queued-hook-job",
         status: "queued",
@@ -3031,28 +3043,33 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         workspaceRoot: testEnv.workspaceDir,
         createdAt: "2026-04-04T01:00:00Z",
       });
+      const jobFile = path.join(stateDir, "jobs", "queued-hook-job.json");
+      const before = [fs.readFileSync(markerFile, "utf8"), fs.readFileSync(jobFile, "utf8")];
 
-      runHook(
+      const result = runHook(
         SESSION_HOOK,
         ["SessionEnd"],
-        {
-          cwd: testEnv.workspaceDir,
-        },
-        testEnv.env
+        { cwd: testEnv.workspaceDir },
+        { ...testEnv.env, CODEX_THREAD_ID: "hook-session" }
       );
 
-      const job = readStateJob(testEnv, "queued-hook-job");
-      assert.equal(job.status, "cancelled");
-      assert.ok(
-        !fs.existsSync(path.join(stateDir, "current-session.json")),
-        "SessionEnd fallback should clear the current-session marker"
+      assert.equal(result.stdout.trim(), "");
+      assert.match(result.stderr, /SessionEnd skipped/);
+      assert.ok(result.stderr.trim().split("\n").length === 1 && result.stderr.length < 240, result.stderr);
+      assert.deepEqual(
+        [fs.readFileSync(markerFile, "utf8"), fs.readFileSync(jobFile, "utf8")],
+        before
+      );
+      assert.deepEqual(
+        fs.readdirSync(stateDir).filter((name) => name.startsWith("session-cleanup-pending-")),
+        []
       );
     } finally {
       cleanupHookEnvironment(testEnv);
     }
   });
 
-  it("session lifecycle hook ignores fallback lookup errors on SessionEnd", () => {
+  it("session lifecycle hook reports a missing SessionEnd id without resolving the workspace", () => {
     const testEnv = createHookEnvironment();
 
     try {
@@ -3067,7 +3084,125 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
       );
 
       assert.equal(result.stdout.trim(), "");
-      assert.equal(result.stderr.trim(), "");
+      assert.match(result.stderr, /SessionEnd skipped/);
+      assert.equal(fs.existsSync(path.join(testEnv.homeDir, ".codex", "plugins", "data")), false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionEnd keeps another session's marker and waits for the shared marker lock", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const markerFile = writeMarkerFile(testEnv, {
+        sessionId: "session-b",
+        updatedAt: new Date().toISOString(),
+      });
+      const markerB = fs.readFileSync(markerFile, "utf8");
+      runHook(SESSION_HOOK, ["SessionEnd"], { cwd: testEnv.workspaceDir, session_id: "session-a" }, testEnv.env);
+      assert.equal(fs.readFileSync(markerFile, "utf8"), markerB);
+
+      writeMarkerFile(testEnv, { sessionId: "session-a", updatedAt: new Date().toISOString() });
+      const markerA = fs.readFileSync(markerFile, "utf8");
+      holdMarkerLock(markerFile);
+      const startedAt = performance.now();
+      runHook(SESSION_HOOK, ["SessionEnd"], { cwd: testEnv.workspaceDir, session_id: "session-a" }, testEnv.env);
+      assert.ok(performance.now() - startedAt < 3_000);
+      // The held lock models a concurrent marker writer; SessionEnd must not delete under it.
+      assert.equal(fs.readFileSync(markerFile, "utf8"), markerA);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionStart records its owner before pending cleanup exhausts the hook budget", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const markerFile = writeMarkerFile(testEnv, {
+        sessionId: "old-session",
+        updatedAt: new Date().toISOString(),
+      });
+      const preload = path.join(testEnv.rootDir, "cleanup-budget.mjs");
+      const observed = path.join(testEnv.rootDir, "cleanup-observed");
+      fs.mkdirSync(path.join(path.dirname(markerFile), "jobs"), { recursive: true });
+      fs.writeFileSync(preload, `
+        import fs from "node:fs";
+        import { performance } from "node:perf_hooks";
+        let clock = 100;
+        Object.defineProperty(performance, "now", { configurable: true, value: () => clock });
+        const original = fs.readdirSync;
+        fs.readdirSync = function(directory, ...args) {
+          if (directory === ${JSON.stringify(path.join(path.dirname(markerFile), "jobs"))}) {
+            clock = 3_000;
+            fs.writeFileSync(${JSON.stringify(observed)}, "expired");
+          }
+          return original.call(this, directory, ...args);
+        };
+      `, "utf8");
+      runHook(SESSION_HOOK, [], { cwd: testEnv.workspaceDir, session_id: "new-session" }, {
+        ...testEnv.env,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(preload).href}`]
+          .filter(Boolean).join(" "),
+      });
+      assert.equal(fs.readFileSync(observed, "utf8"), "expired");
+      assert.equal(JSON.parse(fs.readFileSync(markerFile, "utf8")).sessionId, "new-session");
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("SessionStart does not write the marker while its lock is held", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const markerFile = writeMarkerFile(testEnv, {
+        sessionId: "session-b",
+        updatedAt: new Date().toISOString(),
+      });
+      const before = fs.readFileSync(markerFile, "utf8");
+      holdMarkerLock(markerFile);
+      const result = runHook(SESSION_HOOK, [], { cwd: testEnv.workspaceDir, session_id: "session-c" }, testEnv.env);
+      assert.equal(fs.readFileSync(markerFile, "utf8"), before);
+      assert.match(result.stderr, /SessionStart/);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook skips without an owner before listing jobs or invoking Claude", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      enableReviewGate(testEnv);
+      writeMarkerFile(testEnv, {
+        sessionId: "hook-session",
+        updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+      });
+      writeStateJob(testEnv, "stale-queued-job", {
+        id: "stale-queued-job",
+        status: "queued",
+        sessionId: "hook-session",
+        workspaceRoot: testEnv.workspaceDir,
+        createdAt: "2026-04-04T01:00:00Z",
+      });
+      const argsFile = path.join(testEnv.rootDir, "stop-claude-args.json");
+
+      const result = runHook(
+        STOP_HOOK,
+        [],
+        { cwd: testEnv.workspaceDir, last_assistant_message: "review me" },
+        { ...testEnv.env, CLAUDE_ARGS_FILE: argsFile }
+      );
+
+      assert.equal(result.stdout.trim(), "");
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "skipped_missing_owner_session");
+      assert.equal(snapshot.claudeInvoked, false);
+      assert.equal(snapshot.sessionId, null);
+      assert.equal(snapshot.markerStatus, "stale-age");
+      assert.equal(fs.existsSync(argsFile), false);
+      assert.equal(readStateJob(testEnv, "stale-queued-job").status, "queued");
     } finally {
       cleanupHookEnvironment(testEnv);
     }

@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, it } from "node:test";
-import { writeJobFile, readJobFile, resolveStateDir } from "../scripts/lib/state.mjs";
+import { writeJobFile, readJobFile, resolveStateDir, setCurrentSession } from "../scripts/lib/state.mjs";
 import { buildInitialAgentPlan, buildRetryAgentPlan, buildContinuationAgentPlan } from "../scripts/lib/peer-orchestration.mjs";
 import { reserveWorkflow, resolveWorkflowsDir } from "../scripts/lib/workflows.mjs";
 
@@ -119,8 +119,10 @@ it("keeps small default result delivery complete and acknowledges only after res
 it("bounds --all lists and reports how many records were omitted", () => {
   const { root, job } = fixture();
   for (let index = 0; index < 50; index++) {
-    writeJobFile(root, `job-${index}`, { ...job, id: `job-${index}`, title: "長".repeat(20000), result: { finalMessage: "done" } });
+    writeJobFile(root, `job-${index}`, { ...job, id: `job-${index}`, sessionId: "reader", title: "長".repeat(20000), result: { finalMessage: "done" } });
   }
+  // The plain overview is owner-scoped; a fresh marker supplies the known owner.
+  setCurrentSession(root, "reader");
   const overview = json(root, ["status"]);
   assert.match(overview.nextStep, /--all/u);
   assert.match(overview.nextStep, /--output/u);

@@ -77,8 +77,8 @@ Background flow:
   `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind review --json`
 - Treat the helper's non-empty `workspaceRoot` as the canonical workspace for the forwarding child. Pass it back as `--cwd "<workspaceRoot>"`; never substitute `<plugin-root>` or the child's default working directory.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
-- If that helper returns a non-empty `ownerSessionId`, include `--owner-session-id <owner-session-id>` in the companion command.
-- If it returns an empty `ownerSessionId`, omit `--owner-session-id` entirely. Never leave an empty placeholder such as `--owner-session-id  --job-id`.
+- Include the helper's `ownerSessionId` as `--owner-session-id <owner-session-id>` in the companion command.
+- If that helper fails with `SESSION_OWNER_REQUIRED`, no owning Codex session was found and no job id was reserved; surface that failure and do not spawn the child. Never leave an empty placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `parentThreadId`, pass it into the child prompt as the parent thread id for one-shot completion notification.
 - If it returns an empty `parentThreadId`, omit the notification path instead of emitting a blank thread-id placeholder.
 - Spawn exactly one transient forwarding child through `spawn_agent` with:
@@ -99,7 +99,7 @@ Background flow:
   - Exit code 0 is the only successful completion.
   - Exit code 124 means the job is still running; return the companion output without claiming it finished.
   - For any other non-zero exit code or shell-tool error, return the raw companion output or diagnostic without a success notification.
-  - include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id
+  - include `--owner-session-id <owner-session-id>` with the owner session id the parent helper returned
   - include `--job-id <reserved-job-id>` when the parent reserved one
   - preserve the helper's exact non-empty `workspaceRoot` in `--cwd` so the reservation and job use the same workspace state
   - never leave an empty routing placeholder such as `--owner-session-id  --job-id`

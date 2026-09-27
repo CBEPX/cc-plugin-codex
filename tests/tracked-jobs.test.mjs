@@ -23,9 +23,10 @@ import {
   createWorkerLogStdio,
   createJobProgressUpdater,
   createJobRecord,
+  resolveSessionOwner,
   runTrackedJob,
 } from "../scripts/lib/tracked-jobs.mjs";
-import { clearCurrentSession, ensureStateDir, readJobFile, resolveJobFile, resolveJobLogFile, setCurrentSession, transitionJob, writeJobFile } from "../scripts/lib/state.mjs";
+import { clearCurrentSession, ensureStateDir, readJobFile, resolveJobFile, resolveJobLogFile, resolveStateDir, setCurrentSession, transitionJob, writeJobFile } from "../scripts/lib/state.mjs";
 
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -50,6 +51,103 @@ function isLockBusyError(error) {
 describe("SESSION_ID_ENV", () => {
   it("is the expected environment variable name", () => {
     assert.equal(SESSION_ID_ENV, "CLAUDE_COMPANION_SESSION_ID");
+  });
+});
+
+describe("resolveSessionOwner", () => {
+  const DAY_MS = 86_400_000;
+  const updatedAt = "2026-09-27T00:00:00.000Z";
+  const updatedMs = Date.parse(updatedAt);
+  let repoDir;
+
+  function writeMarker(sessionId, payload = {}) {
+    fs.mkdirSync(resolveStateDir(repoDir), { recursive: true });
+    fs.writeFileSync(
+      path.join(resolveStateDir(repoDir), "current-session.json"),
+      JSON.stringify({ sessionId, updatedAt, ...payload })
+    );
+  }
+
+  before(() => {
+    repoDir = createTempGitRepo();
+  });
+
+  afterEach(() => {
+    fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+  });
+
+  it("applies explicit > session env > CODEX_THREAD_ID > usable marker priority", () => {
+    writeMarker("marker-owner");
+    const env = { [SESSION_ID_ENV]: "env-owner", CODEX_THREAD_ID: "thread-owner" };
+    const now = updatedMs + 1;
+    assert.deepEqual(resolveSessionOwner({ explicit: " explicit-owner ", env, cwd: repoDir, now }), {
+      ownerSessionId: "explicit-owner", ownerSource: "explicit", markerStatus: null,
+    });
+    assert.deepEqual(resolveSessionOwner({ env, cwd: repoDir, now }), {
+      ownerSessionId: "env-owner", ownerSource: "session-env", markerStatus: null,
+    });
+    assert.deepEqual(resolveSessionOwner({ env: { CODEX_THREAD_ID: "thread-owner" }, cwd: repoDir, now }), {
+      ownerSessionId: "thread-owner", ownerSource: "codex-thread", markerStatus: null,
+    });
+    assert.deepEqual(resolveSessionOwner({ env: {}, cwd: repoDir, now }), {
+      ownerSessionId: "marker-owner", ownerSource: "marker", markerStatus: "usable",
+    });
+    assert.deepEqual(resolveSessionOwner({ env: {}, now }), {
+      ownerSessionId: null, ownerSource: null, markerStatus: null,
+    });
+  });
+
+  it("honors a custom sessionIdEnv and treats blank values as absent", () => {
+    writeMarker("marker-owner");
+    const now = updatedMs;
+    assert.equal(
+      resolveSessionOwner({ env: { CUSTOM_SESSION: "custom-owner" }, sessionIdEnv: "CUSTOM_SESSION", cwd: repoDir, now }).ownerSessionId,
+      "custom-owner"
+    );
+    assert.equal(
+      resolveSessionOwner({ explicit: "  ", env: { [SESSION_ID_ENV]: "", CODEX_THREAD_ID: " " }, cwd: repoDir, now }).ownerSource,
+      "marker"
+    );
+  });
+
+  it("rejects invalid explicit or session env ids and skips invalid thread ids", () => {
+    for (const explicit of ["--flag", "bad id", "a/b"]) {
+      assert.throws(() => resolveSessionOwner({ explicit, env: {} }), /Invalid session ID/);
+    }
+    assert.throws(() => resolveSessionOwner({ env: { [SESSION_ID_ENV]: "bad id" } }), /Invalid session ID/);
+    writeMarker("marker-owner");
+    for (const threadId of ["--bad-thread", "bad thread"]) {
+      assert.equal(
+        resolveSessionOwner({ env: { CODEX_THREAD_ID: threadId }, cwd: repoDir, now: updatedMs }).ownerSessionId,
+        "marker-owner"
+      );
+    }
+  });
+
+  it("rejects a flag-like session id from a usable marker like other owner sources", () => {
+    writeMarker("--flag-like");
+    assert.throws(
+      () => resolveSessionOwner({ env: {}, cwd: repoDir, now: updatedMs }),
+      /Invalid session ID: --flag-like/
+    );
+  });
+
+  it("reports why an aged or unclocked marker was not used", () => {
+    writeMarker("marker-owner");
+    assert.deepEqual(resolveSessionOwner({ env: {}, cwd: repoDir, now: updatedMs + DAY_MS - 1 }), {
+      ownerSessionId: "marker-owner", ownerSource: "marker", markerStatus: "usable",
+    });
+    assert.deepEqual(resolveSessionOwner({ env: {}, cwd: repoDir, now: updatedMs + DAY_MS }), {
+      ownerSessionId: null, ownerSource: null, markerStatus: "stale-age",
+    });
+    assert.deepEqual(resolveSessionOwner({ env: {}, cwd: repoDir, now: updatedMs - 1 }), {
+      ownerSessionId: null, ownerSource: null, markerStatus: "invalid-clock",
+    });
+    fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+    assert.deepEqual(resolveSessionOwner({ env: {}, cwd: repoDir, now: updatedMs }), {
+      ownerSessionId: null, ownerSource: null, markerStatus: "missing",
+    });
+    assert.equal(fs.existsSync(resolveStateDir(repoDir)), false);
   });
 });
 
@@ -297,6 +395,23 @@ describe("createJobRecord", () => {
       sessionIdEnv: "CUSTOM_SESSION",
     });
     assert.equal(record.sessionId, "custom-123");
+  });
+
+  it("ignores a stale marker and uses a valid CODEX_THREAD_ID from the same env", () => {
+    const repoDir = createTempGitRepo();
+    try {
+      setCurrentSession(repoDir, "stale-session");
+      const markerFile = path.join(resolveStateDir(repoDir), "current-session.json");
+      fs.writeFileSync(markerFile, JSON.stringify({ sessionId: "stale-session", updatedAt: "2000-01-01T00:00:00.000Z" }));
+      assert.equal(createJobRecord({ id: "j1" }, { env: {}, cwd: repoDir }).sessionId, undefined);
+      assert.equal(
+        createJobRecord({ id: "j1" }, { env: { CODEX_THREAD_ID: "thread-owner" }, cwd: repoDir }).sessionId,
+        "thread-owner"
+      );
+    } finally {
+      clearCurrentSession(repoDir);
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 
   it("prefers an explicit sessionId override over env and marker fallbacks", () => {

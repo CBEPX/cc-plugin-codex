@@ -22,26 +22,26 @@ const shards = {
     mutate: [
       // Persistence lifecycle, session lookup, and terminal job transitions.
       "scripts/lib/state.mjs:87-108",
-      "scripts/lib/state.mjs:177-268",
-      "scripts/lib/state.mjs:300-350",
-      "scripts/lib/state.mjs:427-813",
-      "scripts/lib/state.mjs:862-1035",
-      "scripts/lib/state.mjs:1101-1166",
-      "scripts/lib/state.mjs:1172-1218",
+      "scripts/lib/state.mjs:177-298",
+      "scripts/lib/state.mjs:330-380",
+      "scripts/lib/state.mjs:457-843",
+      "scripts/lib/state.mjs:892-1065",
+      "scripts/lib/state.mjs:1131-1196",
+      "scripts/lib/state.mjs:1202-1248",
     ],
   },
   "tracked-jobs": {
     command: "npm run test:mutation:state:unit",
     mutate: [
       "scripts/lib/tracked-jobs.mjs:30-78",
-      "scripts/lib/tracked-jobs.mjs:308-392",
-      "scripts/lib/tracked-jobs.mjs:411-544",
+      "scripts/lib/tracked-jobs.mjs:310-434",
+      "scripts/lib/tracked-jobs.mjs:453-586",
     ],
   },
   "job-control": {
     command: "npm run test:mutation:job-control:unit",
     // Public selection and cancellation paths; process mechanics are covered separately.
-    mutate: ["scripts/lib/job-control.mjs:212-478"],
+    mutate: ["scripts/lib/job-control.mjs:44-52", "scripts/lib/job-control.mjs:211-527"],
   },
   managed: {
     command: "npm run test:mutation:managed:unit",

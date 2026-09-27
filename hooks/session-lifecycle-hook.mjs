@@ -29,7 +29,6 @@ import {
   ACTIVE_JOB_STATUSES,
   clearCurrentSession,
   clearSessionCleanupPending,
-  getCurrentSession,
   listPendingSessionCleanups,
   listStoredJobs,
   markSessionCleanupPending,
@@ -40,7 +39,7 @@ import {
   SESSION_CLEANUP_PENDING_MESSAGE,
   SESSION_CLEANUP_PENDING_PHASE,
 } from "../scripts/lib/session-cleanup.mjs";
-import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
+import { nowIso, resolveSessionOwner, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 import { TRANSCRIPT_PATH_ENV } from "../scripts/lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 import {
@@ -431,6 +430,15 @@ function handleSessionStart(input) {
     try {
       const cleanupDeadlineAt = createCleanupDeadlineAt();
       workspaceRoot = resolveLifecycleWorkspaceRoot(cwd);
+      // Record the active owner before retrying cleanup can consume the budget.
+      try {
+        setCurrentSession(workspaceRoot, input.session_id, {
+          hostOrigin: detectExternalHostOrigin(),
+          lock: lifecycleLockOptions(cleanupDeadlineAt),
+        });
+      } catch (error) {
+        reportLifecycleFailure("SessionStart", error);
+      }
       const jobs = listStoredJobs(workspaceRoot);
       const pendingSessionIds = new Set(
         listPendingSessionCleanups(workspaceRoot)
@@ -486,11 +494,23 @@ function handleSessionStart(input) {
     } catch (error) {
       reportLifecycleFailure("SessionStart", error);
     }
-    if (workspaceRoot) {
-      setCurrentSession(workspaceRoot, input.session_id, {
-        hostOrigin: detectExternalHostOrigin(),
-      });
-    }
+  }
+}
+
+function lifecycleLockOptions(deadlineAt) {
+  return { deadlineAt, skipLockOwnerIdentity: process.platform === "win32" };
+}
+
+// SessionEnd is destructive: trust only the hook input or the exported session
+// env, never the current-session marker or an inherited thread id.
+function resolveSessionEndId(input) {
+  try {
+    return resolveSessionOwner({
+      explicit: input.session_id,
+      env: { [SESSION_ID_ENV]: process.env[SESSION_ID_ENV] },
+    }).ownerSessionId;
+  } catch {
+    return null;
   }
 }
 
@@ -499,57 +519,56 @@ function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
   let workspaceRoot = null;
   let cleanupMarkerRecorded = false;
-  let sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
+  const sessionId = resolveSessionEndId(input);
   if (!sessionId) {
-    try {
-      workspaceRoot = resolveLifecycleWorkspaceRoot(cwd);
-      sessionId = getCurrentSession(workspaceRoot);
-    } catch {
-      sessionId = null;
-    }
+    process.stderr.write("[cc] SessionEnd skipped: no valid session id in hook input or environment.\n");
+    return;
   }
 
   // Clean up tracked jobs for this session
-  if (sessionId) {
+  try {
+    workspaceRoot = resolveLifecycleWorkspaceRoot(cwd);
+    markSessionCleanupPending(workspaceRoot, sessionId);
+    cleanupMarkerRecorded = true;
+    const sessionJobs = listStoredJobs(workspaceRoot).filter(
+      (job) =>
+        job.sessionId === sessionId &&
+        (ACTIVE_JOB_STATUSES.has(job.status) ||
+          isRetryableCancelFailure(job))
+    );
+    const workflowReservations = reserveSessionWorkflows(
+      workspaceRoot,
+      sessionId,
+      cleanupDeadlineAt
+    );
+    const cleanup = cleanupSessionJobs(
+      workspaceRoot,
+      sessionJobs,
+      "the Codex session ended",
+      cleanupDeadlineAt
+    );
+    finalizeSessionWorkflows(
+      workspaceRoot,
+      workflowReservations,
+      cleanup.jobs,
+      cleanupDeadlineAt
+    );
+    if (
+      cleanup.preparationComplete &&
+      !sessionStillNeedsOwnershipMarker(cleanup.jobs, sessionId) &&
+      !sessionHasUnfinishedWorkflows(workspaceRoot, sessionId)
+    ) {
+      clearSessionCleanupPending(workspaceRoot, sessionId);
+    }
+  } catch (error) {
+    reportLifecycleFailure("SessionEnd", error);
+  }
+  if (workspaceRoot && cleanupMarkerRecorded) {
     try {
-      workspaceRoot ??= resolveLifecycleWorkspaceRoot(cwd);
-      markSessionCleanupPending(workspaceRoot, sessionId);
-      cleanupMarkerRecorded = true;
-      const sessionJobs = listStoredJobs(workspaceRoot).filter(
-        (job) =>
-          job.sessionId === sessionId &&
-          (ACTIVE_JOB_STATUSES.has(job.status) ||
-            isRetryableCancelFailure(job))
-      );
-      const workflowReservations = reserveSessionWorkflows(
-        workspaceRoot,
-        sessionId,
-        cleanupDeadlineAt
-      );
-      const cleanup = cleanupSessionJobs(
-        workspaceRoot,
-        sessionJobs,
-        "the Codex session ended",
-        cleanupDeadlineAt
-      );
-      finalizeSessionWorkflows(
-        workspaceRoot,
-        workflowReservations,
-        cleanup.jobs,
-        cleanupDeadlineAt
-      );
-      if (
-        cleanup.preparationComplete &&
-        !sessionStillNeedsOwnershipMarker(cleanup.jobs, sessionId) &&
-        !sessionHasUnfinishedWorkflows(workspaceRoot, sessionId)
-      ) {
-        clearSessionCleanupPending(workspaceRoot, sessionId);
-      }
+      // The job budget may be spent; the marker clear still fits the hook ceiling.
+      clearCurrentSession(workspaceRoot, sessionId, lifecycleLockOptions(SESSION_HOOK_CLEANUP_DEADLINE_MS));
     } catch (error) {
       reportLifecycleFailure("SessionEnd", error);
-    }
-    if (workspaceRoot && cleanupMarkerRecorded) {
-      clearCurrentSession(workspaceRoot, sessionId);
     }
   }
 }

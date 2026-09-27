@@ -449,6 +449,7 @@ export function renderTaskResult(parsedResult) {
 }
 
 export function renderStatusReport(report) {
+  if (report.ownerNotice) return `${report.ownerNotice}\n`;
   const rows = collectStatusRows(report);
   if (rows.length === 0) return "No Claude Code jobs recorded yet.\n";
   return renderStatusTable(rows);

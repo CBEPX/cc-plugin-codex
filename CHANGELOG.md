@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Require an owning Codex session for new delegated work and owner-scoped reads. The owner resolves from `--owner-session-id`, then `CLAUDE_COMPANION_SESSION_ID`, then a valid `CODEX_THREAD_ID`, then the workspace `current-session.json` marker only while its `updatedAt` is less than 24 hours old; missing, malformed, or future timestamps reject the marker, and file mtime is never used. New `task`, `review`, `adversarial-review`, and `peer-create` runs, plus `background-routing-context`, fail with `SESSION_OWNER_REQUIRED` before contacting Claude Code, creating jobs, or reserving job ids, and an accepted `--job-id` reservation is still released. Standalone `task`/`review` callers outside a Codex session must pass `--owner-session-id` or set `CLAUDE_COMPANION_SESSION_ID`. Without an owner, plain `status` returns an empty, explained scope without listing or reaping jobs, and implicit `result`/`cancel` refuse; explicit ids, prefix matching, and `status --all` are unchanged. Implicit `cancel` with an owner now considers only that owner's jobs and workflows. `status`, `session-routing-context`, and `background-routing-context` JSON add `ownerSource` and `markerStatus` next to `ownerSessionId`.
+
+### Fixed
+
+- Record the SessionStart owner before pending cleanup can consume the hook budget. Keep the existing deadline and shared marker lock.
+
+- Keep `status --all` available when the owner environment or marker contains an invalid session id. Request validation and the Claude Code loop guard retain precedence over missing-owner errors. Marker lock failures stop delegation and release an accepted reservation.
+
+- Stop treating an old workspace marker as the current owner. Reads and same-owner delegation no longer renew the marker, and a prompt for another session still never overwrites it. `SessionEnd` now trusts only the hook's session id or `CLAUDE_COMPANION_SESSION_ID`, so a missing id leaves jobs, processes, and the marker untouched; the Stop review gate records `skipped_missing_owner_session` without listing jobs or invoking Claude. Marker writes, the conditional prompt refresh, and the owner-checked clear now share the existing state lock, so a delayed `SessionEnd` for one session cannot delete another session's marker. Raw marker readers, including the Claude Code host-origin loop guard, remain age-independent.
+
 ## v1.7.11
 
 ### Fixed
