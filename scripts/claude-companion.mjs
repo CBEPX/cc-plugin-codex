@@ -1263,16 +1263,16 @@ function buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile) {
 
 async function buildMcpDiagnostic(cwd, options = {}) {
   const userMcpTools = normalizeUserMcpTools(options.userMcpTools);
+  const discovery = collectConfiguredMcpServers(cwd, {
+    allowProjectMcpServers: Boolean(options.allowProjectMcpServers),
+  });
   const {
     available,
     sources,
-    sourceDetails,
     userConfigPath,
     projectConfigPath,
     ignoredProjectConfigPath,
-  } = collectConfiguredMcpServers(cwd, {
-    allowProjectMcpServers: Boolean(options.allowProjectMcpServers),
-  });
+  } = discovery;
   const availableServerNames = Object.keys(available).sort();
   const selectedServers = new Set();
   let requestedTools = userMcpTools.map((tool) => {
@@ -1298,11 +1298,12 @@ async function buildMcpDiagnostic(cwd, options = {}) {
       reason,
     };
   });
-  const probeResult = await probeMcpCapabilities({
-    available,
-    sources,
-    sourceDetails,
-  });
+  // Match peer selection: with pins or --no-auto-tools, probe only pinned servers.
+  const probeResult = await probeMcpCapabilities(
+    userMcpTools.length > 0 || options.noAutoTools
+      ? filterMcpDiscovery(discovery, userMcpTools)
+      : discovery
+  );
   const selection = selectMcpCapabilities(probeResult, {
     explicitTools: userMcpTools,
     noAutoTools: Boolean(options.noAutoTools),
