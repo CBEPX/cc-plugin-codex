@@ -48,6 +48,9 @@ const args = process.argv.slice(2);
 if (process.env.CLAUDE_ARGS_FILE) {
   fs.writeFileSync(process.env.CLAUDE_ARGS_FILE, JSON.stringify(args, null, 2) + "\\n", "utf8");
 }
+if (process.env.CLAUDE_INVOCATION_LOG) {
+  fs.appendFileSync(process.env.CLAUDE_INVOCATION_LOG, JSON.stringify(args) + "\\n", "utf8");
+}
 if (process.env.CLAUDE_MCP_CONFIG_FILE) {
   const mcpConfigIndex = args.indexOf("--mcp-config");
   if (mcpConfigIndex >= 0 && args[mcpConfigIndex + 1]) {
@@ -161,7 +164,7 @@ if (process.env.CLAUDE_MCP_CONFIG_FILE) {
 }
 
 if (args[0] === "--version") {
-  process.stdout.write("2.1.220 (Claude Code)\\n");
+  process.stdout.write((process.env.CLAUDE_FAKE_VERSION ?? "2.1.296 (Claude Code)") + "\\n");
   process.exit(0);
 }
 
@@ -442,14 +445,18 @@ const EXPECTED_STOP_REVIEW_TOOLS = [
   "mcp__gitReview__ls_files",
 ];
 
-function readAllowedTools(claudeArgs) {
-  const allowedTools = [];
+function optionValuesOf(claudeArgs, flag) {
+  const values = [];
   for (let i = 0; i < claudeArgs.length; i++) {
-    if (claudeArgs[i] === "--allowedTools") {
-      allowedTools.push(claudeArgs[i + 1]);
+    if (claudeArgs[i] === flag) {
+      values.push(claudeArgs[i + 1]);
     }
   }
-  return allowedTools;
+  return values;
+}
+
+function readAllowedTools(claudeArgs) {
+  return optionValuesOf(claudeArgs, "--allowedTools");
 }
 
 function runStopHookCapturingClaude(testEnv, cwd, extraEnv = {}) {
@@ -570,6 +577,98 @@ describe("hooks", () => {
       );
     } finally {
       cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook loads only user settings and projects project deny and ask rules", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      fs.mkdirSync(path.join(testEnv.workspaceDir, ".claude"));
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".claude", "settings.json"),
+        JSON.stringify({
+          permissions: {
+            deny: ["Read(./secret.txt)"],
+            ask: ["WebFetch"],
+            allow: ["Bash"],
+          },
+          hooks: { Stop: [{ hooks: [{ type: "command", command: "touch project-hook-ran" }] }] },
+          env: { PROJECT_ENV: "1" },
+        }),
+        "utf8"
+      );
+      enableReviewGate(testEnv);
+
+      const { result, claudeArgs } = runStopHookCapturingClaude(testEnv, testEnv.workspaceDir);
+
+      assert.equal(result.stdout.trim(), "");
+      assert.deepEqual(optionValuesOf(claudeArgs, "--setting-sources"), ["user"]);
+      assert.deepEqual(optionValuesOf(claudeArgs, "--disallowedTools").sort(), [
+        "Read(./secret.txt)",
+        "WebFetch",
+      ]);
+      assert.deepEqual(readAllowedTools(claudeArgs), SANDBOX_STOP_REVIEW_TOOLS);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook blocks without launching Claude for unsupported CLIs or project rules", async (t) => {
+    for (const scenario of [
+      {
+        name: "old CLI",
+        env: { CLAUDE_FAKE_VERSION: "2.1.220 (Claude Code)" },
+        reason: /Claude Code CLI 2\.1\.281 or later/,
+      },
+      {
+        name: "unparseable CLI version",
+        env: { CLAUDE_FAKE_VERSION: "unknown" },
+        reason: /Claude Code CLI 2\.1\.281 or later/,
+      },
+      {
+        name: "negated project deny",
+        settings: { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } },
+        reason: /PROJECT_SETTINGS_UNSUPPORTED[\s\S]*Do not edit or remove project permission rules/,
+      },
+      { name: "malformed project settings", settings: "{", reason: /PROJECT_SETTINGS_UNSUPPORTED/ },
+    ]) {
+      await t.test(scenario.name, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          if (scenario.settings) {
+            fs.mkdirSync(path.join(testEnv.workspaceDir, ".claude"));
+            fs.writeFileSync(
+              path.join(testEnv.workspaceDir, ".claude", "settings.json"),
+              typeof scenario.settings === "string"
+                ? scenario.settings
+                : JSON.stringify(scenario.settings),
+              "utf8"
+            );
+          }
+          enableReviewGate(testEnv);
+          const invocationLog = path.join(testEnv.rootDir, "claude-invocations.ndjson");
+          const result = runHook(
+            STOP_HOOK,
+            [],
+            { cwd: testEnv.workspaceDir, session_id: "hook-session", last_assistant_message: "review me" },
+            { ...testEnv.env, CLAUDE_INVOCATION_LOG: invocationLog, ...scenario.env }
+          );
+
+          assert.notEqual(result.stdout.trim(), "", "the stop gate must block instead of allowing");
+          const decision = JSON.parse(result.stdout);
+          assert.equal(decision.decision, "block");
+          assert.match(decision.reason, scenario.reason);
+          const launched = fs.readFileSync(invocationLog, "utf8").trim().split("\n")
+            .map((line) => JSON.parse(line))
+            .some((args) => args[0] === "-p");
+          assert.equal(launched, false);
+          const mcpRuntimeDir = path.join(testEnv.homeDir, ".codex", "plugins", "data", "cc", "runtime", "mcp");
+          assert.deepEqual(fs.existsSync(mcpRuntimeDir) ? fs.readdirSync(mcpRuntimeDir) : [], []);
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
     }
   });
 

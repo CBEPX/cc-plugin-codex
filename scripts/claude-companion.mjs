@@ -1239,6 +1239,8 @@ function buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile) {
     effort: request.effort,
     onProgress: request.onProgress,
     onSpawn: request.onSpawn,
+    // Branch reviews run in a worktree; keep the user's checkout restrictions too.
+    originalCwd: request.cwd,
     permissionMode: "dontAsk",
     settingsFile: sandboxSettingsFile,
     mcpConfigFile,

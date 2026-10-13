@@ -26,6 +26,7 @@ import {
   isProcessGroupAlive,
   terminateProcessTreeIfIdentityMatches,
 } from "./process.mjs";
+import { collectProjectReviewRestrictions } from "./review-worktree.mjs";
 
 const CLAUDE_BIN = "claude";
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
@@ -562,6 +563,47 @@ export function getClaudeAvailability(cwd) {
   } catch {
     return { available: false, detail: "claude CLI not found in PATH" };
   }
+}
+
+// Oldest Claude Code CLI supported for protected (project-isolated) reviews.
+// 2.1.281 forwards --setting-sources to spawned sessions (official changelog);
+// a documented conservative floor, not a tested matrix of later releases.
+export const MIN_PROTECTED_REVIEW_CLAUDE_VERSION = "2.1.281";
+
+// Stable releases only: "2.1.296" or "2.1.296 (Claude Code)". Prereleases and
+// unknown suffixes are not trusted to carry a capability.
+function parseClaudeVersion(text) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?: \(Claude Code\))?$/.exec(String(text ?? "").trim());
+  return match ? match.slice(1).map(Number) : null;
+}
+
+/** True when `versionText` is a stable Claude Code release at or above `minimum`. */
+export function isClaudeVersionAtLeast(versionText, minimum) {
+  const found = parseClaudeVersion(versionText);
+  const floor = parseClaudeVersion(minimum);
+  if (!found || !floor) return false;
+  const difference = found.map((part, index) => part - floor[index]).find((part) => part !== 0);
+  return difference === undefined || difference > 0;
+}
+
+function assertProtectedReviewSupport(cwd) {
+  const availability = getClaudeAvailability(cwd);
+  if (
+    availability.available &&
+    isClaudeVersionAtLeast(availability.detail, MIN_PROTECTED_REVIEW_CLAUDE_VERSION)
+  ) {
+    return;
+  }
+  const detail = availability.available
+    ? `found ${JSON.stringify(availability.detail || "no version")}`
+    : availability.detail;
+  throw Object.assign(
+    new Error(
+      `CLAUDE_REVIEW_UNSUPPORTED: Protected reviews require Claude Code CLI ${MIN_PROTECTED_REVIEW_CLAUDE_VERSION} or later (${detail}). ` +
+        "Update Claude Code and retry; the review was not started."
+    ),
+    { code: "CLAUDE_REVIEW_UNSUPPORTED" }
+  );
 }
 
 export function getClaudeAuthStatus(cwd) {
@@ -1546,6 +1588,9 @@ export function buildArgs(prompt, options = {}) {
   if (options.permissionMode) {
     args.push("--permission-mode", options.permissionMode);
   }
+  if (options.settingSources) {
+    args.push("--setting-sources", options.settingSources.join(","));
+  }
   if (options.settingsFile) {
     args.push("--settings", options.settingsFile);
   }
@@ -1801,8 +1846,16 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
  * user's own permission rules can still approve it (e.g. `Bash(git diff:*)`).
  * Unless `options.tools` is given, the exposed built-ins are therefore derived
  * from the allowlist (MCP entries excluded, `Bash(...)` -> `Bash`).
+ *
+ * Every review loads only user (plus managed) settings, so project hooks, env,
+ * allow rules, MCP servers and instruction files never load. Project deny/ask
+ * rules from `cwd` and `options.originalCwd` (the user's checkout when `cwd`
+ * is a review worktree) are re-applied through `--disallowedTools`. Throws
+ * before launching Claude when the CLI is too old or a rule cannot be kept.
  */
 export async function runClaudeReview(cwd, prompt, options = {}) {
+  assertProtectedReviewSupport(cwd);
+  const projectRestrictions = collectProjectReviewRestrictions(cwd, options.originalCwd ?? cwd);
   const allowedTools = options.allowedTools ?? SANDBOX_REVIEW_TOOLS;
   const tools = options.tools ?? [...new Set(
     allowedTools
@@ -1816,6 +1869,8 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     ...options,
     allowedTools,
     tools,
+    settingSources: ["user"],
+    disallowedTools: [...new Set([...(options.disallowedTools ?? []), ...projectRestrictions])],
   });
 
   return {

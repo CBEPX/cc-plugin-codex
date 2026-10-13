@@ -4,6 +4,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1696,7 +1697,7 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `const result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `if (process.argv[2] === "--version") { process.stdout.write("2.1.296 (Claude Code)\\n"); process.exit(0); }\nconst result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
       const optionValue = (args, name) => {
@@ -2917,4 +2918,349 @@ describe("parent message final answer", () => {
     parser.feed(start() + text("Parent") + stream({ type: "message_start", message: { role: "assistant" } }, { parent_tool_use_id: "child" }) + result("Parent"));
     assert.equal(parser.state.finalMessage, "Parent");
   });
+});
+
+// ===========================================================================
+// Protected review isolation (issue #76)
+// ===========================================================================
+
+describe("protected review isolation", () => {
+  const FAKE_REVIEW_CLAUDE = [
+    `const fs = require("node:fs");`,
+    `const args = process.argv.slice(2);`,
+    `fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(args) + "\\n");`,
+    `if (args[0] === "--version") { process.stdout.write(process.env.FAKE_CLAUDE_VERSION + "\\n"); process.exit(0); }`,
+    `const result = JSON.stringify({ cwd: process.cwd(), args });`,
+    `const out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-isolation" });`,
+    `process.stdout.write(out + "\\n", () => process.exit(0));`,
+  ].join("\n");
+
+  function withFakeReviewClaude(version, fn) {
+    return async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-review-isolation-"));
+      const saved = {
+        PATH: process.env.PATH,
+        FAKE_CLAUDE_LOG: process.env.FAKE_CLAUDE_LOG,
+        FAKE_CLAUDE_VERSION: process.env.FAKE_CLAUDE_VERSION,
+      };
+      const binDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(binDir);
+      createFakeClaudeCommand(binDir, FAKE_REVIEW_CLAUDE);
+      const logFile = path.join(tmpDir, "claude-invocations.ndjson");
+      process.env.PATH = `${binDir}${path.delimiter}${saved.PATH ?? ""}`;
+      process.env.FAKE_CLAUDE_LOG = logFile;
+      process.env.FAKE_CLAUDE_VERSION = version;
+      const invocations = () =>
+        fs.existsSync(logFile)
+          ? fs.readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+          : [];
+      try {
+        await fn({ tmpDir, invocations });
+      } finally {
+        for (const [key, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    };
+  }
+
+  function git(cwd, ...args) {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  }
+
+  function initRepo(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    git(dir, "init", "--initial-branch=main");
+    git(dir, "config", "user.name", "Codex Test");
+    git(dir, "config", "user.email", "codex@example.com");
+    fs.writeFileSync(path.join(dir, "app.js"), "export const value = 1;\n");
+    git(dir, "add", "app.js");
+    git(dir, "commit", "-m", "initial");
+  }
+
+  function writeSettings(dir, name, value) {
+    fs.mkdirSync(path.join(dir, ".claude"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, ".claude", name),
+      typeof value === "string" ? value : JSON.stringify(value)
+    );
+  }
+
+  const optionValues = (args, flag) =>
+    args.flatMap((arg, index) => (arg === flag ? [args[index + 1]] : []));
+  const launchedReview = (invocations) => invocations().some((args) => args[0] === "-p");
+
+  it(
+    "loads only user setting sources on every review path",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      const reviewArgs = async (run) => JSON.parse((await run()).result).args;
+
+      for (const args of [
+        await reviewArgs(() => runClaudeReview(repo, "prompt", { permissionMode: "dontAsk" })),
+        await reviewArgs(() => runClaudeAdversarialReview(repo, "prompt", { type: "object" }, {})),
+        await reviewArgs(() => runClaudeReview(repo, "prompt", { allowedTools: SANDBOX_STOP_REVIEW_TOOLS })),
+        // A caller cannot re-enable project sources for a protected review.
+        await reviewArgs(() => runClaudeReview(repo, "prompt", { settingSources: ["user", "project", "local"] })),
+      ]) {
+        assert.deepEqual(optionValues(args, "--setting-sources"), ["user"]);
+        assert.equal(args.some((arg) => /^Bash(\(|$)/.test(arg)), false);
+      }
+    })
+  );
+
+  for (const version of [
+    "2.1.280 (Claude Code)",
+    "2.0.999",
+    "not a version",
+    "",
+    "2.1.281-rc.1 (Claude Code)",
+    "2.1.300-beta",
+    "2.1.281junk",
+    "2.1.281.0",
+    "v2.1.281",
+    "2.1.281 (Claude Code) extra",
+  ]) {
+    it(
+      `refuses a protected review before launch when the CLI reports ${JSON.stringify(version)}`,
+      withFakeReviewClaude(version, async ({ tmpDir, invocations }) => {
+        const repo = path.join(tmpDir, "repo");
+        initRepo(repo);
+        await assert.rejects(
+          runClaudeReview(repo, "prompt", {}),
+          /Claude Code CLI 2\.1\.281 or later/
+        );
+        assert.equal(launchedReview(invocations), false);
+      })
+    );
+  }
+
+  for (const version of ["2.1.281 (Claude Code)", "2.1.296 (Claude Code)", "3.0.0"]) {
+    it(
+      `accepts a protected review on CLI ${version}`,
+      withFakeReviewClaude(version, async ({ tmpDir, invocations }) => {
+        const repo = path.join(tmpDir, "repo");
+        initRepo(repo);
+        const result = await runClaudeReview(repo, "prompt", {});
+        assert.equal(result.status, "completed");
+        assert.equal(launchedReview(invocations), true);
+      })
+    );
+  }
+
+  it(
+    "projects deny and ask rules from the original linked worktree, primary local settings and reviewed tree",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const primary = path.join(tmpDir, "primary");
+      initRepo(primary);
+      writeSettings(primary, "settings.json", {
+        permissions: {
+          deny: ["Read(./secrets/**)"],
+          ask: ["WebFetch(domain:example.com)"],
+          allow: ["Bash", "Read(//etc/**)"],
+          additionalDirectories: ["/"],
+        },
+        hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "touch pwned" }] }] },
+        env: { PROJECT_ENV: "1" },
+      });
+      git(primary, "add", ".claude/settings.json");
+      git(primary, "commit", "-m", "project settings");
+      // Untracked local settings live in the primary checkout even for linked worktrees.
+      writeSettings(primary, "settings.local.json", { permissions: { deny: ["Read(/private.txt)"] } });
+
+      const original = path.join(tmpDir, "original");
+      git(primary, "worktree", "add", "-b", "feature", original);
+      // The user's uncommitted edit drops the committed deny and adds another.
+      writeSettings(original, "settings.json", { permissions: { deny: ["Read(~/.aws/**)"] } });
+
+      const reviewed = path.join(tmpDir, "reviewed");
+      git(primary, "worktree", "add", "--detach", reviewed, "feature");
+
+      const result = await runClaudeReview(reviewed, "prompt", { originalCwd: original });
+      const { cwd, args } = JSON.parse(result.result);
+      const realOriginal = fs.realpathSync.native(original);
+
+      assert.equal(fs.realpathSync.native(cwd), fs.realpathSync.native(reviewed));
+      assert.deepEqual(optionValues(args, "--setting-sources"), ["user"]);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        "Read(./secrets/**)",
+        `Read(/${realOriginal}/**/private.txt)`,
+        `Read(/${realOriginal}/**/secrets/**)`,
+        "Read(/private.txt)",
+        "Read(~/.aws/**)",
+        "WebFetch(domain:example.com)",
+      ].sort());
+      const allowed = optionValues(args, "--allowedTools");
+      assert.equal(allowed.includes("Bash"), false);
+      assert.equal(allowed.includes("Read(//etc/**)"), false);
+      assert.equal(args.includes("--add-dir"), false);
+    })
+  );
+
+  it(
+    "keeps relative rules anchored at the review cwd when the review runs in the original checkout",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      writeSettings(repo, "settings.json", {
+        permissions: { deny: ["Read(./secrets/**)", "Edit(/src/**)", "Read(//etc/passwd)"] },
+      });
+
+      const { args } = JSON.parse((await runClaudeReview(repo, "prompt", {})).result);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        "Edit(/src/**)",
+        "Read(./secrets/**)",
+        "Read(//etc/passwd)",
+      ]);
+    })
+  );
+
+  for (const [name, content] of [
+    ["invalid JSON", "{not json"],
+    ["a non-object document", "[]"],
+    ["a non-object permissions block", { permissions: ["Read(.env)"] }],
+    ["a non-array deny list", { permissions: { deny: "Read(.env)" } }],
+    ["a non-string rule", { permissions: { ask: [42] } }],
+    ["a negated deny exception", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } }],
+    ["a negated ask exception", { permissions: { ask: ["Edit(!docs/**)"] } }],
+    ["a rule with whitespace outside the specifier", { permissions: { deny: ["Read .env"] } }],
+    ["an empty specifier", { permissions: { deny: ["Read()"] } }],
+    ["a rule with a control character", { permissions: { deny: ["Read(.env\n)"] } }],
+    ["a rule shaped like a long CLI flag", { permissions: { deny: ["--dangerously-skip-permissions"] } }],
+    ["a rule shaped like a short CLI flag", { permissions: { ask: ["-p"] } }],
+    ["an MCP rule with a parameter", { permissions: { deny: ["mcp__github__create_issue(repo:x)"] } }],
+    ["an unknown restrictive permission key", { permissions: { blockReadsOutsideWorkingDirectories: true } }],
+  ]) {
+    it(
+      `refuses a review before launch when project settings contain ${name}`,
+      withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+        const repo = path.join(tmpDir, "repo");
+        initRepo(repo);
+        writeSettings(repo, "settings.json", content);
+        await assert.rejects(runClaudeReview(repo, "prompt", {}), /PROJECT_SETTINGS_UNSUPPORTED/);
+        assert.equal(launchedReview(invocations), false);
+      })
+    );
+  }
+
+  it(
+    "refuses a review when malformed local settings sit in the primary checkout of a linked worktree",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const primary = path.join(tmpDir, "primary");
+      initRepo(primary);
+      writeSettings(primary, "settings.local.json", { permissions: { deny: ["Read(!x)"] } });
+      const linked = path.join(tmpDir, "linked");
+      git(primary, "worktree", "add", "-b", "feature", linked);
+
+      await assert.rejects(runClaudeReview(linked, "prompt", {}), /settings\.local\.json/);
+      assert.equal(launchedReview(invocations), false);
+    })
+  );
+
+  function relocatedSubdirFixture(tmpDir, committedSettings, originalSettings) {
+    const repo = path.join(tmpDir, "repo");
+    initRepo(repo);
+    const sub = path.join(repo, "sub");
+    writeSettings(sub, "settings.json", committedSettings);
+    git(repo, "add", "sub/.claude/settings.json");
+    git(repo, "commit", "-m", "subdirectory settings");
+    // The user's checkout no longer carries the committed policy.
+    writeSettings(sub, "settings.json", originalSettings);
+    const reviewed = path.join(tmpDir, "reviewed");
+    git(repo, "worktree", "add", "--detach", reviewed, "HEAD");
+    return { sub, reviewed };
+  }
+
+  it(
+    "keeps a rule that exists only in the reviewed subdirectory settings",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const { sub, reviewed } = relocatedSubdirFixture(
+        tmpDir,
+        { permissions: { deny: ["Read(/reviewed-only.txt)"] } },
+        { permissions: { deny: [] } }
+      );
+
+      const { args } = JSON.parse((await runClaudeReview(reviewed, "prompt", { originalCwd: sub })).result);
+      const realReviewed = fs.realpathSync.native(reviewed);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        `Read(/${realReviewed}/sub/**/reviewed-only.txt)`,
+        "Read(/reviewed-only.txt)",
+      ].sort());
+    })
+  );
+
+  for (const [name, committed] of [
+    ["malformed", "{"],
+    ["negated", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } }],
+  ]) {
+    it(
+      `refuses a review before launch when only the reviewed subdirectory settings are ${name}`,
+      withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+        const { sub, reviewed } = relocatedSubdirFixture(tmpDir, committed, { permissions: {} });
+        const reviewedSettings = path.join("reviewed", "sub", ".claude", "settings.json");
+
+        await assert.rejects(runClaudeReview(reviewed, "prompt", { originalCwd: sub }), (error) => {
+          const { message } = /** @type {Error} */ (error);
+          assert.match(message, /PROJECT_SETTINGS_UNSUPPORTED/);
+          assert.ok(message.includes(reviewedSettings), message);
+          return true;
+        });
+        assert.equal(launchedReview(invocations), false);
+      })
+    );
+  }
+
+  it("compares stable CLI versions against any minimum for reuse by other capabilities", async () => {
+    const { isClaudeVersionAtLeast } = await import("../scripts/lib/claude-cli.mjs");
+    assert.equal(typeof isClaudeVersionAtLeast, "function");
+    assert.equal(isClaudeVersionAtLeast("2.1.293 (Claude Code)", "2.1.293"), true);
+    assert.equal(isClaudeVersionAtLeast("2.1.292 (Claude Code)", "2.1.293"), false);
+    assert.equal(isClaudeVersionAtLeast("2.2.0", "2.1.293"), true);
+    assert.equal(isClaudeVersionAtLeast("2.1.293-rc.1 (Claude Code)", "2.1.293"), false);
+  });
+
+  it(
+    "tells the caller not to edit project permission rules when protection cannot be preserved",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      writeSettings(repo, "settings.json", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } });
+
+      await assert.rejects(runClaudeReview(repo, "prompt", {}), (error) => {
+        const { message } = /** @type {Error} */ (error);
+        assert.match(message, /could not be preserved/);
+        assert.match(message, /Do not edit or remove project permission rules/);
+        assert.doesNotMatch(message, /fix or remove/i);
+        return true;
+      });
+    })
+  );
+
+  it(
+    "keeps subdirectory rules anchored at the matching reviewed subdirectory after relocation",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      const sub = path.join(repo, "sub");
+      writeSettings(sub, "settings.json", { permissions: { deny: ["Read(./data/secret.txt)"] } });
+      git(repo, "add", "sub/.claude/settings.json");
+      git(repo, "commit", "-m", "subdirectory settings");
+      const reviewed = path.join(tmpDir, "reviewed");
+      git(repo, "worktree", "add", "--detach", reviewed, "HEAD");
+
+      const { args } = JSON.parse((await runClaudeReview(reviewed, "prompt", { originalCwd: sub })).result);
+      const realSub = fs.realpathSync.native(sub);
+      const realReviewed = fs.realpathSync.native(reviewed);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        "Read(./data/secret.txt)",
+        `Read(/${realReviewed}/sub/**/data/secret.txt)`,
+        `Read(/${realSub}/**/data/secret.txt)`,
+      ].sort());
+    })
+  );
 });
