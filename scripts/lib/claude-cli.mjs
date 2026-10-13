@@ -640,6 +640,62 @@ function assertProtectedReviewSupport(cwd) {
   );
 }
 
+// Oldest stable CLI known to accept the hidden `--advisor <model>` flag. The
+// flag is not listed in `--help`, so support is decided from the version alone.
+export const MIN_ADVISOR_CLAUDE_VERSION = "2.1.293";
+const ADVISOR_DISABLE_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL";
+const ADVISOR_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}(\[[A-Za-z0-9]{1,16}\])?$/;
+
+/**
+ * Normalize an advisor policy: `undefined` (not given), "inherit", "off", or an
+ * alias/model id for the native `--advisor` flag. Throws before any model turn.
+ */
+export function normalizeAdvisorPolicy(value) {
+  if (value == null) return undefined;
+  if (typeof value !== "string") {
+    const kind = Array.isArray(value) ? "array" : typeof value;
+    throw Object.assign(
+      new Error(`CLAUDE_ADVISOR_INVALID: Invalid advisor of type ${kind}. Use inherit, off, a model alias, or a model ID.`),
+      { code: "CLAUDE_ADVISOR_INVALID" }
+    );
+  }
+  const text = value.trim();
+  const lowered = text.toLowerCase();
+  if (lowered === "inherit" || lowered === "off") return lowered;
+  if (!ADVISOR_MODEL_RE.test(text)) {
+    throw Object.assign(
+      new Error(
+        `CLAUDE_ADVISOR_INVALID: Invalid advisor ${JSON.stringify(text.slice(0, 40))}. ` +
+          "Use inherit, off, a model alias, or a model ID."
+      ),
+      { code: "CLAUDE_ADVISOR_INVALID" }
+    );
+  }
+  return MODEL_ALIASES.get(lowered) ?? text;
+}
+
+const isExplicitAdvisor = (policy) => policy !== undefined && policy !== "inherit" && policy !== "off";
+
+/** Refuse an explicit advisor model before a turn when the CLI cannot be proven to support it. */
+export function assertAdvisorSupport(cwd, policy) {
+  if (!isExplicitAdvisor(normalizeAdvisorPolicy(policy))) return;
+  const availability = getClaudeAvailability(cwd);
+  if (availability.available && isClaudeVersionAtLeast(availability.detail, MIN_ADVISOR_CLAUDE_VERSION)) {
+    return;
+  }
+  const detail = availability.available
+    ? `found ${JSON.stringify(availability.detail || "no version")}`
+    : availability.detail;
+  throw Object.assign(
+    new Error(
+      `CLAUDE_ADVISOR_UNSUPPORTED: An explicit advisor requires Claude Code CLI ${MIN_ADVISOR_CLAUDE_VERSION} or later (${detail}). ` +
+        "The turn did not start. Update Claude Code, or use --advisor inherit or --advisor off. " +
+        "The plugin does not retry without the requested advisor."
+    ),
+    { code: "CLAUDE_ADVISOR_UNSUPPORTED" }
+  );
+}
+
 /**
  * Probe `claude auth status`. `state` separates a confirmed logout
  * ("unauthenticated") from probe failures that prove nothing about the login:
@@ -1664,6 +1720,10 @@ export function buildArgs(prompt, options = {}) {
   if (effort) {
     args.push("--effort", effort);
   }
+  const advisor = normalizeAdvisorPolicy(options.advisor);
+  if (isExplicitAdvisor(advisor)) {
+    args.push("--advisor", advisor);
+  }
   if (options.sessionId) {
     args.push("--session-id", options.sessionId);
   }
@@ -1723,6 +1783,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
   });
   const requestedModel = resolveModel(options.model) ?? null;
   const requestedEffort = resolveEffort(options.effort) ?? null;
+  assertAdvisorSupport(cwd, options.advisor);
   const command = resolveClaudeCommand();
   if (command.error) {
     return {
@@ -1769,6 +1830,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         // Env var, not the --forward-subagent-text flag: older claude builds
         // ignore unknown env vars but reject unknown CLI flags.
         CLAUDE_CODE_FORWARD_SUBAGENT_TEXT: "1",
+        // Child only. Other policies never touch an inherited disable.
+        ...(normalizeAdvisorPolicy(options.advisor) === "off" ? { [ADVISOR_DISABLE_ENV]: "1" } : {}),
       },
     });
 

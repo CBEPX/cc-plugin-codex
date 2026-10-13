@@ -6,11 +6,13 @@ Use this supporting contract for `$cc:design` and `$cc:research`. Resolve `<plug
 
 Public forms are:
 
-- New: `[--model <model>] [--fallback-model <model>] [--effort <effort>] [--codex-model <model>] [--codex-effort <effort>] [--user-mcp-tool <exact-id> ...] [--allow-project-mcp-servers] [--no-auto-tools] <brief>`
+- New: `[--model <model>] [--fallback-model <model>] [--effort <effort>] [--advisor <inherit|off|alias-or-id>] [--codex-model <model>] [--codex-effort <effort>] [--user-mcp-tool <exact-id> ...] [--allow-project-mcp-servers] [--no-auto-tools] <brief>`
 - Continue: `--continue <workflow-id> [feedback]`
 - Retry: `--retry <workflow-id>`
 
-Reject mixed forms. New defaults are Claude `fable`, fallback `opus`, inherited Codex model, and Codex effort `xhigh`.
+Reject mixed forms. New defaults are Claude `fable`, fallback `opus`, inherited Codex model, Codex effort `xhigh`, and advisor `inherit`.
+
+`--advisor` is valid only for a new run. `peer-create` freezes it in the model manifest as the `claude-advisor` entry. `peer-create` stores `inherit` as a null value. The memo turn, the critique turn, and every retry read that frozen value. `--continue` and `--retry` reject `--advisor`. A workflow created before this entry existed uses `inherit`. An alias or a model ID needs Claude Code 2.1.293 or later. If the CLI no longer supports a frozen model, the Claude turn fails closed with `CLAUDE_ADVISOR_UNSUPPORTED`. Do not retry without the advisor.
 
 For a new run, inspect the tools and skills actually exposed to this Codex turn. Require both:
 
@@ -28,7 +30,7 @@ In short: rerun preflight after installation or restart.
 1. Resolve routing with `session-routing-context --json`.
 2. Run `mcp-diagnose --json` with the user's exact MCP flags. This actively starts/probes the configured servers in scope that those flags select (only pinned servers with `--user-mcp-tool`, none with `--no-auto-tools` and no pins, every server otherwise) and can therefore have server-defined side effects. The active Codex controller chooses the smallest relevant subset of eligible exact IDs from their descriptions. Pass those choices as repeated internal `--auto-mcp-tool` values to `peer-create`; Node validates exact IDs and safety only. Eligibility trusts a server's `readOnlyHint` declaration or an immutable four-ID audited registry — Context7 `mcp__context7__query-docs` and `mcp__context7__resolve-library-id`, plus Brave `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`. It is not an OS sandbox and always vetoes `destructiveHint`. Only the two Brave IDs are Brave web-evidence tools; no other Brave ID is eligible through the registry. With `--no-auto-tools`, choose none automatically. Exact user pins remain exact and still must be eligible.
 3. Keep a shell-hostile or multiline brief out of argv: normalize it once, write it to an OS temporary file outside the workspace, and use the internal `--brief-file`. Delete that temporary file after `peer-create` returns.
-4. Run `peer-create --mode <mode> --cwd <workspaceRoot> --owner-session-id <ownerSessionId> ... --json`. Preserve public model/MCP flags and controller-selected internal IDs.
+4. Run `peer-create --mode <mode> --cwd <workspaceRoot> --owner-session-id <ownerSessionId> ... --json`. Preserve public model, advisor, and MCP flags and controller-selected internal IDs.
 5. `peer-create` has already reserved the Codex memo, Claude memo, and checkpoint attempts atomically. Use its returned `spawnPlan` with built-in `spawn_agent`: spawn exactly two children. For both, pass `fork_turns: "none"` and the returned self-contained message. Do not add parent history.
 
 The Codex reasoning child uses `reasoning_effort: "xhigh"` by default. Omit `model` when `--codex-model` was not supplied; otherwise pass the requested model. The Claude forwarder uses `reasoning_effort: "medium"` and omits `model`, inheriting the active runtime model.

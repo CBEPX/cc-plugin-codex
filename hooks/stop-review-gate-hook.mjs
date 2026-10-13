@@ -65,6 +65,8 @@ const PROTECTION_REFUSAL_CODES = new Set([
   "CLAUDE_REVIEW_UNSUPPORTED",
   "PROJECT_SETTINGS_UNSUPPORTED",
 ]);
+// The configured stop-review advisor is refused the same way: no retry and no silent downgrade.
+const ADVISOR_REFUSAL_CODES = new Set(["CLAUDE_ADVISOR_INVALID", "CLAUDE_ADVISOR_UNSUPPORTED"]);
 // Codex shows the Stop reason inline; longer reasons stay in the persisted snapshot.
 const STOP_REVIEW_REASON_LIMIT = 1500;
 
@@ -188,7 +190,7 @@ function parseStopReviewOutput(rawOutput) {
 // Review execution via Claude CLI
 // ---------------------------------------------------------------------------
 
-async function runStopReview(cwd, input = {}, onSpawn = undefined) {
+async function runStopReview(cwd, input = {}, onSpawn = undefined, advisor = undefined) {
   const prompt = buildStopReviewPrompt(input);
   const sandboxSettingsFile = createSandboxSettings("read-only");
   let mcpConfigFile = null;
@@ -203,6 +205,7 @@ async function runStopReview(cwd, input = {}, onSpawn = undefined) {
       settingsFile: sandboxSettingsFile,
       mcpConfigFile,
       strictMcpConfig: true,
+      advisor,
       onSpawn,
     });
 
@@ -237,7 +240,7 @@ async function runStopReview(cwd, input = {}, onSpawn = undefined) {
     };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    if (PROTECTION_REFUSAL_CODES.has(err?.code)) {
+    if (PROTECTION_REFUSAL_CODES.has(err?.code) || ADVISOR_REFUSAL_CODES.has(err?.code)) {
       return {
         ok: false,
         protectionCode: err.code,
@@ -252,8 +255,12 @@ async function runStopReview(cwd, input = {}, onSpawn = undefined) {
         reason:
           `The stop-time Claude Code review was refused before it started: ${detail} ` +
           "Retrying the unchanged request cannot resolve this. " +
-          "Do not change the protection or its settings to get past it; " +
-          "report this exact blocker to the user for an operator decision."
+          (ADVISOR_REFUSAL_CODES.has(err.code)
+            ? "Do not change the stop-review advisor setting to get past it; " +
+              "report this exact blocker to the user for an operator decision. " +
+              "An operator can update Claude Code or run `$cc:setup --stop-review-advisor inherit`."
+            : "Do not change the protection or its settings to get past it; " +
+              "report this exact blocker to the user for an operator decision.")
       };
     }
     return {
@@ -488,7 +495,7 @@ async function main() {
       runningTaskNote,
       ...fingerprintFields,
     });
-  });
+  }, config.stopReviewAdvisor);
   if (!review.ok) {
     const refused = Boolean(review.protectionCode);
     persistFinal({

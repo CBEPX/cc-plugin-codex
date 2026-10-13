@@ -93,7 +93,7 @@ async function stdin() {
   return body;
 }
 async function main() {
-  if (args[0] === "--version") return void process.stdout.write("2.1.90 (Claude Code)\\n");
+  if (args[0] === "--version") return void process.stdout.write((process.env.FAKE_CLAUDE_VERSION ?? "2.1.90 (Claude Code)") + "\\n");
   if (args[0] === "auth" && args[1] === "status") {
     if (process.env.FAKE_CLAUDE_AUTH_STATUS === "unauthenticated") {
       process.stdout.write('{"loggedIn":false,"authMethod":"none"}\\n');
@@ -123,6 +123,7 @@ async function main() {
     fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({
       args,
       prompt,
+      advisorDisable: process.env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL ?? null,
       mcpConfig: mcpPath ? JSON.parse(fs.readFileSync(mcpPath, "utf8")) : null,
       settings: settingsPath ? JSON.parse(fs.readFileSync(settingsPath, "utf8")) : null,
     }) + "\\n");
@@ -1347,6 +1348,175 @@ describe("peer companion with fake Claude", () => {
     const probes = fs.readFileSync(testEnv.mcpRequestLog, "utf8");
     assert.match(probes, /docs:initialize/);
     assert.doesNotMatch(probes, /unused:/);
+  });
+
+  describe("advisor policy", () => {
+    const claudeTurns = (testEnv) => fs.readFileSync(testEnv.claudeLog, "utf8").trim()
+      .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const advisorOf = (turn) => {
+      const index = turn.args.indexOf("--advisor");
+      return index < 0 ? null : turn.args[index + 1];
+    };
+    const manifestAdvisor = (workflow) => workflow.modelManifest
+      .find(({ role }) => role === "claude-advisor") ?? null;
+    const supported = (testEnv) => {
+      testEnv.env.FAKE_CLAUDE_VERSION = "2.1.296 (Claude Code)";
+      return testEnv;
+    };
+    // A Claude-first memo waits for the sibling Codex memo, so seal that first.
+    const claudeTurn = (testEnv, created, extraEnv = {}, { codex = true } = {}) => {
+      if (codex) submitCodexMemo(testEnv, created);
+      return claudeTurnOnly(testEnv, created, extraEnv);
+    };
+    const claudeTurnOnly = (testEnv, created, extraEnv = {}) => run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(planLease(created, "_claude_")), env: extraEnv });
+
+    it("omission freezes inherit: no native flag and no disable variable", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv);
+      assert.equal(manifestAdvisor(readWorkflow(testEnv, created.workflow.id))?.requestedModel, null);
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const [turn] = claudeTurns(testEnv);
+      assert.equal(advisorOf(turn), null);
+      assert.equal(turn.advisorDisable, null);
+    });
+
+    it("freezes an explicit model in the public manifest and forwards it to the memo turn", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "Fable"]);
+      assert.deepEqual(
+        manifestAdvisor(readWorkflow(testEnv, created.workflow.id)),
+        { role: "claude-advisor", requestedModel: "fable", resolvedModel: null }
+      );
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(advisorOf(claudeTurns(testEnv)[0]), "fable");
+    });
+
+    it("applies off to the child environment only", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "off"]);
+      assert.equal(manifestAdvisor(readWorkflow(testEnv, created.workflow.id)).requestedModel, "off");
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const [turn] = claudeTurns(testEnv);
+      assert.equal(turn.advisorDisable, "1");
+      assert.equal(advisorOf(turn), null);
+    });
+
+    it("keeps an inherited global disable for inherit and an explicit model", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const result = claudeTurn(testEnv, created, { CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const [turn] = claudeTurns(testEnv);
+      assert.equal(turn.advisorDisable, "1");
+      assert.equal(advisorOf(turn), "fable");
+    });
+
+    it("refuses an invalid value or an unsupported CLI before any workflow or turn exists", () => {
+      const testEnv = createEnvironment();
+      /** @type {Array<[string[], Record<string, string>, RegExp]>} */
+      const refusals = [
+        [["--advisor", "bad value"], { FAKE_CLAUDE_VERSION: "2.1.296 (Claude Code)" }, /CLAUDE_ADVISOR_INVALID/],
+        [["--advisor", "fable"], { FAKE_CLAUDE_VERSION: "2.1.292 (Claude Code)" }, /CLAUDE_ADVISOR_UNSUPPORTED[^]*2\.1\.293/],
+      ];
+      for (const [flags, env, pattern] of refusals) {
+        const result = run(testEnv, [
+          "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
+          "--owner-session-id", "owner-a", "--no-auto-tools", ...flags, "--json", "Compare", "designs.",
+        ], { env });
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, pattern);
+      }
+      assert.equal(countClaudeTurns(testEnv), 0);
+      const workflowsDir = path.join(peerStateDir(testEnv), "workflows");
+      assert.deepEqual(fs.existsSync(workflowsDir) ? fs.readdirSync(workflowsDir) : [], []);
+    });
+
+    it("fails a frozen explicit policy closed when the CLI no longer supports it", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const result = claudeTurn(testEnv, created, { FAKE_CLAUDE_VERSION: "2.1.292 (Claude Code)" });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /CLAUDE_ADVISOR_UNSUPPORTED/);
+      assert.equal(countClaudeTurns(testEnv), 0);
+      assert.equal(readWorkflow(testEnv, created.workflow.id).branches.claude.failureReason, "CLAUDE_ADVISOR_UNSUPPORTED");
+    });
+
+    it("reads a workflow written before the field existed as inherit", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const stored = readWorkflow(testEnv, created.workflow.id);
+      stored.modelManifest = stored.modelManifest.filter(({ role }) => role !== "claude-advisor");
+      writeWorkflow(testEnv, stored);
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(advisorOf(claudeTurns(testEnv)[0]), null);
+    });
+
+    for (const value of [true, 7, ["fable"], "bad value!"]) {
+      it(`refuses a manifest holding ${JSON.stringify(value)} before a native turn`, () => {
+        const testEnv = supported(createEnvironment());
+        const created = createPeer(testEnv, ["--advisor", "fable"]);
+        const stored = readWorkflow(testEnv, created.workflow.id);
+        stored.modelManifest.find(({ role }) => role === "claude-advisor").requestedModel = value;
+        writeWorkflow(testEnv, stored);
+        const result = claudeTurn(testEnv, created);
+        assert.notEqual(result.status, 0);
+        assert.equal(countClaudeTurns(testEnv), 0);
+        assert.match(result.stderr, /CLAUDE_ADVISOR_INVALID|INVALID_MANIFEST|advisor/i);
+      });
+    }
+
+    it("keeps the frozen policy across a Claude retry and the critique after continuation", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const failed = claudeTurn(testEnv, created, { FAKE_CLAUDE_TERMINAL_SUBTYPE: "error" }, { codex: false });
+      assert.notEqual(failed.status, 0);
+      const beforeReplace = JSON.stringify(readWorkflow(testEnv, created.workflow.id));
+      const replaced = run(testEnv, [
+        "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--mode", "design", "--retry", "--owner-session-id", "owner-a", "--json",
+        "--advisor", "off",
+      ]);
+      assert.notEqual(replaced.status, 0);
+      assert.match(replaced.stderr, /CONFLICTING_PEER_ACTION/);
+      assert.equal(JSON.stringify(readWorkflow(testEnv, created.workflow.id)), beforeReplace);
+      const retry = runJson(testEnv, [
+        "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--mode", "design", "--retry", "--owner-session-id", "owner-a", "--json",
+      ]);
+      assert.ok(retry.work.some(({ id }) => id === "claude"));
+      const retried = claudeTurn(testEnv, retry);
+      assert.equal(retried.status, 0, retried.stderr || retried.stdout);
+      const checkpointLease = planLease(retry, "_codex_", "checkpoint");
+      activate(testEnv, retry, "checkpoint", null, checkpointLease);
+      runJson(testEnv, [
+        "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(retry.workflow.epoch), "--json",
+      ], { input: attemptInput(checkpointLease, { agreements: ["Same."], disagreements: [], decisionsNeeded: [] }) });
+      const continuation = runJson(testEnv, [
+        "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--continue", "--owner-session-id", "owner-a", "--json",
+      ], { input: JSON.stringify({ feedback: "Compare once more." }) });
+      const critique = run(testEnv, [
+        "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(continuation.workflow.epoch), "--json",
+      ], { input: attemptInput(planLease(continuation, "_critique_")) });
+      assert.equal(critique.status, 0, critique.stderr || critique.stdout);
+      const turns = claudeTurns(testEnv);
+      assert.deepEqual(turns.map(advisorOf), ["fable", "fable", "fable"].slice(0, turns.length));
+      assert.ok(turns.length >= 2);
+      assert.ok(turns.every((turn) => turn.advisorDisable === null));
+      assert.equal(manifestAdvisor(readWorkflow(testEnv, created.workflow.id)).requestedModel, "fable");
+    });
   });
 
   it("probes only MCP servers represented by peer-create selection inputs", async () => {

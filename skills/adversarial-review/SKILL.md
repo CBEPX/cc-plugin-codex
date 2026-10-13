@@ -1,6 +1,6 @@
 ---
 name: adversarial-review
-description: 'Run a design-challenging Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --user-mcp-tool <mcp__server__tool>, --allow-project-mcp-servers, [focus text]. Defaults to opus + xhigh effort. Use only when the user wants stronger scrutiny than a normal review, such as explicit tradeoff challenge, risky-change review, or custom focus text.'
+description: 'Run a design-challenging Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --advisor <inherit|off|alias-or-id>, --user-mcp-tool <mcp__server__tool>, --allow-project-mcp-servers, [focus text]. Defaults to opus + xhigh effort. Use only when the user wants stronger scrutiny than a normal review, such as explicit tradeoff challenge, risky-change review, or custom focus text.'
 ---
 
 # Claude Code Adversarial Review
@@ -16,7 +16,7 @@ Unlike `$cc:review`, this skill accepts custom focus text after the flags. The m
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the shell tool in the active Codex user workspace; never set its working directory to `<plugin-root>` or the directory used to read this skill. Parent and foreground commands use that shell's current directory directly:
 `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review ...`
 
-Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`, plus optional focus text after the flags (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku and fable leave effort unset, while explicit Fable effort such as `medium` is supported)
+Supported arguments: `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--advisor <inherit|off|alias-or-id>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`, plus optional focus text after the flags (defaults: model=opus, effort=xhigh; sonnet defaults to high; haiku and fable leave effort unset, while explicit Fable effort such as `medium` is supported)
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -26,6 +26,7 @@ Rules:
 - Before launching the review, stay in read-only inspection mode: inspect git status and diff stats only, then ask at most one user question about whether to wait or run in background.
 - Preserve the user's scope flags, explicit `--user-mcp-tool <mcp__server__tool>` and `--allow-project-mcp-servers` flags, and custom focus text exactly.
 - Do not add user MCP tools unless the user asked for them.
+- Preserve an explicit `--advisor <inherit|off|alias-or-id>` flag exactly. Do not add it when the user did not supply it. `inherit` is the default. `off` turns the advisor tool off for this run only. An alias or a model ID needs Claude Code 2.1.293 or later. If the companion refuses the advisor, surface the refusal. Do not retry without `--advisor`.
 - Use the same review target selection as `$cc:review`.
 
 Execution mode rules:

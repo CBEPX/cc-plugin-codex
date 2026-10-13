@@ -138,7 +138,7 @@ $cc:review --model opus --effort high   # opus with a lighter effort
 $cc:review --user-mcp-tool mcp__context7__resolve-library-id
 ```
 
-**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
+**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--advisor <inherit|off|alias-or-id>`, `--user-mcp-tool <mcp__server__tool>`, `--allow-project-mcp-servers`
 
 **Defaults:** model `opus` is passed to Claude Code as its native alias with `xhigh` effort. `sonnet` is passed through with `high` effort; `haiku` and `fable` have no implicit effort. Explicit Fable effort, including `medium`, is forwarded unchanged. Claude Code resolves aliases to the current model for the active provider and account (for example, Opus 5). Pass a full model ID to pin a version; for older pinned IDs, pass `--effort` explicitly instead of inheriting a current-family default.
 
@@ -157,6 +157,22 @@ In foreground, review returns the result directly. In background, the plugin use
 If the diff is too large to inline safely, the review prompt falls back to concise status/stat context and tells Claude to inspect the diff directly with the read-only `mcp__gitReview__diff` tool instead of failing the run.
 
 By default, review runs with only the bundled read-only git MCP. Repeat `--user-mcp-tool <mcp__server__tool>` to opt in specific Claude MCP tools from your user-scope Claude config for a run. Opted-in user MCP tools run as external Claude MCP processes and are auto-approved for that review, so use only trusted tools when reviewing untrusted diffs. Eligibility is based on the server's `readOnlyHint` declaration or the immutable four-ID audited annotationless registry: Context7 `mcp__context7__query-docs` and `mcp__context7__resolve-library-id`, plus Brave `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`. It is not an OS-enforced sandbox. A `destructiveHint` declaration is always vetoed. Project `.mcp.json` server definitions are ignored unless you also pass `--allow-project-mcp-servers`.
+
+#### Advisor policy
+
+Claude Code can call a stronger advisor model during a turn. The plugin does not change this by default. Use `--advisor` on `$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:design`, and `$cc:research` to set the policy for one run.
+
+| Value | Effect |
+| --- | --- |
+| omitted or `inherit` | The plugin adds nothing. Claude Code uses your own settings. A `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` value in your environment stays in effect. |
+| `off` | The plugin sets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` in the Claude Code child process only. Your shell and your settings do not change. |
+| alias or model ID, for example `fable` | The plugin passes `--advisor <value>` to Claude Code. This needs a stable Claude Code CLI 2.1.293 or later. |
+
+The plugin refuses an invalid value, an older CLI, and an unverifiable version before any model turn. It does not retry without the advisor. It does not read `claude --help`, because Claude Code hides this flag. The plugin never unsets a global disable, so an explicit model does not override your `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` setting. The plugin does not check which primary and advisor models work together. Claude Code reports an unsupported pair.
+
+This setting records the request only. It does not show that an advisor ran or which model answered.
+
+`$cc:rescue --resume` keeps the policy of the original task when you omit `--advisor`. The same version check applies. `--advisor inherit` resets the policy. A fresh task never takes the policy of an earlier task. `$cc:design` and `$cc:research` freeze the policy in the workflow when they start. The memo, the critique, and every retry use it, and `--continue` and `--retry` reject `--advisor`. For the stop-time review gate, use `$cc:setup --stop-review-advisor`.
 
 ### `$cc:mcp-diagnose`
 
@@ -182,7 +198,7 @@ $cc:design --continue <workflow-id> optional feedback
 $cc:design --retry <workflow-id>
 ```
 
-New workflows default to Claude `fable` with `opus` fallback and inherited Codex model at `xhigh` effort. Use `--model`, `--fallback-model`, `--effort`, `--codex-model`, or `--codex-effort` to override them. Repeat `--user-mcp-tool <mcp__server__tool>` for explicitly trusted eligible tools; automatic selection is limited to the smallest relevant eligible set exposed to the active Codex turn. Eligibility records whether trust came from `readOnlyHint` or the audited registry, but does not independently enforce server behavior. Project MCP servers still require `--allow-project-mcp-servers`.
+New workflows default to Claude `fable` with `opus` fallback and inherited Codex model at `xhigh` effort. Use `--model`, `--fallback-model`, `--effort`, `--advisor`, `--codex-model`, or `--codex-effort` to override them. Repeat `--user-mcp-tool <mcp__server__tool>` for explicitly trusted eligible tools; automatic selection is limited to the smallest relevant eligible set exposed to the active Codex turn. Eligibility records whether trust came from `readOnlyHint` or the audited registry, but does not independently enforce server behavior. Project MCP servers still require `--allow-project-mcp-servers`.
 
 Only the two Brave IDs in that four-ID registry — `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context` — are Brave web-evidence tools; other Brave IDs are not eligible through the registry. A Brave event counts as Claude web evidence only when that exact ID is also in the workflow's frozen selected-tool manifest. The manifest records the selected ID and trust basis, not the provider's behavior: an `@latest` Brave server can still change a tool behind the same ID. Pin a server version when that drift is unacceptable.
 
@@ -233,6 +249,7 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--write` | Allow file edits (default) |
 | `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, `fable`, or full ID; defaults to `opus`). Aliases are resolved by Claude Code; a full ID pins a version. |
 | `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku and fable; explicit Fable effort such as `medium` is supported) |
+| `--advisor <policy>` | Advisor policy for this task: `inherit`, `off`, or a model alias or ID (default: `inherit`). See [Advisor policy](#advisor-policy). Omit it on `--resume` to keep the original policy. |
 | `--prompt-file <path>` | Read task description from a file |
 | `--view-state on-terminal` | Mark the foreground terminal outcome as viewed |
 | `--view-state defer` | Leave the terminal outcome unread for later inspection |
@@ -302,9 +319,10 @@ $cc:setup                           # verify everything
 $cc:setup --check                   # read-only readiness check
 $cc:setup --enable-review-gate      # turn on stop-time review gate
 $cc:setup --disable-review-gate     # turn it off
+$cc:setup --stop-review-advisor fable  # advisor policy of the stop-time review: inherit, off, or alias/ID
 ```
 
-Setup checks Claude Code availability, native plugin hook feature gates, and review-gate state. `--check` reports required repairs without changing config or hook trust. If Claude Code isn't installed, setup offers to install it.
+Setup checks Claude Code availability, native plugin hook feature gates, review-gate state, and the stop-review advisor policy. `--check` reports required repairs without changing config or hook trust. `--check` rejects `--stop-review-advisor` before it makes any change. Setup reports an invalid stored advisor value instead of treating it as `inherit`, and it explains the Claude Code 2.1.293 prerequisite when the configured value is an alias or model ID and the installed CLI is older or unverifiable. The write still succeeds, because you can update Claude Code later. Run `$cc:setup --stop-review-advisor inherit` to repair a malformed value. If Claude Code isn't installed, setup offers to install it.
 This is also the repair path for marketplace-installed copies of the plugin: `$cc:setup` installs or refreshes the stable hook launcher, confirms `[features].hooks = true`, then trusts this plugin's current native hook hashes.
 
 ## Background Jobs
@@ -361,6 +379,7 @@ The snapshot is shared by sessions in the same workspace and is replaced by the 
 - **Skip-on-no-edits.** The gate computes a working-tree fingerprint baseline and skips review when the last Codex turn made no net edits.
 - **Requires a recorded user turn.** If the UserPromptSubmit hook did not record a baseline for this session, the gate skips review instead of reviewing unrelated or headless work.
 - **Requires an owning session.** If no session id resolves, the gate records `skipped_missing_owner_session` without listing jobs or invoking Claude.
+- **Advisor policy.** The default is `inherit`. `$cc:setup --stop-review-advisor <inherit|off|alias-or-id>` sets `stopReviewAdvisor` for the workspace. If the installed Claude Code is too old for the configured model, the gate blocks the turn and shows a message for the operator. The Stop snapshot records `claudeInvoked: false`. The gate does not retry without the advisor.
 - **Not in nested sessions.** Child sessions (e.g., rescue subagents) suppress the gate to avoid feedback loops.
 
 **Only enable when you're actively monitoring the session.**

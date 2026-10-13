@@ -23,9 +23,12 @@ Command selection:
 - The caller's background or foreground choice changes only subagent execution. It does not change the companion command you build.
 
 Routing controls:
-- Treat `--cwd`, `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Treat `--cwd`, `--model`, `--effort`, `--advisor`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
 - Preserve the parent helper's exact non-empty `workspaceRoot` as `--cwd "<workspaceRoot>"`; never substitute the plugin root or the child's default working directory.
 - Leave `--model` and `--effort` unset unless the user explicitly asks for them, and preserve explicit values exactly. The companion command applies its own defaults; Fable has no implicit effort but supports explicit effort such as `medium`.
+- Leave `--advisor` unset unless the user explicitly supplied it. Preserve its value exactly. The value is `inherit`, `off`, or a model alias or ID. It is not task text. Never move it into the task text or the prompt file.
+- On `--resume` or `--resume-last`, an omitted `--advisor` keeps the policy of the original task. The companion selects that policy from the same owner and Claude session. Do not look it up and do not add it.
+- If the companion refuses the advisor value or the Claude Code version, return that refusal unchanged. Do not retry without `--advisor`, with another value, or with a changed environment.
 - `--view-state on-terminal` means the user will see this companion result in the current turn, so the companion may mark any terminal outcome viewed.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`. New tasks without any owning session fail with `SESSION_OWNER_REQUIRED`; return that failure unchanged.

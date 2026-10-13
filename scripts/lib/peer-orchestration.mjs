@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseArgs } from "./args.mjs";
+import { normalizeAdvisorPolicy } from "./claude-cli.mjs";
 import { BRAVE_WEB_EVIDENCE_TOOLS } from "./mcp-capabilities.mjs";
 import { normalizeWorkflowFailureDetail } from "./workflows.mjs";
 
@@ -15,6 +16,7 @@ const PUBLIC_VALUE_OPTIONS = [
   "model",
   "fallback-model",
   "effort",
+  "advisor",
   "codex-model",
   "codex-effort",
   "user-mcp-tool",
@@ -29,6 +31,7 @@ const RUN_OPTIONS = new Set([
   "model",
   "fallback-model",
   "effort",
+  "advisor",
   "codex-model",
   "codex-effort",
   "user-mcp-tool",
@@ -114,6 +117,7 @@ export function normalizePeerRequest(mode, options = {}, positionals = []) {
     model: optionalString(options.model) ?? "fable",
     fallbackModel: optionalString(options["fallback-model"]) ?? "opus",
     effort: optionalString(options.effort),
+    advisor: normalizeAdvisorPolicy(options.advisor) ?? "inherit",
     codexModel: optionalString(options["codex-model"]),
     codexEffort: optionalString(options["codex-effort"]) ?? "xhigh",
     userMcpTools: normalizeTools(options["user-mcp-tool"]),

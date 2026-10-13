@@ -8,6 +8,11 @@ Primary helper:
 - `node "<plugin-root>/scripts/claude-companion.mjs" review ...`
 - `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review ...`
 
+Routing controls:
+- Treat `--advisor <inherit|off|alias-or-id>` as a routing control, not review text. Preserve a user-supplied value exactly. Never add it when the user did not supply it.
+- Keep it in the same position in the foreground command and in the background child command. A detached review worker reads the stored policy.
+- If the companion refuses the advisor value or the Claude Code version, return that refusal unchanged. Do not retry without `--advisor`.
+
 Execution boundary:
 - Foreground review stays on the main Codex thread. Do not satisfy foreground review through a review subagent, a generic review-runner role, or any background worker abstraction.
 - Background review uses exactly one built-in forwarding child through `spawn_agent`.

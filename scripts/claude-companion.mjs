@@ -44,12 +44,16 @@ import {
   getClaudeAvailability,
   getClaudeAuthStatus,
   claudeAuthProblem,
+  isClaudeVersionAtLeast,
+  MIN_ADVISOR_CLAUDE_VERSION,
   runClaudeTurn,
   runClaudeReview,
   runClaudeAdversarialReview,
   CLIENT_LIST_TOOLS_WITHOUT_TOOLS_CAPABILITY_CODE,
   cancelClaudeProcess,
   MODEL_ALIASES,
+  assertAdvisorSupport,
+  normalizeAdvisorPolicy,
   resolveEffort,
   resolveDefaultModel,
   resolveDefaultEffort,
@@ -200,6 +204,8 @@ const PEER_FAILURE_CODES = new Set([
   "ATTEMPT_ALREADY_COMMITTED",
   "ATTEMPT_LEASE_REFLECTION",
   "BRIEF_HASH_MISMATCH",
+  "CLAUDE_ADVISOR_INVALID",
+  "CLAUDE_ADVISOR_UNSUPPORTED",
   "CLAUDE_AUTH",
   "CLAUDE_AUTH_PROBE_FAILED",
   "CLAUDE_AUTH_PROBE_TIMEOUT",
@@ -243,10 +249,10 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/claude-companion.mjs setup [--check] [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--workflow-id <id> --workflow-stage <stage>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
-      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--workflow-id <id> --workflow-stage <stage>] [--wait-timeout-ms <ms>] [prompt]",
+      "  node scripts/claude-companion.mjs setup [--check] [--enable-review-gate|--disable-review-gate] [--stop-review-advisor <inherit|off|alias-or-id>] [--json]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--advisor <inherit|off|alias-or-id>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--workflow-id <id> --workflow-stage <stage>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers]",
+      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--advisor <inherit|off|alias-or-id>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--user-mcp-tool <mcp__server__tool>...] [--allow-project-mcp-servers] [focus text]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku|fable>] [--effort <low|medium|high|xhigh|max>] [--advisor <inherit|off|alias-or-id>] [--view-state <on-terminal|defer>] [--owner-session-id <session-id>] [--workflow-id <id> --workflow-stage <stage>] [--wait-timeout-ms <ms>] [prompt]",
       "  node scripts/claude-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--poll-interval-ms <ms>] [--output <path>] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--output <path>] [--json]",
@@ -265,7 +271,7 @@ function printUsage() {
       "  node scripts/claude-companion.mjs workflow-retry-context <workflow-id> --retry [--required-stage <stage>...] [--required-branch <id>...] [--json]",
       "  node scripts/claude-companion.mjs workflow-rebind <workflow-id> --revision <n> --epoch <n> --owner-session-id <id> [--json]",
       "  node scripts/claude-companion.mjs workflow-cancel-linked-jobs <workflow-id> --revision <n> --epoch <n> [--json]",
-      "  node scripts/claude-companion.mjs peer-create --mode <design|research> [peer options] <brief>",
+      "  node scripts/claude-companion.mjs peer-create --mode <design|research> [--advisor <inherit|off|alias-or-id>] [peer options] <brief>",
       "  node scripts/claude-companion.mjs peer-activate-attempt <workflow-id> --stage <stage> [--branch <id>] --epoch <n> < attempt.json",
       "  node scripts/claude-companion.mjs peer-submit-memo <workflow-id> --branch codex --brief-hash <hash> --epoch <n> < attempt.json",
       "  node scripts/claude-companion.mjs peer-claude-turn <workflow-id> --brief-hash <hash> --epoch <n> < attempt.json",
@@ -1043,6 +1049,27 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}
         : "Open `/hooks` and trust this plugin's hooks manually, then rerun `$cc:setup`."
     );
   }
+  // The report must never throw: a malformed value is reported and stays repairable.
+  let stopReviewAdvisor = "inherit";
+  let stopReviewAdvisorProblem;
+  try {
+    stopReviewAdvisor = normalizeAdvisorPolicy(config.stopReviewAdvisor) ?? "inherit";
+  } catch (error) {
+    stopReviewAdvisor = "invalid";
+    stopReviewAdvisorProblem = error instanceof Error ? error.message.slice(0, 160) : "Invalid advisor.";
+    nextSteps.push(
+      "The stored stop-review advisor is invalid, so the Stop review is blocked. Repair it with `$cc:setup --stop-review-advisor inherit` (or `off`, or a model alias or ID)."
+    );
+  }
+  if (
+    stopReviewAdvisor !== "inherit" && stopReviewAdvisor !== "off" && stopReviewAdvisor !== "invalid" &&
+    claudeStatus.available &&
+    !isClaudeVersionAtLeast(claudeStatus.detail, MIN_ADVISOR_CLAUDE_VERSION)
+  ) {
+    nextSteps.push(
+      `The stop-review advisor "${stopReviewAdvisor}" needs Claude Code ${MIN_ADVISOR_CLAUDE_VERSION} or later (found ${JSON.stringify(String(claudeStatus.detail).slice(0, 40))}). The Stop review is blocked until you update Claude Code or run \`$cc:setup --stop-review-advisor inherit\`.`
+    );
+  }
   if (!config.stopReviewGate) {
     nextSteps.push(
       "Optional: run `$cc:setup --enable-review-gate` to review each edit-producing Codex turn before it ends."
@@ -1064,6 +1091,8 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}
     checkOnly: Boolean(options.checkOnly),
     diagnostics: buildSetupDiagnostics(cwd),
     reviewGateEnabled: Boolean(config.stopReviewGate),
+    stopReviewAdvisor,
+    ...(stopReviewAdvisorProblem ? { stopReviewAdvisorProblem } : {}),
     actionsTaken,
     nextSteps
   };
@@ -1075,7 +1104,7 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}
 
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "stop-review-advisor"],
     booleanOptions: ["json", "check", "enable-review-gate", "disable-review-gate"]
   });
 
@@ -1087,6 +1116,11 @@ async function handleSetup(argv) {
     (options["enable-review-gate"] || options["disable-review-gate"])
   ) {
     throw new Error("--check cannot be combined with review-gate changes.");
+  }
+  // Validate every configuration input before the first setup side effect.
+  const stopReviewAdvisor = normalizeAdvisorPolicy(options["stop-review-advisor"]);
+  if (options.check && stopReviewAdvisor !== undefined) {
+    throw new Error("--check cannot be combined with --stop-review-advisor changes.");
   }
 
   const cwd = resolveCommandCwd(options);
@@ -1126,6 +1160,11 @@ async function handleSetup(argv) {
   } else if (!options.check && options["disable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", false);
     actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+  }
+
+  if (!options.check && stopReviewAdvisor !== undefined) {
+    setConfig(workspaceRoot, "stopReviewAdvisor", stopReviewAdvisor);
+    actionsTaken.push(`Set the stop-time review advisor to ${stopReviewAdvisor} for ${workspaceRoot}.`);
   }
 
   const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust, {
@@ -1249,6 +1288,7 @@ function buildReviewClaudeOptions(request, sandboxSettingsFile, mcpConfigFile) {
   return {
     model: request.model,
     effort: request.effort,
+    advisor: request.advisor,
     onProgress: request.onProgress,
     onSpawn: request.onSpawn,
     // Branch reviews run in a worktree; keep the user's checkout restrictions too.
@@ -1659,6 +1699,8 @@ async function executeTaskRun(request) {
   const claudeOptions = {
     model: request.model ?? undefined,
     effort: request.effort ?? undefined,
+    // A request stored before this field existed has no advisor and inherits.
+    advisor: request.advisor ?? undefined,
     permissionMode: request.write ? "bypassPermissions" : "dontAsk",
     settingsFile: sandboxSettingsFile,
     allowTerminalWithParseErrors: !request.write,
@@ -1923,6 +1965,7 @@ function buildReviewRequest({
   scope,
   model,
   effort,
+  advisor,
   focusText,
   reviewName,
   userMcpTools,
@@ -1935,6 +1978,7 @@ function buildReviewRequest({
     scope,
     model,
     effort,
+    ...storedAdvisor(advisor),
     focusText,
     reviewName,
     userMcpTools: normalizeUserMcpTools(userMcpTools),
@@ -2054,6 +2098,7 @@ function buildTaskRequest({
   cwd,
   model,
   effort,
+  advisor,
   prompt,
   write,
   resumeLast,
@@ -2065,6 +2110,7 @@ function buildTaskRequest({
     cwd,
     model,
     effort,
+    ...storedAdvisor(advisor),
     prompt,
     write,
     resumeLast,
@@ -2632,6 +2678,30 @@ function resolveTaskResumeState(cwd, ownerSessionId, options = {}) {
     : { candidate: null, activeTask: null, reason: "not_found" };
 }
 
+// Inherit is the absence of a stored policy. This keeps default requests unchanged
+// (the public status view caps its output at 8192 bytes and embeds each request).
+function storedAdvisor(advisor) {
+  return advisor && advisor !== "inherit" ? { advisor } : {};
+}
+
+/**
+ * The advisor policy of the newest task that owns this Claude session. The owner
+ * and the session ID both must match, so another owner's newer task never leaks
+ * its policy. A job written before the field existed means inherit.
+ */
+function resolveOriginatingAdvisor(workspaceRoot, ownerSessionId, claudeSessionId, workflowId = null) {
+  // A workflow binding was authorized against the current owner already, and an explicit
+  // rebind leaves earlier jobs with the previous owner. Select within that workflow only.
+  const origin = sortJobsNewestFirst(listJobs(workspaceRoot)).find(
+    (job) =>
+      (workflowId
+        ? job.workflowId === workflowId
+        : job.jobClass === "task" && job.sessionId === ownerSessionId) &&
+      getClaudeSessionId(job) === claudeSessionId
+  );
+  return normalizeAdvisorPolicy(origin?.request?.advisor) ?? "inherit";
+}
+
 async function resolveLatestResumableSession(cwd, options = {}) {
   const state = resolveTaskResumeState(cwd, options.ownerSessionId, options);
   if (state.activeTask) {
@@ -2654,6 +2724,7 @@ async function handleReviewCommand(argv, config) {
       "scope",
       "model",
       "effort",
+      "advisor",
       "cwd",
       "view-state",
       "job-id",
@@ -2694,6 +2765,8 @@ async function handleReviewCommand(argv, config) {
     );
     // Validate inside the reservation guard so failures do not leak markers.
     config.validateRequest?.(target, focusText);
+    const advisor = normalizeAdvisorPolicy(options.advisor) ?? "inherit";
+    assertAdvisorSupport(cwd, advisor);
     const workflowBinding = resolveWorkflowJobBinding(
       workspaceRoot,
       options["workflow-id"],
@@ -2736,6 +2809,7 @@ async function handleReviewCommand(argv, config) {
         scope: options.scope,
         model: resolvedModel,
         effort: resolvedEffort,
+        advisor,
         focusText,
         reviewName: config.reviewName,
         userMcpTools,
@@ -2760,6 +2834,7 @@ async function handleReviewCommand(argv, config) {
           scope: options.scope,
           model: resolvedModel,
           effort: resolvedEffort,
+          advisor,
           focusText,
           reviewName: config.reviewName,
           userMcpTools,
@@ -2814,6 +2889,7 @@ async function handleTask(argv) {
     valueOptions: [
       "model",
       "effort",
+      "advisor",
       "cwd",
       "prompt-file",
       "view-state",
@@ -2902,6 +2978,14 @@ async function handleTask(argv) {
       }
     }
 
+    // An omitted flag keeps the originating policy on resume; explicit inherit resets it.
+    const advisor =
+      normalizeAdvisorPolicy(options.advisor) ??
+      (resumeSessionId
+        ? resolveOriginatingAdvisor(workspaceRoot, ownerSessionId, resumeSessionId, workflowBinding?.workflowId)
+        : "inherit");
+    assertAdvisorSupport(cwd, advisor);
+
     if (options.background) {
       requireTaskRequest(prompt, resumeLast);
     }
@@ -2920,6 +3004,7 @@ async function handleTask(argv) {
         cwd,
         model,
         effort,
+        advisor,
         prompt,
         write,
         resumeLast,
@@ -2940,6 +3025,7 @@ async function handleTask(argv) {
       cwd,
       model,
       effort,
+      advisor,
       prompt,
       write,
       resumeLast,
@@ -3598,6 +3684,8 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         model: peerModelValue(workflow, "claude") ?? "fable",
         fallbackModel: peerModelValue(workflow, "claude-fallback") ?? "opus",
         effort: peerModelValue(workflow, "claude-effort") ?? undefined,
+        // Frozen at creation. A workflow written before the field existed inherits.
+        advisor: peerModelValue(workflow, "claude-advisor") ?? undefined,
         noSessionPersistence: true,
         tools: [...PEER_CLAUDE_ALLOWED_BASE_TOOLS, "ToolSearch"],
         disallowedTools,
@@ -3747,7 +3835,7 @@ async function handlePeerCreate(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     helpAfterPromptIsLiteral: true,
     valueOptions: [
-      "cwd", "mode", "owner-session-id", "model", "fallback-model", "effort",
+      "cwd", "mode", "owner-session-id", "model", "fallback-model", "effort", "advisor",
       "codex-model", "codex-effort", "user-mcp-tool", "auto-mcp-tool", "brief-file",
     ],
     repeatableOptions: ["user-mcp-tool", "auto-mcp-tool"],
@@ -3760,6 +3848,7 @@ async function handlePeerCreate(argv) {
     ? [fs.readFileSync(path.resolve(options["brief-file"]), "utf8").trim()]
     : positionals;
   const route = normalizePeerRequest(options.mode, options, briefPositionals);
+  assertAdvisorSupport(cwd, route.advisor);
   const ownerSessionId = resolveCommandOwnerSessionId(options["owner-session-id"], workspaceRoot);
   requireOwnerSession(ownerSessionId, "peer");
   ensureClaudeReady(cwd);
@@ -3792,6 +3881,11 @@ async function handlePeerCreate(argv) {
       { role: "claude", requestedModel: route.model, resolvedModel: null },
       { role: "claude-fallback", requestedModel: route.fallbackModel, resolvedModel: null },
       { role: "claude-effort", requestedModel: route.effort, resolvedModel: null },
+      {
+        role: "claude-advisor",
+        requestedModel: route.advisor === "inherit" ? null : route.advisor,
+        resolvedModel: null,
+      },
       { role: "codex", requestedModel: route.codexModel, resolvedModel: null },
       { role: "codex-effort", requestedModel: route.codexEffort, resolvedModel: null },
     ],
@@ -3974,9 +4068,12 @@ async function handlePeerCheckpoint(argv) {
 
 async function handlePeerResumePlan(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode", "owner-session-id"],
+    valueOptions: ["cwd", "mode", "owner-session-id", "advisor"],
     booleanOptions: ["json", "continue", "retry"],
   });
+  if (options.advisor != null) {
+    throw new Error("CONFLICTING_PEER_ACTION: --advisor is valid only for a new peer workflow.");
+  }
   if (Boolean(options.continue) === Boolean(options.retry)) {
     throw new Error("CONFLICTING_PEER_ACTION: Choose exactly one of --continue or --retry.");
   }

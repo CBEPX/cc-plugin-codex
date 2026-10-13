@@ -356,6 +356,9 @@ export function renderSetupReport(report) {
     `- hooks: ${report.hooks.detail}`,
     ...(report.hookTrust ? [`- hook trust: ${report.hookTrust.detail}`] : []),
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    ...(report.stopReviewAdvisor
+      ? [`- stop-review advisor: ${report.stopReviewAdvisor}${report.stopReviewAdvisorProblem ? ` (${report.stopReviewAdvisorProblem})` : ""}`]
+      : []),
     ...(report.diagnostics
       ? [
           `- plugin: ${report.diagnostics.pluginVersion ?? "unknown"} (${report.diagnostics.runtimeSource})`,
