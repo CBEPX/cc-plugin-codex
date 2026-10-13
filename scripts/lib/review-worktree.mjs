@@ -290,7 +290,7 @@ function readRestrictionRules(file) {
 }
 
 /** `//`-anchored copy of a cwd-relative Read/Edit rule, widened to any depth under `anchor`. */
-function pinToAnchor({ tool, specifier }, anchor) {
+export function pinToAnchor({ tool, specifier }, anchor) {
   if (
     (tool !== "Read" && tool !== "Edit") ||
     specifier === undefined ||
@@ -299,16 +299,21 @@ function pinToAnchor({ tool, specifier }, anchor) {
   ) {
     return null;
   }
-  const posixAnchor = anchor
-    .replace(/\\/g, "/")
-    .replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`);
-  if (/[*?[\]!]/.test(posixAnchor)) {
+  // The `//` form is POSIX-only. Converting a Windows drive, UNC or backslash
+  // path would be a guess that no Windows runner has qualified, so refuse.
+  if (/^[A-Za-z]:|\\/.test(anchor)) {
+    throw projectSettingsUnsupported(
+      anchor,
+      "the original checkout path is a Windows drive, UNC or backslash path, so its relative rules cannot be pinned"
+    );
+  }
+  if (/[*?[\]!]/.test(anchor)) {
     throw projectSettingsUnsupported(
       anchor,
       "the original checkout path contains glob characters, so its relative rules cannot be pinned"
     );
   }
-  return `${tool}(/${posixAnchor}/**/${specifier.replace(/^\.?\//, "")})`;
+  return `${tool}(/${anchor}/**/${specifier.replace(/^\.?\//, "")})`;
 }
 
 /**

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Report the Claude Code authentication check in separate states: authenticated, API key, confirmed logout, timeout, spawn failure, and other probe failure. `getClaudeAuthStatus` adds `state` to its result and keeps `loggedIn`. Only a confirmed logout (`loggedIn: false` in the native JSON, or a not-logged-in message from a failed command) tells the user to run `claude auth login`. A timeout or an unexplained failure says the login state is unknown and points to `claude auth status`. `setup`, `task`, `review`, `adversarial-review`, the Stop review gate, and peer turns use the same states; peer failures record `CLAUDE_AUTH`, `CLAUDE_AUTH_PROBE_TIMEOUT`, `CLAUDE_AUTH_PROBE_FAILED`, or `CLAUDE_UNAVAILABLE`.
+- Report a proven organization subscription refusal as `claude_subscription_refused` (peer code `CLAUDE_SUBSCRIPTION_REFUSED`). The signal is the result text of an API-error terminal event, or the stderr of a command that failed before any terminal event. A successful answer that quotes the message stays a success, and a run that ends for another reason (for example max turns or budget) keeps its own category even when its text quotes the message. An unknown required CLI option is reported as `claude_cli_unsupported` (peer code `CLAUDE_CLI_UNSUPPORTED`) without a retry and with every protective flag unchanged.
+- Make a refused protected Stop review explicit. The gate stays closed and persists `blocked_protection_refused` with `claudeInvoked: false` and the refusal code. The block text says that retrying the unchanged request cannot resolve the refusal and that the exact blocker goes to the user. A missing Claude Code CLI or an inconclusive login check keeps the existing allow-with-guidance path. The Stop snapshot sets `claudeInvoked: true` only after the Claude process has spawned, so an interrupted or pre-spawn-refused run never claims an invocation.
+- Refuse to pin a relative project `Read` or `Edit` rule to a Windows drive, UNC, or backslash checkout path. No Windows runner qualified a conversion, so the review does not start (`PROJECT_SETTINGS_UNSUPPORTED`).
+- Tell the forwarding skills and runtimes that a reserved job id belongs to one launch attempt and is spent after a failure, because the companion may already have released it. A retry asks `background-routing-context` for a new id, and the forwarder copies the task text byte for byte.
+
+### Fixed
+
+- Close the descriptor in `exportReadPayload` when `fstat` fails after the exclusive open (#54). The output file stays because its identity was never read. Cleanup after a write failure still deletes only a path that matches the created file.
+- Test-only (#57): make the stdio SIGTERM-escalation test wait for fixture readiness, then fire the probe's own timers in order. Production probe deadlines do not change (the default stays `options.timeoutMs ?? 5000`; 1000 ms is the test's explicit argument). The test keeps its SIGTERM-ignored and SIGKILL-reaped proofs and now stops the started probe and fixture when readiness fails.
+
 ## v1.7.12
 
 ### Changed

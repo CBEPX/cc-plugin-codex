@@ -94,7 +94,19 @@ async function stdin() {
 }
 async function main() {
   if (args[0] === "--version") return void process.stdout.write("2.1.90 (Claude Code)\\n");
-  if (args[0] === "auth" && args[1] === "status") return void process.stdout.write("authenticated\\n");
+  if (args[0] === "auth" && args[1] === "status") {
+    if (process.env.FAKE_CLAUDE_AUTH_STATUS === "unauthenticated") {
+      process.stdout.write('{"loggedIn":false,"authMethod":"none"}\\n');
+      process.exitCode = 1;
+      return;
+    }
+    if (process.env.FAKE_CLAUDE_AUTH_STATUS === "probe-failed") {
+      process.stderr.write("socket hang up\\n");
+      process.exitCode = 3;
+      return;
+    }
+    return void process.stdout.write("authenticated\\n");
+  }
   if (process.env.FAKE_CLAUDE_TURN_LOG) {
     fs.appendFileSync(process.env.FAKE_CLAUDE_TURN_LOG, "turn\\n");
   }
@@ -226,10 +238,12 @@ async function main() {
         ? "Not logged in. Run claude auth login to continue."
         : process.env.FAKE_CLAUDE_FAILURE_SIGNAL === "rate"
           ? "You've hit your session limit · resets 4:50pm (Europe/Moscow)"
-          : process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
-            ? "not structured JSON"
-            : JSON.stringify(payload),
-      model: process.env.FAKE_CLAUDE_FAILURE_SIGNAL
+          : process.env.FAKE_CLAUDE_FAILURE_SIGNAL === "refusal"
+            ? "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"
+            : process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
+              ? "not structured JSON"
+              : JSON.stringify(payload),
+      model: process.env.FAKE_CLAUDE_FAILURE_SIGNAL && process.env.FAKE_CLAUDE_FAILURE_SIGNAL !== "refusal"
         ? "<synthetic>"
         : process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5-1",
       modelUsage: { "claude-fable-5-1": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
@@ -940,6 +954,17 @@ describe("peer companion with fake Claude", () => {
         detail: null,
       },
       {
+        name: "proven subscription refusal",
+        env: {
+          FAKE_CLAUDE_TERMINAL_SUBTYPE: "success",
+          FAKE_CLAUDE_TERMINAL_REASON: "api_error",
+          FAKE_CLAUDE_TERMINAL_IS_ERROR: "1",
+          FAKE_CLAUDE_FAILURE_SIGNAL: "refusal",
+        },
+        code: "CLAUDE_SUBSCRIPTION_REFUSED",
+        detail: null,
+      },
+      {
         name: "rate precedence over sandbox prose",
         env: {
           FAKE_CLAUDE_TERMINAL_SUBTYPE: "future_terminal",
@@ -990,7 +1015,34 @@ describe("peer companion with fake Claude", () => {
       const durable = readManagedStateText(testEnv);
       assert.doesNotMatch(durable, /provider_payload_MUST_NOT_PERSIST/, testCase.name);
       assert.doesNotMatch(durable, /provider_reason_MUST_NOT_PERSIST/, testCase.name);
-      assert.doesNotMatch(durable, /Not logged in|session limit/, testCase.name);
+      assert.doesNotMatch(durable, /Not logged in|session limit|organization has disabled/, testCase.name);
+    }
+  });
+
+  it("records an unconfirmed auth probe separately from a confirmed logout", () => {
+    for (const testCase of [
+      { probe: "unauthenticated", code: "CLAUDE_AUTH" },
+      { probe: "probe-failed", code: "CLAUDE_AUTH_PROBE_FAILED" },
+    ]) {
+      const testEnv = createEnvironment();
+      const created = createPeer(testEnv);
+      submitCodexMemo(testEnv, created);
+      const claudeLease = planLease(created, "_claude_");
+      const failed = run(testEnv, [
+        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], {
+        input: attemptInput(claudeLease),
+        env: { FAKE_CLAUDE_AUTH_STATUS: testCase.probe },
+      });
+
+      assert.notEqual(failed.status, 0, testCase.probe);
+      assert.equal(failed.stderr, `${testCase.code}\n`, testCase.probe);
+      const stored = readWorkflow(testEnv, created.workflow.id);
+      assert.equal(stored.failureReason, testCase.code, testCase.probe);
+      assert.equal(stored.branches.claude.status, "retryable_failed", testCase.probe);
+      assert.equal(fs.existsSync(testEnv.claudeTurnLog), false, `${testCase.probe}: no turn may start`);
     }
   });
 

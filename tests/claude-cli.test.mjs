@@ -44,6 +44,7 @@ import {
   SANDBOX_REVIEW_TOOLS,
   SANDBOX_STOP_REVIEW_TOOLS,
 } from "../scripts/lib/claude-cli.mjs";
+import { pinToAnchor } from "../scripts/lib/review-worktree.mjs";
 
 function createFakeClaudeCommand(tmpDir, source) {
   const packageRoot = path.join(
@@ -1764,6 +1765,7 @@ describe("runClaudeTurn", () => {
       assert.deepEqual(getClaudeAuthStatus(process.cwd()), {
         available: true,
         loggedIn: true,
+        state: "authenticated",
         detail: "authenticated",
       });
     } finally {
@@ -3263,4 +3265,323 @@ describe("protected review isolation", () => {
       ].sort());
     })
   );
+});
+
+function withFakeClaudeBinary(source, run) {
+  return async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-diagnostics-"));
+    const oldPath = process.env.PATH ?? "";
+    const oldApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      createFakeClaudeCommand(tmpDir, source);
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+      await run({ tmpDir });
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = oldApiKey;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  };
+}
+
+describe("getClaudeAuthStatus classification", () => {
+  const authStatusSource = (body) =>
+    `const args = process.argv.slice(2);\nif (args[0] === "auth" && args[1] === "status") {\n${body}\n}\n`;
+
+  for (const scenario of [
+    {
+      name: "native JSON login reports authenticated",
+      body: `process.stdout.write('{"loggedIn":true,"authMethod":"claude.ai"}\\n');`,
+      state: "authenticated",
+      loggedIn: true,
+    },
+    {
+      name: "native JSON loggedIn=false with exit 1 is confirmed unauthenticated",
+      body: `process.stdout.write('{"loggedIn":false,"authMethod":"none"}\\n'); process.exit(1);`,
+      state: "unauthenticated",
+      loggedIn: false,
+      recommendsLogin: true,
+    },
+    {
+      name: "native JSON loggedIn=false with exit 0 is confirmed unauthenticated",
+      body: `process.stdout.write('{"loggedIn":false}\\n');`,
+      state: "unauthenticated",
+      loggedIn: false,
+      recommendsLogin: true,
+    },
+    {
+      name: "legacy not-authenticated stderr with exit 1 is confirmed unauthenticated",
+      body: `process.stderr.write("not authenticated\\n"); process.exit(1);`,
+      state: "unauthenticated",
+      loggedIn: false,
+      recommendsLogin: true,
+    },
+    {
+      name: "an unexplained nonzero exit is a probe failure, not proof of logout",
+      body: `process.stderr.write("socket hang up\\n"); process.exit(3);`,
+      state: "probe_failed",
+      loggedIn: false,
+      recommendsLogin: false,
+    },
+  ]) {
+    it(
+      scenario.name,
+      withFakeClaudeBinary(authStatusSource(scenario.body), () => {
+        const status = getClaudeAuthStatus(process.cwd());
+
+        assert.equal(status.state, scenario.state);
+        assert.equal(status.loggedIn, scenario.loggedIn);
+        assert.equal(status.available, true);
+        assert.equal(/claude auth login/.test(status.detail), Boolean(scenario.recommendsLogin));
+      })
+    );
+  }
+
+  it("reports a spawn failure separately from authentication", () => {
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-missing-"));
+    const oldPath = process.env.PATH;
+    const oldApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.PATH = emptyDir;
+    try {
+      const status = getClaudeAuthStatus(process.cwd());
+
+      assert.equal(status.state, "spawn_failed");
+      assert.equal(status.available, false);
+      assert.equal(status.loggedIn, false);
+      assert.doesNotMatch(status.detail, /claude auth login/);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldApiKey !== undefined) process.env.ANTHROPIC_API_KEY = oldApiKey;
+      fs.rmSync(emptyDir, { recursive: true, force: true });
+    }
+  });
+
+  it(
+    "reports a real probe timeout without recommending login",
+    { timeout: 30_000 },
+    withFakeClaudeBinary(authStatusSource("setInterval(() => {}, 1000);"), () => {
+      const started = Date.now();
+      const status = getClaudeAuthStatus(process.cwd());
+
+      assert.equal(status.state, "timeout");
+      assert.equal(status.loggedIn, false);
+      assert.equal(status.available, true);
+      assert.doesNotMatch(status.detail, /claude auth login/);
+      assert.ok(Date.now() - started >= 9_000, "the production probe timeout is unchanged");
+    })
+  );
+
+  it("keeps the explicit API-key path ready without running the probe", () => {
+    const oldApiKey = process.env.ANTHROPIC_API_KEY;
+    const oldPath = process.env.PATH;
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    process.env.PATH = "";
+    try {
+      assert.deepEqual(getClaudeAuthStatus(process.cwd()), {
+        available: true,
+        loggedIn: true,
+        state: "api_key",
+        detail: "API key configured",
+      });
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = oldApiKey;
+    }
+  });
+});
+
+describe("organization subscription refusal and unsupported CLI options", () => {
+  const REFUSAL =
+    "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access";
+
+  it("classifies the refusal from failed-command stderr without a terminal event", () => {
+    const failure = classifyClaudeFailure({
+      stderr: REFUSAL,
+      exitCode: 1,
+      receivedTerminalEvent: false,
+    });
+
+    assert.equal(failure.kind, "claude_subscription_refused");
+    assert.equal(failure.message, REFUSAL);
+  });
+
+  it("classifies the refusal from an error terminal result", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: REFUSAL,
+      terminalErrorText: REFUSAL,
+      exitCode: 1,
+      receivedTerminalEvent: true,
+    });
+
+    assert.equal(failure.kind, "claude_subscription_refused");
+    assert.equal(failure.message, REFUSAL);
+  });
+
+  it("does not treat a successful answer that quotes the refusal as a failure", () => {
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: `The CLI printed: ${REFUSAL}`,
+        exitCode: 0,
+        receivedTerminalEvent: true,
+      }),
+      null
+    );
+    assert.equal(
+      classifyClaudeFailure({
+        stderr: REFUSAL,
+        exitCode: 0,
+        receivedTerminalEvent: true,
+      }),
+      null
+    );
+  });
+
+  it(
+    "keeps terminal API error details while reporting a refusal from a real error result",
+    withFakeClaudeBinary(
+      `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: ${JSON.stringify(REFUSAL)}, session_id: "refused", model: "claude-opus-5-5" }) + "\\n", () => process.exit(1));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt");
+
+        assert.equal(result.status, "failed");
+        assert.equal(result.failure.kind, "claude_subscription_refused");
+        assert.equal(result.failure.terminalCategory, "CLAUDE_API_ERROR");
+      }
+    )
+  );
+
+  // Streamed answer text that quotes the refusal is not terminal evidence, whatever
+  // category the run ends in; only an API-error terminal's own result text can prove it.
+  const streamedQuote = JSON.stringify(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", delta: { type: "text_delta", text: REFUSAL } },
+  }));
+  for (const scenario of [
+    {
+      name: "an error_max_turns terminal after a streamed quote",
+      terminal: { subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: "" },
+      streamed: true,
+      kind: "claude_max_turns",
+    },
+    {
+      name: "an empty API-error terminal after a streamed quote",
+      terminal: { subtype: "success", terminal_reason: "api_error", is_error: true, result: "" },
+      streamed: true,
+      kind: "claude_api_error",
+    },
+    {
+      name: "a max-turns terminal whose own result text quotes the refusal",
+      terminal: { subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: REFUSAL },
+      streamed: false,
+      kind: "claude_max_turns",
+    },
+    {
+      name: "a budget terminal whose own result text quotes the refusal",
+      terminal: { subtype: "error_max_budget_usd", terminal_reason: "budget_exhausted", is_error: true, result: REFUSAL },
+      streamed: false,
+      kind: "claude_max_budget",
+    },
+  ]) {
+    it(
+      `keeps the real failure category for ${scenario.name}`,
+      withFakeClaudeBinary(
+        `${scenario.streamed ? `process.stdout.write(${streamedQuote} + "\\n");\n` : ""}process.stdout.write(JSON.stringify({ type: "result", session_id: "quoted", model: "claude-opus-5-5", ...${JSON.stringify(scenario.terminal)} }) + "\\n", () => process.exit(1));\n`,
+        async () => {
+          const result = await runClaudeTurn(process.cwd(), "prompt");
+
+          assert.equal(result.status, "failed");
+          assert.equal(result.failure.kind, scenario.kind);
+          assert.equal(result.finalModel, "claude-opus-5-5");
+        }
+      )
+    );
+  }
+
+  it(
+    "still reports a refusal that arrives as the API-error terminal's own result",
+    withFakeClaudeBinary(
+      `process.stdout.write(${streamedQuote} + "\\n");\nprocess.stdout.write(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: ${JSON.stringify(REFUSAL)}, session_id: "refused", model: "claude-opus-5-5" }) + "\\n", () => process.exit(1));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt");
+
+        assert.equal(result.failure.kind, "claude_subscription_refused");
+        assert.equal(result.failure.terminalCategory, "CLAUDE_API_ERROR");
+      }
+    )
+  );
+
+  it(
+    "completes a real run whose successful answer discusses the refusal",
+    withFakeClaudeBinary(
+      `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, terminal_reason: "completed", result: ${JSON.stringify(`Explanation: ${REFUSAL}`)}, session_id: "discussed" }) + "\\n", () => process.exit(0));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt");
+
+        assert.equal(result.status, "completed");
+        assert.equal(result.failure, null);
+      }
+    )
+  );
+
+  it(
+    "reports an unknown required option from a real failed run",
+    withFakeClaudeBinary(
+      `process.stderr.write("error: unknown option '--setting-sources'\\n", () => process.exit(1));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt", { settingSources: ["user"] });
+
+        assert.equal(result.status, "failed");
+        assert.equal(result.failure.kind, "claude_cli_unsupported");
+        assert.equal(result.failure.option, "--setting-sources");
+      }
+    )
+  );
+
+  it("ignores option-error text that is not failed-command stderr", () => {
+    const text = "error: unknown option '--setting-sources'";
+
+    assert.equal(classifyClaudeFailure({ finalMessage: `Docs say: ${text}` }), null);
+    assert.equal(
+      classifyClaudeFailure({ stderr: text, exitCode: 0, receivedTerminalEvent: true }),
+      null
+    );
+  });
+});
+
+describe("relative project rule pinning", () => {
+  const relativeRead = { tool: "Read", specifier: "./secret.txt", rule: "Read(./secret.txt)" };
+
+  it("pins a relative rule below a POSIX anchor", () => {
+    assert.equal(pinToAnchor(relativeRead, "/home/dev/repo"), "Read(//home/dev/repo/**/secret.txt)");
+  });
+
+  it("refuses to guess a pinned form for Windows drive, UNC, or backslash anchors", () => {
+    for (const anchor of ["C:\\Users\\dev\\repo", "c:/Users/dev/repo", "\\\\server\\share\\repo", "/tmp/odd\\name"]) {
+      assert.throws(
+        () => pinToAnchor(relativeRead, anchor),
+        (/** @type {Error & { code?: string }} */ error) => {
+          assert.equal(error.code, "PROJECT_SETTINGS_UNSUPPORTED");
+          assert.match(error.message, /cannot be pinned/);
+          assert.match(error.message, /Do not edit or remove project permission rules/);
+          return true;
+        },
+        anchor
+      );
+    }
+  });
+
+  it("leaves rules that need no pinning alone, whatever the anchor", () => {
+    for (const rule of [
+      { tool: "Read", specifier: "//etc/passwd" },
+      { tool: "Read", specifier: "~/.ssh/**" },
+      { tool: "Bash", specifier: "rm -rf" },
+      { tool: "WebFetch", specifier: undefined },
+    ]) {
+      assert.equal(pinToAnchor(rule, "C:\\Users\\dev\\repo"), null);
+    }
+  });
 });

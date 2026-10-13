@@ -38,6 +38,7 @@ import {
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
+  claudeAuthProblem,
   cleanupReviewMcpConfig,
   cleanupSandboxSettings,
   createReviewMcpConfig,
@@ -57,6 +58,13 @@ const STOP_REVIEW_NO_EDIT_NOTE =
   "Claude Code stop-time review skipped: the most recent turn made no net edits.";
 const STOP_REVIEW_NO_BASELINE_NOTE =
   "Claude Code stop-time review skipped: no user turn was recorded for this Codex session.";
+// Pre-spawn refusals from runClaudeReview. They are deterministic for the same
+// environment and project settings, so the gate stays closed and tells the agent
+// not to retry or to weaken the protection.
+const PROTECTION_REFUSAL_CODES = new Set([
+  "CLAUDE_REVIEW_UNSUPPORTED",
+  "PROJECT_SETTINGS_UNSUPPORTED",
+]);
 // Codex shows the Stop reason inline; longer reasons stay in the persisted snapshot.
 const STOP_REVIEW_REASON_LIMIT = 1500;
 
@@ -85,13 +93,13 @@ function buildSetupNote(cwd) {
     return `Claude Code is not set up for the review gate. ${availability.detail}. Run $cc:setup.`;
   }
 
-  const authStatus = getClaudeAuthStatus(cwd);
-  if (!authStatus.loggedIn) {
-    const detail = authStatus.detail ? ` ${authStatus.detail}.` : "";
-    return `Claude Code is not set up for the review gate.${detail} Run $cc:setup and, if needed, \`claude auth login\`.`;
-  }
-
-  return null;
+  // A missing CLI or an inconclusive login check keeps the gate optional: the
+  // stop is allowed with guidance. This differs from a refused protected review
+  // (see PROTECTION_REFUSAL_CODES), which blocks.
+  const problem = claudeAuthProblem(getClaudeAuthStatus(cwd));
+  return problem
+    ? `Claude Code is not set up for the review gate. ${problem.message} Run $cc:setup.`
+    : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +188,7 @@ function parseStopReviewOutput(rawOutput) {
 // Review execution via Claude CLI
 // ---------------------------------------------------------------------------
 
-async function runStopReview(cwd, input = {}) {
+async function runStopReview(cwd, input = {}, onSpawn = undefined) {
   const prompt = buildStopReviewPrompt(input);
   const sandboxSettingsFile = createSandboxSettings("read-only");
   let mcpConfigFile = null;
@@ -195,6 +203,7 @@ async function runStopReview(cwd, input = {}) {
       settingsFile: sandboxSettingsFile,
       mcpConfigFile,
       strictMcpConfig: true,
+      onSpawn,
     });
 
     if (result.status !== "completed") {
@@ -228,6 +237,25 @@ async function runStopReview(cwd, input = {}) {
     };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
+    if (PROTECTION_REFUSAL_CODES.has(err?.code)) {
+      return {
+        ok: false,
+        protectionCode: err.code,
+        rawOutput: "",
+        firstLine: "",
+        claudeStatus: "refused",
+        claudeExitCode: null,
+        claudeWarning: null,
+        claudeStderr: detail,
+        claudeSessionId: null,
+        promptBytes,
+        reason:
+          `The stop-time Claude Code review was refused before it started: ${detail} ` +
+          "Retrying the unchanged request cannot resolve this. " +
+          "Do not change the protection or its settings to get past it; " +
+          "report this exact blocker to the user for an operator decision."
+      };
+    }
     return {
       ok: false,
       rawOutput: "",
@@ -442,17 +470,31 @@ async function main() {
     return;
   }
 
+  // claudeInvoked becomes true only when runClaudeTurn reports a spawned Claude
+  // process, so an interrupted or pre-spawn-refused run never claims an invocation.
+  let claudeSpawned = false;
   persistSnapshot({
     status: "running_claude_review",
-    claudeInvoked: true,
+    claudeInvoked: false,
     runningTaskNote,
     ...fingerprintFields,
   });
-  const review = await runStopReview(cwd, input);
-  if (!review.ok) {
-    persistFinal({
-      status: "blocked",
+  const review = await runStopReview(cwd, input, ({ pid }) => {
+    if (!Number.isInteger(pid) || pid <= 0) return;
+    claudeSpawned = true;
+    persistSnapshot({
+      status: "running_claude_review",
       claudeInvoked: true,
+      runningTaskNote,
+      ...fingerprintFields,
+    });
+  });
+  if (!review.ok) {
+    const refused = Boolean(review.protectionCode);
+    persistFinal({
+      status: refused ? "blocked_protection_refused" : "blocked",
+      claudeInvoked: claudeSpawned,
+      ...(refused ? { protectionCode: review.protectionCode } : {}),
       reason: review.reason,
       rawOutput: review.rawOutput,
       firstLine: review.firstLine,
@@ -477,7 +519,7 @@ async function main() {
 
   persistFinal({
     status: "allow",
-    claudeInvoked: true,
+    claudeInvoked: claudeSpawned,
     reason: STOP_REVIEW_SUCCESS_NOTE,
     rawOutput: review.rawOutput,
     firstLine: review.firstLine,

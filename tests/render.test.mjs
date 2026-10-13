@@ -436,6 +436,37 @@ describe("renderTaskResult", () => {
     assert.match(output, /Not logged in/);
   });
 
+  it("renders a proven organization subscription refusal without login or retry advice", () => {
+    const output = renderTaskResult({
+      rawOutput: "UNTRUSTED_PARTIAL_PROVIDER_MARKER",
+      failure: {
+        kind: "claude_subscription_refused",
+        terminalCategory: "CLAUDE_API_ERROR",
+        message: "Your organization has disabled Claude subscription access for Claude Code",
+      },
+    });
+
+    assert.match(output, /organization has disabled Claude subscription access/i);
+    assert.match(output, /ANTHROPIC_API_KEY|administrator/);
+    assert.doesNotMatch(output, /auth login|usage limit/i);
+    assert.doesNotMatch(output, /UNTRUSTED_PARTIAL_PROVIDER_MARKER/);
+  });
+
+  it("renders an unsupported required CLI option as an operator action", () => {
+    const output = renderTaskResult({
+      failure: {
+        kind: "claude_cli_unsupported",
+        option: "--setting-sources",
+        message: "error: unknown option '--setting-sources'",
+      },
+    });
+
+    assert.match(output, /does not support the required option --setting-sources/);
+    assert.match(output, /operator must update Claude Code/);
+    assert.match(output, /did not retry without it/);
+    assert.doesNotMatch(output, /auth login/);
+  });
+
   it("renders bounded structured terminal failures without partial provider text", () => {
     const output = renderTaskResult({
       rawOutput: "UNTRUSTED_PARTIAL_PROVIDER_MARKER",
@@ -748,6 +779,20 @@ describe("peer workflow rendering", () => {
 // ---------------------------------------------------------------------------
 
 describe("renderJobStatusReport", () => {
+  it("names a proven refusal in the Failure row instead of the generic terminal category", () => {
+    const output = renderJobStatusReport({
+      id: "task-1",
+      status: "failed",
+      failure: {
+        kind: "claude_subscription_refused",
+        terminalCategory: "CLAUDE_API_ERROR",
+        message: "Your organization has disabled Claude subscription access",
+      },
+    });
+
+    assert.match(output, /\| Failure \| claude_subscription_refused \|/);
+  });
+
   it("renders job status as a key-value markdown table with links", () => {
     const job = {
       id: "j1",

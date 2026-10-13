@@ -41,6 +41,8 @@ Routing controls:
 Task defaults:
 - Default to `--write` unless the user explicitly wants read-only behavior or only review, diagnosis, or research without edits.
 - Preserve the user's task text apart from stripping routing flags.
+- Copy the resolved task text byte-for-byte into the command. Do not append a period or other terminal punctuation, add quotes, or change a leading slash command such as `/simplify`.
+- Run the `task` command once with its `--job-id`. After a failure, treat the id as spent: the companion may already have released it. Do not run the command again with the same id. Return the failure; the parent reserves a new id before any retry.
 - If the resolved task text is multi-line, contains shell-hostile quoting, or includes XML-style blocks, prefer staging it in a temporary prompt file and pass it through `--prompt-file` instead of inlining it in one shell string.
 - When staging a prompt file, keep the exact task text byte-for-byte and prefer a temporary path outside the repository checkout so the rescue flow does not dirty the repo.
 - Use a structured file-write path to create that prompt file when possible. Do not solve shell quoting by wrapping the same long task inside another brittle inline shell command.

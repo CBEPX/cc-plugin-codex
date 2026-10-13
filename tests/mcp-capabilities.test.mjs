@@ -862,35 +862,153 @@ describe("MCP capability discovery", () => {
     });
   });
 
-  it("escalates and reaps a stdio server that ignores SIGTERM", async () => {
-    if (process.platform === "win32") return;
-    await withTempHome(async ({ homeDir, cwd }) => {
-      const pidFile = path.join(homeDir, "stubborn.pid");
-      const serverPath = path.join(homeDir, "stubborn-server.mjs");
-      fs.writeFileSync(serverPath, [
-        'import fs from "node:fs";',
-        "process.on('SIGTERM', () => {});",
-        "fs.writeFileSync(process.env.FAKE_MCP_PID_FILE, String(process.pid));",
-        "setInterval(() => {}, 1000);",
-      ].join("\n"), "utf8");
-      fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({
-        mcpServers: {
-          stubborn: {
-            command: process.execPath,
-            args: [serverPath],
-            env: { FAKE_MCP_PID_FILE: pidFile },
+  // The probe deadline starts at spawn, so a slow Node start could fire it before the
+  // fixture installs its SIGTERM handler. The test therefore captures the probe's own
+  // timers, waits (bounded) for the fixture to prove readiness, and only then fires them.
+  async function exerciseStubbornProbe({
+    homeDir,
+    cwd,
+    startupDelayMs = 0,
+    publishReadiness = true,
+    // Evaluated only after the fixture's startup is confirmed, so a slow Node start never eats it.
+    readinessDeadline = () => Date.now() + 15_000,
+  }) {
+    const pidFile = path.join(homeDir, "stubborn.pid");
+    const startedFile = path.join(homeDir, "stubborn.started");
+    const termFile = path.join(homeDir, "stubborn.sigterm");
+    const serverPath = path.join(homeDir, "stubborn-server.mjs");
+    fs.writeFileSync(serverPath, [
+      'import fs from "node:fs";',
+      // Cleanup-only record of the fixture pid; it does not signal readiness.
+      "fs.writeFileSync(process.env.FAKE_MCP_STARTED_FILE, String(process.pid));",
+      `await new Promise((resolve) => setTimeout(resolve, ${startupDelayMs}));`,
+      "process.on('SIGTERM', () => fs.appendFileSync(process.env.FAKE_MCP_TERM_FILE, 'SIGTERM\\n'));",
+      // Readiness is published only after the handler exists; rename keeps it atomic.
+      ...(publishReadiness ? [
+        "fs.writeFileSync(process.env.FAKE_MCP_PID_FILE + '.tmp', String(process.pid));",
+        "fs.renameSync(process.env.FAKE_MCP_PID_FILE + '.tmp', process.env.FAKE_MCP_PID_FILE);",
+      ] : []),
+      "setInterval(() => {}, 1000);",
+    ].join("\n"), "utf8");
+    fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({
+      mcpServers: {
+        stubborn: {
+          command: process.execPath,
+          args: [serverPath],
+          env: {
+            FAKE_MCP_PID_FILE: pidFile,
+            FAKE_MCP_STARTED_FILE: startedFile,
+            FAKE_MCP_TERM_FILE: termFile,
           },
         },
-      }), "utf8");
+      },
+    }), "utf8");
 
-      const result = await mcp.probeMcpCapabilities(
+    const realSetTimeout = globalThis.setTimeout;
+    const sleep = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms));
+    const waitUntil = async (condition, what, deadline = Date.now() + 15_000) => {
+      while (!condition()) {
+        if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+        await sleep(10);
+      }
+    };
+    // Only the probe's two timers are captured: its deadline and the SIGTERM->SIGKILL grace.
+    const probeTimers = [];
+    globalThis.setTimeout = /** @type {typeof setTimeout} */ (/** @type {unknown} */ (
+      (/** @type {() => void} */ callback, /** @type {number} */ delay, /** @type {any[]} */ ...rest) => {
+        if (delay === 1000 || delay === 100) {
+          const entry = { callback, delay, fired: false };
+          probeTimers.push(entry);
+          return entry;
+        }
+        return Reflect.apply(realSetTimeout, globalThis, [callback, delay, ...rest]);
+      }
+    ));
+    const fire = (entry) => {
+      if (entry.fired) return;
+      entry.fired = true;
+      entry.callback();
+    };
+    // Reject after `ms` unless `promise` settles first; the fallback timer never outlives the race.
+    const raceBounded = (promise, ms, message) => {
+      let fallback;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          fallback = realSetTimeout(() => reject(new assert.AssertionError({ message })), ms);
+        }),
+      ]).finally(() => clearTimeout(fallback));
+    };
+    let pid = null;
+    let probeSettled = true;
+    try {
+      const probing = mcp.probeMcpCapabilities(
         mcp.collectConfiguredMcpServers(cwd, { homeDir }),
         { timeoutMs: 1000 }
       );
+      probeSettled = false;
+      probing.then(() => { probeSettled = true; }, () => { probeSettled = true; });
+      await waitUntil(() => probeTimers.some((entry) => entry.delay === 1000), "the probe deadline timer");
+      await waitUntil(() => fs.existsSync(startedFile), "fixture startup");
+      await waitUntil(() => fs.existsSync(pidFile), "fixture readiness", readinessDeadline());
+      pid = Number(fs.readFileSync(pidFile, "utf8"));
+      assert.ok(Number.isInteger(pid) && pid > 0);
+
+      fire(probeTimers.find((entry) => entry.delay === 1000));
+      await waitUntil(() => fs.existsSync(termFile), "SIGTERM acknowledgement");
+      process.kill(pid, 0); // still alive: SIGTERM was ignored
+
+      await waitUntil(() => probeTimers.some((entry) => entry.delay === 100), "the SIGKILL grace timer");
+      fire(probeTimers.find((entry) => entry.delay === 100));
+      const result = await raceBounded(probing, 10_000, "the probe did not finish after SIGKILL");
+
       assert.equal(result.diagnostics[0].code, "probe_timeout");
-      const pid = Number(fs.readFileSync(pidFile, "utf8"));
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await waitUntil(() => {
+        try { process.kill(pid, 0); return false; } catch (error) { return error.code === "ESRCH"; }
+      }, "SIGKILL to reap the server");
       assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      // Bounded cleanup on every path, including a failure before `pid` is known: run the
+      // probe's own SIGTERM -> SIGKILL escalation by firing its captured timers until the
+      // started probe settles, then kill the fixture's process group as a last resort.
+      const cleanupDeadline = Date.now() + 5_000;
+      while (!probeSettled && Date.now() < cleanupDeadline) {
+        for (let index = 0; index < probeTimers.length; index += 1) fire(probeTimers[index]);
+        await sleep(20);
+      }
+      let startedPid = pid;
+      try { startedPid ??= Number(fs.readFileSync(startedFile, "utf8")); } catch {}
+      for (const target of Number.isInteger(startedPid) && startedPid > 0 ? [-startedPid, startedPid] : []) {
+        try { process.kill(target, "SIGKILL"); } catch {}
+      }
+    }
+  }
+
+  for (const startupDelayMs of [0, 1500]) {
+    it(`escalates and reaps a stdio server that ignores SIGTERM (fixture starts ${startupDelayMs} ms late)`, async () => {
+      if (process.platform === "win32") return;
+      await withTempHome(({ homeDir, cwd }) => exerciseStubbornProbe({ homeDir, cwd, startupDelayMs }));
+    });
+  }
+
+  it("leaves no probe or fixture behind when fixture readiness is never published", async () => {
+    if (process.platform === "win32") return;
+    await withTempHome(async ({ homeDir, cwd }) => {
+      const realSetTimeout = globalThis.setTimeout;
+      const startedFile = path.join(homeDir, "stubborn.started");
+      try {
+        await assert.rejects(
+          exerciseStubbornProbe({ homeDir, cwd, publishReadiness: false, readinessDeadline: () => Date.now() + 400 }),
+          /timed out waiting for fixture readiness/
+        );
+        assert.equal(globalThis.setTimeout, realSetTimeout, "timer hooks must be restored");
+        const startedPid = Number(fs.readFileSync(startedFile, "utf8"));
+        assert.throws(() => process.kill(startedPid, 0), { code: "ESRCH" }, "the fixture must not outlive the test");
+      } finally {
+        // Test hygiene only: never leave the stubborn fixture running if the assertion above failed.
+        try { process.kill(-Number(fs.readFileSync(startedFile, "utf8")), "SIGKILL"); } catch {}
+      }
     });
   });
 

@@ -102,7 +102,18 @@ async function main() {
       process.exitCode = 1;
       return;
     }
+    if (process.env.CLAUDE_FAKE_AUTH_STATUS === "probe-failed") {
+      process.stderr.write("socket hang up\\n");
+      process.exitCode = 3;
+      return;
+    }
     process.stdout.write("authenticated\\n");
+    return;
+  }
+
+  if (process.env.CLAUDE_FAKE_UNKNOWN_OPTION && args.includes(process.env.CLAUDE_FAKE_UNKNOWN_OPTION)) {
+    process.stderr.write("error: unknown option '" + process.env.CLAUDE_FAKE_UNKNOWN_OPTION + "'\\n");
+    process.exitCode = 1;
     return;
   }
 
@@ -4786,6 +4797,131 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("does not recommend login when the authentication probe fails without proving a logout", () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-auth-probe-failed",
+      CLAUDE_FAKE_AUTH_STATUS: "probe-failed",
+    };
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      for (const args of [
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree"],
+        ["task", "--cwd", testEnv.workspaceDir, "--quiet-progress", "probe-failure delay=20"],
+      ]) {
+        const result = runCompanionExpectFailure(args, { env: sessionEnv });
+        assert.match(result.stderr, /login state is unknown/, args[0]);
+        assert.doesNotMatch(result.stderr, /auth login/, args[0]);
+      }
+
+      const setup = runCompanionJson(
+        ["setup", "--cwd", testEnv.workspaceDir, "--check", "--json"],
+        { env: sessionEnv }
+      );
+      assert.equal(setup.auth.state, "probe_failed");
+      assert.equal(setup.ready, false);
+      assert.equal(setup.nextSteps.some((step) => /auth login/.test(step)), false);
+      assert.equal(setup.nextSteps.some((step) => /claude auth status/.test(step)), true);
+
+      const unauthenticated = runCompanionJson(
+        ["setup", "--cwd", testEnv.workspaceDir, "--check", "--json"],
+        { env: { ...sessionEnv, CLAUDE_FAKE_AUTH_STATUS: "", CLAUDE_FAKE_AUTHENTICATED: "0" } }
+      );
+      assert.equal(unauthenticated.auth.state, "unauthenticated");
+      assert.equal(unauthenticated.nextSteps.some((step) => /claude auth login/.test(step)), true);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reports a proven subscription refusal separately from other API errors and quoted answers", () => {
+    const testEnv = createTestEnvironment();
+    const refusal =
+      "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access";
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-subscription-refusal",
+      CLAUDE_FAKE_RESULT_TEXT: refusal,
+      CLAUDE_FAKE_TERMINAL_REASON: "api_error",
+    };
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      const taskArgs = ["task", "--cwd", testEnv.workspaceDir, "--json", "--quiet-progress", "refusal delay=20"];
+
+      const refused = runCompanionExpectFailure(taskArgs, {
+        env: { ...sessionEnv, CLAUDE_FAKE_TERMINAL_IS_ERROR: "1" },
+      });
+      const refusedPayload = JSON.parse(refused.stdout);
+      assert.equal(refusedPayload.failure.kind, "claude_subscription_refused");
+      assert.equal(refusedPayload.failure.terminalCategory, "CLAUDE_API_ERROR");
+
+      const review = runCompanionExpectFailure(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree", "--json"],
+        { env: { ...sessionEnv, CLAUDE_FAKE_TERMINAL_IS_ERROR: "1" } }
+      );
+      const reviewPayload = JSON.parse(review.stdout);
+      assert.equal(reviewPayload.codex.failure.kind, "claude_subscription_refused");
+
+      const rendered = runCompanionExpectFailure(taskArgs.filter((arg) => arg !== "--json"), {
+        env: { ...sessionEnv, CLAUDE_FAKE_TERMINAL_IS_ERROR: "1" },
+      });
+      assert.match(rendered.stdout, /organization has disabled Claude subscription access/i);
+      assert.doesNotMatch(rendered.stdout, /auth login|usage limit/i);
+
+      const quoted = runCompanionJson(taskArgs, {
+        env: { ...sessionEnv, CLAUDE_FAKE_TERMINAL_IS_ERROR: "0", CLAUDE_FAKE_TERMINAL_REASON: "completed" },
+      });
+      assert.equal(quoted.status, "completed");
+      assert.equal(quoted.failure, null);
+
+      const generic = runCompanionExpectFailure(taskArgs, {
+        env: {
+          ...sessionEnv,
+          CLAUDE_FAKE_RESULT_TEXT: "The model returned an internal error",
+          CLAUDE_FAKE_TERMINAL_IS_ERROR: "1",
+        },
+      });
+      assert.equal(JSON.parse(generic.stdout).failure.kind, "claude_api_error");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("reports an unsupported required option once, with every protective flag still present", () => {
+    const testEnv = createTestEnvironment();
+    const invocationLog = path.join(testEnv.rootDir, "unsupported-invocations.ndjson");
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-unsupported-option",
+      CLAUDE_FAKE_UNKNOWN_OPTION: "--setting-sources",
+      CLAUDE_INVOCATION_LOG: invocationLog,
+    };
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      const result = runCompanionExpectFailure(
+        ["review", "--cwd", testEnv.workspaceDir, "--scope", "working-tree", "--json"],
+        { env: sessionEnv }
+      );
+
+      const payload = JSON.parse(result.stdout);
+      assert.equal(payload.codex.failure.kind, "claude_cli_unsupported");
+      assert.equal(payload.codex.failure.option, "--setting-sources");
+      const reviewAttempts = fs.readFileSync(invocationLog, "utf8").trim().split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((args) => args[0] === "-p");
+      assert.equal(reviewAttempts.length, 1, "the review must not be retried with weaker isolation");
+      for (const flag of ["--setting-sources", "--strict-mcp-config", "--tools", "--permission-mode", "--settings"]) {
+        assert.ok(reviewAttempts[0].includes(flag), `${flag} must stay on the command line`);
+      }
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("marks a throwing foreground failure as viewed", () => {
     const testEnv = createTestEnvironment();
     const sessionEnv = {
@@ -5835,6 +5971,56 @@ describe("claude-companion integration", () => {
       );
       assert.equal(statusPayload.job.status, "failed");
       assert.equal(fs.existsSync(reservePath), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("retries a failed launch only with a freshly reserved job id and the exact slash prompt", () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-retry-after-failed-launch",
+    };
+    const prompt = "/simplify make the output compact";
+    const taskArgs = (jobId) => [
+      "task", "--cwd", testEnv.workspaceDir, "--fresh", "--job-id", jobId,
+      "--view-state", "defer", "--quiet-progress", prompt,
+    ];
+
+    try {
+      const first = runCompanionJson(
+        ["background-routing-context", "--kind", "task", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+      const firstReservation = reservationPathFor(testEnv, first.jobId);
+      assert.equal(fs.existsSync(firstReservation), true);
+
+      // The launch fails before Claude starts (inconclusive auth probe) and releases the reservation.
+      const failed = runCompanionExpectFailure(taskArgs(first.jobId), {
+        env: { ...sessionEnv, CLAUDE_FAKE_AUTH_STATUS: "probe-failed" },
+      });
+      assert.match(failed.stderr, /login state is unknown/);
+      assert.equal(fs.existsSync(firstReservation), false);
+
+      // The released id is rejected and is not recreated.
+      const stale = runCompanionExpectFailure(taskArgs(first.jobId), { env: sessionEnv });
+      assert.match(stale.stderr, /is not reserved/);
+      assert.equal(fs.existsSync(firstReservation), false);
+
+      // A retry asks for a new id and forwards the prompt byte for byte.
+      const second = runCompanionJson(
+        ["background-routing-context", "--kind", "task", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+      assert.notEqual(second.jobId, first.jobId);
+      const retried = runCompanion(taskArgs(second.jobId), { env: sessionEnv });
+      assert.ok(
+        retried.stdout.split("\n").includes(`completed:${prompt}`),
+        `the prompt must arrive unchanged: ${retried.stdout}`
+      );
+      assert.equal(readStoredJobById(testEnv, second.jobId).status, "completed");
+      assert.equal(readStoredJobById(testEnv, second.jobId).ownerSessionId ?? readStoredJobById(testEnv, second.jobId).sessionId, "session-retry-after-failed-launch");
     } finally {
       cleanupTestEnvironment(testEnv);
     }

@@ -75,6 +75,8 @@ Background flow:
   `node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind review --json`
 - Treat the helper's non-empty `workspaceRoot` as the canonical workspace for the forwarding child. Pass it back as `--cwd "<workspaceRoot>"`; never substitute `<plugin-root>` or the child's default working directory.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
+- A reserved job id belongs to one launch attempt. After a failed launch, treat the id as spent: the companion may already have released it. Never reuse it, and never create or restore a reservation by hand.
+- To retry after a failed launch, run the `background-routing-context --kind review --json` helper again and use the new `jobId`. The companion rejects a released or unknown id with `is not reserved`; return that error unchanged.
 - Include the helper's `ownerSessionId` as `--owner-session-id <owner-session-id>` in the companion command.
 - If that helper fails with `SESSION_OWNER_REQUIRED`, no owning Codex session was found and no job id was reserved; surface that failure and do not spawn the child. Never leave an empty placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `parentThreadId`, pass it into the child prompt as the parent thread id for one-shot completion notification.

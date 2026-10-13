@@ -321,6 +321,10 @@ const CLAUDE_ERROR_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+(?:hit|reached)\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|\b429\b/i;
 const CLAUDE_AUTH_ERROR_RE =
   /\bnot (?:logged|signed) in\b|\bnot authenticated\b|\bauthentication required\b|\binvalid api key\b|\b(?:oauth|access) token\b.{0,80}\bexpired\b|\bclaude auth login\b/i;
+// Exact refusal observed from Claude Code when an organization disables subscription access.
+const CLAUDE_SUBSCRIPTION_REFUSAL_RE =
+  /\borganization has disabled Claude subscription access\b/i;
+const CLAUDE_UNKNOWN_OPTION_RE = /\berror: unknown option '(-{1,2}[A-Za-z0-9][\w-]*)'/;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
@@ -409,6 +413,36 @@ export function classifyClaudeFailure(value = {}) {
     return {
       kind: "claude_auth",
       message,
+      resetText: null,
+    };
+  }
+  // Both signals below need a real error: the result text of an API-error terminal
+  // event (`terminalErrorText`, never the merged streamed answer), or stderr from a
+  // command that failed before any terminal event. A successful answer, or a run that
+  // ends for another reason, is not a refusal just because its text quotes the message.
+  const failedBeforeTerminal = Boolean(
+    stderr &&
+      value.exitCode !== 0 &&
+      Number.isInteger(value.exitCode) &&
+      value.receivedTerminalEvent === false
+  );
+  if (
+    (typeof value.terminalErrorText === "string" &&
+      CLAUDE_SUBSCRIPTION_REFUSAL_RE.test(value.terminalErrorText)) ||
+    (failedBeforeTerminal && CLAUDE_SUBSCRIPTION_REFUSAL_RE.test(stderr))
+  ) {
+    return {
+      kind: "claude_subscription_refused",
+      message,
+      resetText: null,
+    };
+  }
+  const unknownOption = failedBeforeTerminal ? CLAUDE_UNKNOWN_OPTION_RE.exec(stderr) : null;
+  if (unknownOption) {
+    return {
+      kind: "claude_cli_unsupported",
+      message,
+      option: unknownOption[1],
       resetText: null,
     };
   }
@@ -600,35 +634,105 @@ function assertProtectedReviewSupport(cwd) {
   throw Object.assign(
     new Error(
       `CLAUDE_REVIEW_UNSUPPORTED: Protected reviews require Claude Code CLI ${MIN_PROTECTED_REVIEW_CLAUDE_VERSION} or later (${detail}). ` +
-        "Update Claude Code and retry; the review was not started."
+        "The review did not start. An operator must update Claude Code; the plugin does not retry with weaker isolation."
     ),
     { code: "CLAUDE_REVIEW_UNSUPPORTED" }
   );
 }
 
+/**
+ * Probe `claude auth status`. `state` separates a confirmed logout
+ * ("unauthenticated") from probe failures that prove nothing about the login:
+ * "timeout", "spawn_failed" and "probe_failed". `loggedIn` is true only for
+ * "authenticated" and "api_key".
+ */
 export function getClaudeAuthStatus(cwd) {
   if (process.env.ANTHROPIC_API_KEY) {
-    return { available: true, loggedIn: true, detail: "API key configured" };
+    return { available: true, loggedIn: true, state: "api_key", detail: "API key configured" };
   }
-  try {
-    const command = resolveClaudeCommand();
-    if (command.error) {
-      return { available: false, loggedIn: false, detail: command.error };
-    }
-    const result = spawnSync(command.executable, [...command.prefixArgs, "auth", "status"], {
-      cwd,
-      encoding: "utf8",
-      timeout: 10_000,
-      windowsHide: true,
-    });
-    if (result.status !== 0) throw new Error("not authenticated");
-    return { available: true, loggedIn: true, detail: "authenticated" };
-  } catch {
+  const command = resolveClaudeCommand();
+  if (command.error) {
+    return { available: false, loggedIn: false, state: "spawn_failed", detail: command.error };
+  }
+  const result = spawnSync(command.executable, [...command.prefixArgs, "auth", "status"], {
+    cwd,
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  const spawnError = /** @type {NodeJS.ErrnoException | undefined} */ (result.error);
+  if (spawnError?.code === "ETIMEDOUT") {
     return {
       available: true,
       loggedIn: false,
+      state: "timeout",
+      detail: "`claude auth status` did not finish within 10 seconds",
+    };
+  }
+  if (spawnError) {
+    return {
+      available: false,
+      loggedIn: false,
+      state: "spawn_failed",
+      detail: `claude CLI could not be started (${spawnError.code ?? spawnError.message})`,
+    };
+  }
+  const stdout = String(result.stdout ?? "");
+  let reported = null;
+  try {
+    reported = JSON.parse(stdout);
+  } catch {}
+  if (
+    reported?.loggedIn === false ||
+    (result.status !== 0 && CLAUDE_AUTH_ERROR_RE.test(`${stdout}\n${result.stderr ?? ""}`))
+  ) {
+    return {
+      available: true,
+      loggedIn: false,
+      state: "unauthenticated",
       detail: "not authenticated — run `claude auth login`",
     };
+  }
+  if (result.status === 0) {
+    return { available: true, loggedIn: true, state: "authenticated", detail: "authenticated" };
+  }
+  return {
+    available: true,
+    loggedIn: false,
+    state: "probe_failed",
+    detail: `\`claude auth status\` failed (${result.status === null ? `signal ${result.signal}` : `exit ${result.status}`})`,
+  };
+}
+
+/**
+ * Turn a failed `getClaudeAuthStatus` result into a stable code and a message
+ * that recommends `claude auth login` only for a confirmed logout.
+ */
+export function claudeAuthProblem(status) {
+  if (status.loggedIn) return null;
+  switch (status.state) {
+    case "unauthenticated":
+      return {
+        code: "CLAUDE_AUTH",
+        message: "Claude Code CLI is not authenticated. Run `claude auth login` and retry.",
+      };
+    case "timeout":
+      return {
+        code: "CLAUDE_AUTH_PROBE_TIMEOUT",
+        message:
+          "The Claude Code authentication check timed out, so the login state is unknown. Run `claude auth status`, then retry.",
+      };
+    case "probe_failed":
+      return {
+        code: "CLAUDE_AUTH_PROBE_FAILED",
+        message: `The Claude Code authentication check failed, so the login state is unknown (${status.detail}). Run \`claude auth status\` to see why, then retry.`,
+      };
+    default:
+      return {
+        code: "CLAUDE_UNAVAILABLE",
+        message:
+          "Claude Code CLI is not installed or is missing required runtime support. Install it, then rerun `$cc:setup`.",
+      };
   }
 }
 
@@ -646,6 +750,7 @@ export class StreamParser {
       terminalSubtype: null,
       terminalReason: null,
       terminalIsError: null,
+      terminalResultText: "",
       receivedTerminalEvent: false,
       unknownEvents: [],
       parseErrors: [],
@@ -741,6 +846,9 @@ export class StreamParser {
             typeof event.terminal_reason === "string" ? event.terminal_reason : null;
           this.state.terminalIsError =
             typeof event.is_error === "boolean" ? event.is_error : null;
+          // Kept apart from finalMessage, which merges streamed answer text.
+          this.state.terminalResultText =
+            typeof event.result === "string" ? event.result : "";
           {
             const terminalModel = normalizeObservedModel(
               extractRawObservedModel(event)
@@ -1737,6 +1845,12 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalMessage: parser.state.finalMessage,
         finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
         finalMessageHasAuthSignal: parser.state.hasTerminalAuthSignal,
+        // Only an API-error terminal's own result text can prove a refusal.
+        terminalErrorText:
+          parser.state.terminalIsError === true &&
+          validation.failure?.terminalCategory === "CLAUDE_API_ERROR"
+            ? parser.state.terminalResultText
+            : "",
         stderr,
         exitCode: code ?? 1,
         receivedTerminalEvent: parser.state.receivedTerminalEvent,
@@ -1744,11 +1858,16 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       if (detectedFailure && validation.status !== "failed") {
         validation = { status: "failed" };
       }
-      const failure = validation.failure &&
+      let failure = validation.failure &&
         !parser.state.hasTerminalLimitSignal &&
         !parser.state.hasTerminalAuthSignal
         ? validation.failure
         : detectedFailure ?? validation.failure ?? null;
+      // A proven refusal is more specific than the generic terminal API error;
+      // keep the terminal category so job metadata stays complete.
+      if (detectedFailure?.kind === "claude_subscription_refused" && validation.failure) {
+        failure = { ...validation.failure, ...detectedFailure };
+      }
       if (
         requestedModel &&
         finalModel &&

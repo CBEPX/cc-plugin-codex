@@ -27,6 +27,7 @@ Background contract:
 - Use `background-routing-context --kind review --json` from the parent user workspace before spawning the forwarding child.
 - Pass the helper's exact non-empty `workspaceRoot` back to the child as `--cwd "<workspaceRoot>"`; this keeps the reservation and job in the same workspace state.
 - Preserve `--job-id` only when reserved by the parent helper.
+- Run the review command once with that `--job-id`. After a failure, treat the id as spent: the companion may already have released it. Do not run the command again with the same id. Return the failure; the parent reserves a new id before any retry.
 - Preserve the `--owner-session-id` the parent helper returned. The helper fails with `SESSION_OWNER_REQUIRED` instead of returning an empty owner; surface that failure and do not spawn the child.
 - Preserve the parent notification path only when the helper returned a non-empty parent thread id.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.

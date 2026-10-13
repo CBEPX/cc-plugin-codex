@@ -419,7 +419,23 @@ export function renderReviewResult(parsedResult, meta) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+/** One-line headline for failures whose cause is proven and needs a specific action, or null. */
+export function describeProvenClaudeFailure(failure) {
+  if (failure?.kind === "claude_subscription_refused") {
+    return "Your organization has disabled Claude subscription access for Claude Code. Set ANTHROPIC_API_KEY to use an Anthropic API key, or ask your administrator to enable access.";
+  }
+  if (failure?.kind === "claude_cli_unsupported") {
+    return `The installed Claude Code CLI does not support the required option ${failure.option}. An operator must update Claude Code. The plugin did not retry without it.`;
+  }
+  return null;
+}
+
 export function renderTaskResult(parsedResult) {
+  const proven = describeProvenClaudeFailure(parsedResult?.failure);
+  if (proven) {
+    const original = String(parsedResult.failure.message ?? "").trim();
+    return [proven, original ? `\nOriginal Claude message:\n${original}` : "", ""].join("\n");
+  }
   if (parsedResult?.failure?.kind === "claude_auth") {
     const original = String(parsedResult.failure.message ?? "").trim();
     return [
@@ -595,7 +611,12 @@ export function renderJobStatusReport(job, platform = process.platform) {
   pushKeyValueTableRow(lines, "Status", job.status ?? "unknown");
   pushKeyValueTableRow(lines, "Phase", job.phase ?? "");
   pushKeyValueTableRow(lines, "Summary", job.summary ?? "");
-  pushKeyValueTableRow(lines, "Failure", job.failure?.terminalCategory ?? job.failure?.kind ?? "");
+  pushKeyValueTableRow(
+    lines,
+    "Failure",
+    (describeProvenClaudeFailure(job.failure) ? job.failure.kind : job.failure?.terminalCategory) ??
+      job.failure?.kind ?? ""
+  );
   pushKeyValueTableRow(lines, "Failure detail", job.failure?.message ?? job.errorMessage ?? "");
   pushKeyValueTableRow(lines, "Requested model", job.requestedModel ?? "");
   pushKeyValueTableRow(lines, "Final model", job.finalModel ?? "");

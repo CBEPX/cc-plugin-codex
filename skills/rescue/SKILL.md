@@ -74,6 +74,8 @@ Subagent launch:
 - Include the helper's `ownerSessionId` as `--owner-session-id <owner-session-id>` in the companion command so tracked Claude Code jobs stay attached to the user-facing parent session for `$cc:status` / `$cc:result`.
 - If that helper fails with `SESSION_OWNER_REQUIRED`, no owning Codex session was found and no job id was reserved; surface that failure and do not spawn the child. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
+- A reserved job id belongs to one launch attempt. After a failed launch, treat the id as spent: the companion may already have released it. Never reuse it, and never create or restore a reservation by hand.
+- To retry after a failed launch, run `background-routing-context --kind task --json` again and use the new `jobId`. The companion rejects a released or unknown id with `is not reserved`; return that error unchanged.
 - Add an internal companion routing flag that reflects whether the user will see this result in the current turn:
   - Foreground rescue must add `--view-state on-terminal`
   - Background rescue must add `--view-state defer`

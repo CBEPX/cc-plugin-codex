@@ -43,6 +43,7 @@ import {
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
+  claudeAuthProblem,
   runClaudeTurn,
   runClaudeReview,
   runClaudeAdversarialReview,
@@ -172,6 +173,7 @@ import {
   workflowNotificationEvent,
 } from "./lib/workflows.mjs";
 import {
+  describeProvenClaudeFailure,
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
@@ -199,7 +201,12 @@ const PEER_FAILURE_CODES = new Set([
   "ATTEMPT_LEASE_REFLECTION",
   "BRIEF_HASH_MISMATCH",
   "CLAUDE_AUTH",
+  "CLAUDE_AUTH_PROBE_FAILED",
+  "CLAUDE_AUTH_PROBE_TIMEOUT",
+  "CLAUDE_CLI_UNSUPPORTED",
   "CLAUDE_RATE_LIMIT",
+  "CLAUDE_SUBSCRIPTION_REFUSED",
+  "CLAUDE_UNAVAILABLE",
   "CLAUDE_TURN_FAILED",
   "COMMITMENT_MISMATCH",
   "COMPLETED_STAGE_IMMUTABLE",
@@ -596,6 +603,10 @@ function firstMeaningfulLine(text, fallback) {
 }
 
 function formatClaudeFailureSummary(failure, fallback) {
+  const proven = describeProvenClaudeFailure(failure);
+  if (proven) {
+    return proven;
+  }
   if (failure?.kind === "claude_auth") {
     return "Claude Code authentication failed; run `claude auth login`.";
   }
@@ -611,6 +622,10 @@ function formatClaudeFailureSummary(failure, fallback) {
 }
 
 function renderBoundedClaudeReviewFailure(result) {
+  const proven = result?.status === "failed" ? describeProvenClaudeFailure(result.failure) : null;
+  if (proven) {
+    return `${proven}\n`;
+  }
   if (
     result?.status !== "failed" ||
     result.exitCode !== 0 ||
@@ -972,16 +987,9 @@ function checkHooksStatus() {
 }
 
 function ensureClaudeReady(cwd) {
-  const authStatus = getClaudeAuthStatus(cwd);
-  if (!authStatus.available) {
-    throw new Error(
-      "Claude Code CLI is not installed or is missing required runtime support. Install it, then rerun `$cc:setup`."
-    );
-  }
-  if (!authStatus.loggedIn) {
-    throw new Error(
-      "Claude Code CLI is not authenticated. Run `claude auth login` and retry."
-    );
+  const problem = claudeAuthProblem(getClaudeAuthStatus(cwd));
+  if (problem) {
+    throw Object.assign(new Error(problem.message), { code: problem.code });
   }
 }
 
@@ -1014,8 +1022,12 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null, options = {}
   if (!claudeStatus.available) {
     nextSteps.push("Install Claude Code CLI.");
   }
-  if (claudeStatus.available && !authStatus.loggedIn) {
+  if (claudeStatus.available && authStatus.state === "unauthenticated") {
     nextSteps.push("Run `claude auth login`.");
+  } else if (claudeStatus.available && !authStatus.loggedIn && authStatus.available) {
+    nextSteps.push(
+      `Run \`claude auth status\` to check the login state, then rerun \`$cc:setup\` (${authStatus.detail}).`
+    );
   }
   if (!hooksStatus.installed) {
     nextSteps.push(
@@ -3612,6 +3624,16 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       }
       if (result.failure?.kind === "claude_rate_limit") {
         throw Object.assign(new Error("CLAUDE_RATE_LIMIT"), { code: "CLAUDE_RATE_LIMIT" });
+      }
+      if (result.failure?.kind === "claude_subscription_refused") {
+        throw Object.assign(new Error("CLAUDE_SUBSCRIPTION_REFUSED"), {
+          code: "CLAUDE_SUBSCRIPTION_REFUSED",
+        });
+      }
+      if (result.failure?.kind === "claude_cli_unsupported") {
+        throw Object.assign(new Error("CLAUDE_CLI_UNSUPPORTED"), {
+          code: "CLAUDE_CLI_UNSUPPORTED",
+        });
       }
       if (result.failure?.terminalCategory) {
         throw Object.assign(
