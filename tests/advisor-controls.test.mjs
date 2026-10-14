@@ -14,6 +14,7 @@ import { afterEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import * as cli from "../scripts/lib/claude-cli.mjs";
+import { isProcessAlive } from "../scripts/lib/process.mjs";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMPANION = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
@@ -60,7 +61,7 @@ function git(cwd, ...args) {
 
 function createEnvironment() {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-advisor-controls-"));
-  cleanups.push(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  cleanups.push(() => fs.rmSync(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const homeDir = path.join(rootDir, "home");
   const binDir = path.join(rootDir, "bin");
   const workspaceDir = path.join(rootDir, "workspace");
@@ -155,6 +156,20 @@ function storedJobs(testEnv) {
     .filter((name) => name.endsWith(".json"))
     .map((name) => ({ file: path.join(jobsDir, name), job: JSON.parse(fs.readFileSync(path.join(jobsDir, name), "utf8")) }))
     .sort((a, b) => String(a.job.createdAt).localeCompare(String(b.job.createdAt)));
+}
+
+function waitForDetachedJob(testEnv, launch) {
+  const { jobId } = JSON.parse(launch.stdout);
+  const workerPid = storedJobs(testEnv).find(({ job }) => job.id === jobId)?.job.workerPid;
+  const terminal = runCompanion(testEnv, ["status", jobId, "--wait", "--wait-timeout-ms", "30000", "--json"]);
+  assert.equal(terminal.status, 0, terminal.stderr);
+  assert.equal(JSON.parse(terminal.stdout).job.status, "completed");
+  // Terminal state can precede the detached worker's final log close.
+  const deadline = Date.now() + 30_000;
+  while (Number.isInteger(workerPid) && workerPid > 0 && isProcessAlive(workerPid)) {
+    assert.ok(Date.now() < deadline, "detached worker did not exit before cleanup");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
 }
 
 describe("advisor policy primitives", () => {
@@ -334,8 +349,7 @@ describe("task advisor policy", () => {
     task(testEnv, ["--fresh", "--advisor", "Fable"]);
     const background = runCompanion(testEnv, [...taskArgs(testEnv, ["--fresh", "--background", "--advisor", "off"]), "--json"]);
     assert.equal(background.status, 0, background.stderr);
-    const deadline = Date.now() + 20_000;
-    while (turnsOf(testEnv).length < 2 && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    waitForDetachedJob(testEnv, background);
     const requests = storedJobs(testEnv).map(({ job }) => job.request?.advisor);
     assert.deepEqual(requests, ["fable", "off"]);
     assert.equal(turnsOf(testEnv)[1].disable, "1", "the detached worker must forward the stored policy");
@@ -477,8 +491,7 @@ describe("review advisor policy", () => {
     const testEnv = createEnvironment();
     const result = runCompanion(testEnv, ["adversarial-review", "--scope", "working-tree", "--background", "--advisor", "off", "--json"]);
     assert.equal(result.status, 0, result.stderr);
-    const deadline = Date.now() + 30_000;
-    while (turnsOf(testEnv).length < 1 && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    waitForDetachedJob(testEnv, result);
     assert.equal(storedJobs(testEnv)[0].job.request.advisor, "off");
     assert.equal(turnsOf(testEnv)[0].disable, "1");
   });
