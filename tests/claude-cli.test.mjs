@@ -3059,7 +3059,7 @@ describe("protected review isolation", () => {
 
   it(
     "projects deny and ask rules from the original linked worktree, primary local settings and reviewed tree",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
       const primary = path.join(tmpDir, "primary");
       initRepo(primary);
       writeSettings(primary, "settings.json", {
@@ -3084,6 +3084,15 @@ describe("protected review isolation", () => {
 
       const reviewed = path.join(tmpDir, "reviewed");
       git(primary, "worktree", "add", "--detach", reviewed, "feature");
+
+      if (process.platform === "win32") {
+        await assert.rejects(
+          runClaudeReview(reviewed, "prompt", { originalCwd: original }),
+          { code: "PROJECT_SETTINGS_UNSUPPORTED", message: /Windows drive, UNC or backslash path/ }
+        );
+        assert.equal(launchedReview(invocations), false);
+        return;
+      }
 
       const result = await runClaudeReview(reviewed, "prompt", { originalCwd: original });
       const { cwd, args } = JSON.parse(result.result);
@@ -3182,12 +3191,21 @@ describe("protected review isolation", () => {
 
   it(
     "keeps a rule that exists only in the reviewed subdirectory settings",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
       const { sub, reviewed } = relocatedSubdirFixture(
         tmpDir,
         { permissions: { deny: ["Read(/reviewed-only.txt)"] } },
         { permissions: { deny: [] } }
       );
+
+      if (process.platform === "win32") {
+        await assert.rejects(
+          runClaudeReview(reviewed, "prompt", { originalCwd: sub }),
+          { code: "PROJECT_SETTINGS_UNSUPPORTED", message: /Windows drive, UNC or backslash path/ }
+        );
+        assert.equal(launchedReview(invocations), false);
+        return;
+      }
 
       const { args } = JSON.parse((await runClaudeReview(reviewed, "prompt", { originalCwd: sub })).result);
       const realReviewed = fs.realpathSync.native(reviewed);
@@ -3247,7 +3265,7 @@ describe("protected review isolation", () => {
 
   it(
     "keeps subdirectory rules anchored at the matching reviewed subdirectory after relocation",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       const sub = path.join(repo, "sub");
@@ -3256,6 +3274,15 @@ describe("protected review isolation", () => {
       git(repo, "commit", "-m", "subdirectory settings");
       const reviewed = path.join(tmpDir, "reviewed");
       git(repo, "worktree", "add", "--detach", reviewed, "HEAD");
+
+      if (process.platform === "win32") {
+        await assert.rejects(
+          runClaudeReview(reviewed, "prompt", { originalCwd: sub }),
+          { code: "PROJECT_SETTINGS_UNSUPPORTED", message: /Windows drive, UNC or backslash path/ }
+        );
+        assert.equal(launchedReview(invocations), false);
+        return;
+      }
 
       const { args } = JSON.parse((await runClaudeReview(reviewed, "prompt", { originalCwd: sub })).result);
       const realSub = fs.realpathSync.native(sub);

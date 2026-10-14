@@ -379,7 +379,14 @@ function readManagedStateText(testEnv) {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const candidate = path.join(current, entry.name);
       if (entry.isDirectory()) visit(candidate);
-      else if (entry.isFile()) values.push(fs.readFileSync(candidate, "utf8"));
+      else if (entry.isFile()) {
+        try {
+          values.push(fs.readFileSync(candidate, "utf8"));
+        } catch (error) {
+          // A worker can release its transient lock after directory enumeration.
+          if (!candidate.endsWith(".lock") || /** @type {NodeJS.ErrnoException} */ (error).code !== "ENOENT") throw error;
+        }
+      }
     }
   };
   visit(root);

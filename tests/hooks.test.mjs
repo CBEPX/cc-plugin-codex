@@ -3034,23 +3034,25 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
         session_id: "hook-session",
         last_assistant_message: "review me",
       }));
-      const until = async (file) => {
+      const until = async (ready, description) => {
         const deadline = Date.now() + 15_000;
-        while (!fs.existsSync(file)) {
-          assert.ok(Date.now() < deadline, `timed out waiting for ${file}`);
+        while (!ready()) {
+          assert.ok(Date.now() < deadline, `timed out waiting for ${description}`);
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
       };
       try {
         // Window 1: the protected-review version guard is running; no Claude review exists yet.
-        await until(`${versionBarrier}.reached`);
+        await until(() => fs.existsSync(`${versionBarrier}.reached`), "version guard");
         let snapshot = readStopReviewSnapshot(testEnv);
         assert.equal(snapshot.status, "running_claude_review");
         assert.equal(snapshot.claudeInvoked, false);
         fs.writeFileSync(`${versionBarrier}.release`, "1");
 
         // Window 2: the review process is running now.
-        await until(`${runBarrier}.reached`);
+        await until(() => fs.existsSync(`${runBarrier}.reached`), "review child");
+        // Child execution can precede the parent onSpawn callback and snapshot write.
+        await until(() => readStopReviewSnapshot(testEnv)?.claudeInvoked === true, "spawn snapshot");
         snapshot = readStopReviewSnapshot(testEnv);
         assert.equal(snapshot.status, "running_claude_review");
         assert.equal(snapshot.claudeInvoked, true);
