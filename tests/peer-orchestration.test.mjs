@@ -100,12 +100,40 @@ describe("peer skill argument routing", () => {
       model: "fable",
       fallbackModel: "opus",
       effort: null,
+      advisor: "inherit",
       codexModel: null,
       codexEffort: "xhigh",
       userMcpTools: ["mcp__docs__search", "mcp__issues__read"],
       allowProjectMcpServers: true,
       noAutoTools: false,
     });
+  });
+
+  it("normalizes the advisor policy for a new run and defaults to inherit", () => {
+    const advisorOf = (...flags) => parsePeerArguments("research", [...flags, "compare", "sources"]).advisor;
+    assert.equal(advisorOf(), "inherit");
+    assert.equal(advisorOf("--advisor", "inherit"), "inherit");
+    assert.equal(advisorOf("--advisor", "Off"), "off");
+    assert.equal(advisorOf("--advisor", "Fable"), "fable");
+    assert.equal(advisorOf("--advisor=claude-fable-5-1"), "claude-fable-5-1");
+    for (const bad of ["bad value", "--model", "fable;x"]) {
+      assert.throws(() => advisorOf(`--advisor=${bad}`), /advisor/i, bad);
+    }
+    assert.throws(() => advisorOf("--advisor="), /advisor/i);
+  });
+
+  it("rejects replacing the frozen advisor policy at continuation or retry", () => {
+    for (const argv of [
+      ["--continue", "workflow-1", "--advisor", "off"],
+      ["--continue", "workflow-1", "--advisor", "inherit"],
+      ["--retry", "workflow-1", "--advisor", "fable"],
+    ]) {
+      assert.throws(
+        () => parsePeerArguments("design", argv),
+        (/** @type {any} */ error) => error.code === "CONFLICTING_PEER_ACTION" && /--advisor/.test(error.message),
+        argv.join(" ")
+      );
+    }
   });
 
   it("parses continue feedback and retry while rejecting every conflicting form", () => {

@@ -241,6 +241,20 @@ function appendModelFallbackSuffix(suffix, events, output = "") {
   return next;
 }
 
+/** One line for bounded advisor telemetry; empty for records without it. */
+export function formatAdvisorTelemetry(advisor) {
+  if (!advisor || typeof advisor !== "object" || !Number.isSafeInteger(advisor.calls) || advisor.calls < 0) {
+    return "";
+  }
+  const calls = `${advisor.calls} call${advisor.calls === 1 ? "" : "s"}`;
+  const incomplete = advisor.status === "incomplete";
+  return [
+    `${typeof advisor.requested === "string" ? advisor.requested : "inherit"} requested`,
+    incomplete ? `at least ${calls} observed (count incomplete)` : advisor.calls > 0 ? `${calls} observed` : "no calls observed",
+    advisor.calls > 0 || incomplete ? "advisor model not reported" : null,
+  ].filter(Boolean).join("; ");
+}
+
 function isPendingJob(job) {
   return (
     job?.status === "queued" ||
@@ -356,6 +370,9 @@ export function renderSetupReport(report) {
     `- hooks: ${report.hooks.detail}`,
     ...(report.hookTrust ? [`- hook trust: ${report.hookTrust.detail}`] : []),
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    ...(report.stopReviewAdvisor
+      ? [`- stop-review advisor: ${report.stopReviewAdvisor}${report.stopReviewAdvisorProblem ? ` (${report.stopReviewAdvisorProblem})` : ""}`]
+      : []),
     ...(report.diagnostics
       ? [
           `- plugin: ${report.diagnostics.pluginVersion ?? "unknown"} (${report.diagnostics.runtimeSource})`,
@@ -419,7 +436,23 @@ export function renderReviewResult(parsedResult, meta) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+/** One-line headline for failures whose cause is proven and needs a specific action, or null. */
+export function describeProvenClaudeFailure(failure) {
+  if (failure?.kind === "claude_subscription_refused") {
+    return "Your organization has disabled Claude subscription access for Claude Code. Set ANTHROPIC_API_KEY to use an Anthropic API key, or ask your administrator to enable access.";
+  }
+  if (failure?.kind === "claude_cli_unsupported") {
+    return `The installed Claude Code CLI does not support the required option ${failure.option}. An operator must update Claude Code. The plugin did not retry without it.`;
+  }
+  return null;
+}
+
 export function renderTaskResult(parsedResult) {
+  const proven = describeProvenClaudeFailure(parsedResult?.failure);
+  if (proven) {
+    const original = String(parsedResult.failure.message ?? "").trim();
+    return [proven, original ? `\nOriginal Claude message:\n${original}` : "", ""].join("\n");
+  }
   if (parsedResult?.failure?.kind === "claude_auth") {
     const original = String(parsedResult.failure.message ?? "").trim();
     return [
@@ -524,6 +557,8 @@ function renderWorkflowDetails(workflow, options = {}) {
       claudeModel.finalModel ?? "unknown",
       formatModelFallbacks(claudeModel.modelFallbacks),
     ]);
+    const advisor = formatAdvisorTelemetry(claudeModel.advisor);
+    if (advisor) modelRows.push(["claude advisor actual", claudeModel.advisor.requested ?? "inherit", advisor, ""]);
   }
   if (modelRows.length > 0) {
     lines.push("", "Models:", "", "| Role | Requested | Resolved/final | Fallbacks |", "| --- | --- | --- | --- |");
@@ -595,11 +630,17 @@ export function renderJobStatusReport(job, platform = process.platform) {
   pushKeyValueTableRow(lines, "Status", job.status ?? "unknown");
   pushKeyValueTableRow(lines, "Phase", job.phase ?? "");
   pushKeyValueTableRow(lines, "Summary", job.summary ?? "");
-  pushKeyValueTableRow(lines, "Failure", job.failure?.terminalCategory ?? job.failure?.kind ?? "");
+  pushKeyValueTableRow(
+    lines,
+    "Failure",
+    (describeProvenClaudeFailure(job.failure) ? job.failure.kind : job.failure?.terminalCategory) ??
+      job.failure?.kind ?? ""
+  );
   pushKeyValueTableRow(lines, "Failure detail", job.failure?.message ?? job.errorMessage ?? "");
   pushKeyValueTableRow(lines, "Requested model", job.requestedModel ?? "");
   pushKeyValueTableRow(lines, "Final model", job.finalModel ?? "");
   pushKeyValueTableRow(lines, "Context window", job.contextWindow ?? "");
+  pushKeyValueTableRow(lines, "Advisor", formatAdvisorTelemetry(job.advisor));
   pushKeyValueTableRow(lines, "Started", job.startedAt ?? "");
   pushKeyValueTableRow(lines, "Ended", job.completedAt ?? "");
   if (isPendingJob(job)) pushKeyValueTableRow(lines, "Elapsed", job.elapsed ?? "");

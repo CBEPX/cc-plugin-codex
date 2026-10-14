@@ -1,6 +1,6 @@
 ---
 name: rescue
-description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --wait-timeout-ms <ms>, --prompt-file <path>, [task text]. Defaults to opus + xhigh effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
+description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model|opus|sonnet|haiku|fable>, --effort <low|medium|high|xhigh|max>, --advisor <inherit|off|alias-or-id>, --wait-timeout-ms <ms>, --prompt-file <path>, [task text]. Defaults to opus + xhigh effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
 ---
 
 # Claude Code Rescue
@@ -21,7 +21,7 @@ Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the 
 Raw slash-command arguments:
 `$ARGUMENTS`
 
-Supported arguments: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--wait-timeout-ms <ms>`, deprecated alias `--timeout-ms <ms>`, `--prompt-file <path>`, plus free-text task text
+Supported arguments: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model|opus|sonnet|haiku|fable>`, `--effort <low|medium|high|xhigh|max>`, `--advisor <inherit|off|alias-or-id>`, `--wait-timeout-ms <ms>`, deprecated alias `--timeout-ms <ms>`, `--prompt-file <path>`, plus free-text task text
 
 Main-thread routing rules:
 - If the user explicitly invoked `$cc:rescue` or `Claude Code Rescue`, do not keep the work in the main Codex thread. Delegate it.
@@ -29,9 +29,13 @@ Main-thread routing rules:
 - Treat `--background` and `--wait` as execution controls, not task text.
 - `--background` and `--wait` are Codex-side execution controls only. Never forward either flag to `claude-companion.mjs task`.
 - The main Codex thread owns that execution-mode choice. It decides whether to wait for the subagent. The child subagent must never reinterpret those flags as companion flags.
-- Treat `--model`, `--effort`, `--wait-timeout-ms`, deprecated alias `--timeout-ms`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime or routing controls, not task text.
+- Treat `--model`, `--effort`, `--advisor`, `--wait-timeout-ms`, deprecated alias `--timeout-ms`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime or routing controls, not task text.
 - If the user task text itself begins with a slash command such as `/simplify`, `/fix`, or `/review`, treat that slash command as literal Claude Code task text to be forwarded unchanged. Do not execute or reinterpret it in the parent Codex thread.
 - `--model` selects the Claude model for the companion `task` command only. It does not select the Codex subagent model.
+- `--advisor` sets the Claude advisor policy for the companion `task` command only. Forward a user-supplied value unchanged. Never add `--advisor` when the user did not supply it.
+- The default policy is `inherit`: Claude Code uses its own settings. `off` turns the advisor tool off for this run only. An alias or a model ID needs Claude Code 2.1.293 or later.
+- With `--resume` or `--resume-last`, omit `--advisor` to keep the policy of the original task. `--advisor inherit` resets the policy.
+- If the companion refuses the advisor, return the refusal unchanged. Do not retry without `--advisor`.
 - If the user explicitly passed `--background`, run the rescue subagent in the background.
 - If the user explicitly passed `--wait`, run in the foreground.
 - If neither flag is present and the rescue request is small, clearly bounded, or likely to finish quickly, prefer foreground.
@@ -74,10 +78,12 @@ Subagent launch:
 - Include the helper's `ownerSessionId` as `--owner-session-id <owner-session-id>` in the companion command so tracked Claude Code jobs stay attached to the user-facing parent session for `$cc:status` / `$cc:result`.
 - If that helper fails with `SESSION_OWNER_REQUIRED`, no owning Codex session was found and no job id was reserved; surface that failure and do not spawn the child. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
+- A reserved job id belongs to one launch attempt. After a failed launch, treat the id as spent: the companion may already have released it. Never reuse it, and never create or restore a reservation by hand.
+- To retry after a failed launch, run `background-routing-context --kind task --json` again and use the new `jobId`. The companion rejects a released or unknown id with `is not reserved`; return that error unchanged.
 - Add an internal companion routing flag that reflects whether the user will see this result in the current turn:
   - Foreground rescue must add `--view-state on-terminal`
   - Background rescue must add `--view-state defer`
-- Any user-supplied `--model` flag is for the Claude companion only and must be forwarded unchanged to `task`.
+- Any user-supplied `--model` or `--advisor` flag is for the Claude companion only and must be forwarded unchanged to `task`.
 - If that helper returns a non-empty `parentThreadId`, pass it into the child prompt as the parent thread id for one-shot completion notification.
 - If it returns an empty `parentThreadId`, continue without parent wake-up instead of blocking the rescue.
 - This parent wake-up attempt is now the default for background built-in rescue on persistent Codex/Desktop threads. It is still best-effort and should silently degrade on one-shot `codex exec` runs.

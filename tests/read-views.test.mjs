@@ -7,7 +7,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, it } from "node:test";
+import { afterEach, it, mock } from "node:test";
+import { exportReadPayload } from "../scripts/lib/read-views.mjs";
 import { writeJobFile, readJobFile, resolveStateDir, setCurrentSession } from "../scripts/lib/state.mjs";
 import { buildInitialAgentPlan, buildRetryAgentPlan, buildContinuationAgentPlan } from "../scripts/lib/peer-orchestration.mjs";
 import { reserveWorkflow, resolveWorkflowsDir } from "../scripts/lib/workflows.mjs";
@@ -331,4 +332,54 @@ fs.readFileSync = function(file, ...args) {
     } else assert.match(result.stdout, /selected answer/u);
     assert.equal(readJobFile(root, job.id), null);
   }
+});
+
+function exportTarget() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-export-"));
+  cleanup.push(dir);
+  return path.join(dir, "out.json");
+}
+
+it("closes the descriptor and leaves the file when fstat fails after the exclusive open", () => {
+  const output = exportTarget();
+  let openedFd = null;
+  const realOpen = fs.openSync;
+  mock.method(fs, "openSync", (/** @type {[string, string, number]} */ ...args) => (openedFd = realOpen(...args)));
+  mock.method(fs, "fstatSync", () => { throw Object.assign(new Error("fstat boom"), { code: "EIO" }); });
+  try {
+    assert.throws(() => exportReadPayload({ a: 1 }, output), /fstat boom/);
+  } finally {
+    mock.restoreAll();
+  }
+  assert.throws(() => fs.fstatSync(openedFd), { code: "EBADF" }, "the descriptor must be closed");
+  // The created file's identity was never read, so nothing proves the path is still ours.
+  assert.equal(fs.readFileSync(output, "utf8"), "");
+});
+
+it("removes the partial export when the write fails and the path is still the created file", () => {
+  const output = exportTarget();
+  mock.method(fs, "writeFileSync", () => { throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); });
+  try {
+    assert.throws(() => exportReadPayload({ a: 1 }, output), /disk full/);
+  } finally {
+    mock.restoreAll();
+  }
+  assert.equal(fs.existsSync(output), false);
+});
+
+it("keeps a replacement file when the write fails after the path changed", () => {
+  const output = exportTarget();
+  const realWrite = fs.writeFileSync;
+  mock.method(fs, "writeFileSync", (/** @type {any} */ target, /** @type {any[]} */ ...rest) => {
+    if (typeof target !== "number") return Reflect.apply(realWrite, fs, [target, ...rest]);
+    fs.unlinkSync(output);
+    realWrite(output, "someone else's data");
+    throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+  });
+  try {
+    assert.throws(() => exportReadPayload({ a: 1 }, output), /disk full/);
+  } finally {
+    mock.restoreAll();
+  }
+  assert.equal(fs.readFileSync(output, "utf8"), "someone else's data");
 });

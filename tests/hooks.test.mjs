@@ -48,6 +48,9 @@ const args = process.argv.slice(2);
 if (process.env.CLAUDE_ARGS_FILE) {
   fs.writeFileSync(process.env.CLAUDE_ARGS_FILE, JSON.stringify(args, null, 2) + "\\n", "utf8");
 }
+if (process.env.CLAUDE_INVOCATION_LOG) {
+  fs.appendFileSync(process.env.CLAUDE_INVOCATION_LOG, JSON.stringify(args) + "\\n", "utf8");
+}
 if (process.env.CLAUDE_MCP_CONFIG_FILE) {
   const mcpConfigIndex = args.indexOf("--mcp-config");
   if (mcpConfigIndex >= 0 && args[mcpConfigIndex + 1]) {
@@ -55,7 +58,20 @@ if (process.env.CLAUDE_MCP_CONFIG_FILE) {
   }
 }
 
+  function barrier(prefix, trigger) {
+  const file = process.env[prefix];
+  if (!file) return;
+  fs.appendFileSync(file + ".calls", "x\\n");
+  if (fs.readFileSync(file + ".calls", "utf8").trim().split("\\n").length !== trigger) return;
+  fs.writeFileSync(file + ".reached", "1");
+  const deadline = Date.now() + 20000;
+  while (!fs.existsSync(file + ".release") && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+}
+
   if (args[0] === "-p") {
+  barrier("CLAUDE_RUN_BARRIER", 1);
   if (process.env.CLAUDE_SILENT_FAIL === "1") {
     process.exit(7);
   }
@@ -161,11 +177,21 @@ if (process.env.CLAUDE_MCP_CONFIG_FILE) {
 }
 
 if (args[0] === "--version") {
-  process.stdout.write("2.1.220 (Claude Code)\\n");
+  // The 2nd probe is the protected-review guard; the 1st is the setup check.
+  barrier("CLAUDE_VERSION_BARRIER", 2);
+  process.stdout.write((process.env.CLAUDE_FAKE_VERSION ?? "2.1.296 (Claude Code)") + "\\n");
   process.exit(0);
 }
 
 if (args[0] === "auth" && args[1] === "status") {
+  if (process.env.CLAUDE_FAKE_AUTH_STATUS === "unauthenticated") {
+    process.stdout.write('{"loggedIn":false,"authMethod":"none"}\\n');
+    process.exit(1);
+  }
+  if (process.env.CLAUDE_FAKE_AUTH_STATUS === "probe-failed") {
+    process.stderr.write("socket hang up\\n");
+    process.exit(3);
+  }
   process.stdout.write("authenticated\\n");
   process.exit(0);
 }
@@ -442,14 +468,18 @@ const EXPECTED_STOP_REVIEW_TOOLS = [
   "mcp__gitReview__ls_files",
 ];
 
-function readAllowedTools(claudeArgs) {
-  const allowedTools = [];
+function optionValuesOf(claudeArgs, flag) {
+  const values = [];
   for (let i = 0; i < claudeArgs.length; i++) {
-    if (claudeArgs[i] === "--allowedTools") {
-      allowedTools.push(claudeArgs[i + 1]);
+    if (claudeArgs[i] === flag) {
+      values.push(claudeArgs[i + 1]);
     }
   }
-  return allowedTools;
+  return values;
+}
+
+function readAllowedTools(claudeArgs) {
+  return optionValuesOf(claudeArgs, "--allowedTools");
 }
 
 function runStopHookCapturingClaude(testEnv, cwd, extraEnv = {}) {
@@ -570,6 +600,123 @@ describe("hooks", () => {
       );
     } finally {
       cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook loads only user settings and projects project deny and ask rules", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      fs.mkdirSync(path.join(testEnv.workspaceDir, ".claude"));
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, ".claude", "settings.json"),
+        JSON.stringify({
+          permissions: {
+            deny: ["Read(./secret.txt)"],
+            ask: ["WebFetch"],
+            allow: ["Bash"],
+          },
+          hooks: { Stop: [{ hooks: [{ type: "command", command: "touch project-hook-ran" }] }] },
+          env: { PROJECT_ENV: "1" },
+        }),
+        "utf8"
+      );
+      enableReviewGate(testEnv);
+
+      const { result, claudeArgs } = runStopHookCapturingClaude(testEnv, testEnv.workspaceDir);
+
+      assert.equal(result.stdout.trim(), "");
+      assert.deepEqual(optionValuesOf(claudeArgs, "--setting-sources"), ["user"]);
+      assert.deepEqual(optionValuesOf(claudeArgs, "--disallowedTools").sort(), [
+        "Read(./secret.txt)",
+        "WebFetch",
+      ]);
+      assert.deepEqual(readAllowedTools(claudeArgs), SANDBOX_STOP_REVIEW_TOOLS);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook blocks without launching Claude for unsupported CLIs or project rules", async (t) => {
+    for (const scenario of [
+      {
+        name: "old CLI",
+        env: { CLAUDE_FAKE_VERSION: "2.1.220 (Claude Code)" },
+        reason: /Claude Code CLI 2\.1\.281 or later/,
+        code: "CLAUDE_REVIEW_UNSUPPORTED",
+      },
+      {
+        name: "unparseable CLI version",
+        env: { CLAUDE_FAKE_VERSION: "unknown" },
+        reason: /Claude Code CLI 2\.1\.281 or later/,
+        code: "CLAUDE_REVIEW_UNSUPPORTED",
+      },
+      {
+        name: "negated project deny",
+        settings: { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } },
+        reason: /PROJECT_SETTINGS_UNSUPPORTED[\s\S]*Do not edit or remove project permission rules/,
+        code: "PROJECT_SETTINGS_UNSUPPORTED",
+      },
+      {
+        name: "malformed project settings",
+        settings: "{",
+        reason: /PROJECT_SETTINGS_UNSUPPORTED/,
+        code: "PROJECT_SETTINGS_UNSUPPORTED",
+      },
+    ]) {
+      await t.test(scenario.name, () => {
+        const testEnv = createHookEnvironment();
+        try {
+          if (scenario.settings) {
+            fs.mkdirSync(path.join(testEnv.workspaceDir, ".claude"));
+            fs.writeFileSync(
+              path.join(testEnv.workspaceDir, ".claude", "settings.json"),
+              typeof scenario.settings === "string"
+                ? scenario.settings
+                : JSON.stringify(scenario.settings),
+              "utf8"
+            );
+          }
+          enableReviewGate(testEnv);
+          const invocationLog = path.join(testEnv.rootDir, "claude-invocations.ndjson");
+          const result = runHook(
+            STOP_HOOK,
+            [],
+            { cwd: testEnv.workspaceDir, session_id: "hook-session", last_assistant_message: "review me" },
+            { ...testEnv.env, CLAUDE_INVOCATION_LOG: invocationLog, ...scenario.env }
+          );
+
+          assert.notEqual(result.stdout.trim(), "", "the stop gate must block instead of allowing");
+          const decision = JSON.parse(result.stdout);
+          assert.equal(decision.decision, "block");
+          assert.match(decision.reason, scenario.reason);
+          assert.match(decision.reason, /Retrying the unchanged request cannot resolve this/);
+          assert.match(decision.reason, /Do not change the protection or its settings/);
+          assert.match(decision.reason, /report this exact blocker to the user/);
+          const snapshot = readStopReviewSnapshot(testEnv);
+          assert.equal(snapshot.status, "blocked_protection_refused");
+          assert.equal(snapshot.claudeInvoked, false);
+          assert.equal(snapshot.protectionCode, scenario.code);
+
+          // A repeated Stop must refuse the same way and still never start Claude.
+          const repeated = runHook(
+            STOP_HOOK,
+            [],
+            { cwd: testEnv.workspaceDir, session_id: "hook-session", last_assistant_message: "review me again" },
+            { ...testEnv.env, CLAUDE_INVOCATION_LOG: invocationLog, ...scenario.env }
+          );
+          assert.equal(JSON.parse(repeated.stdout).reason, decision.reason);
+          assert.equal(readStopReviewSnapshot(testEnv).status, "blocked_protection_refused");
+          const launched = fs.readFileSync(invocationLog, "utf8").trim().split("\n")
+            .map((line) => JSON.parse(line))
+            .some((args) => args[0] === "-p");
+          assert.equal(launched, false);
+          const mcpRuntimeDir = path.join(testEnv.homeDir, ".codex", "plugins", "data", "cc", "runtime", "mcp");
+          assert.deepEqual(fs.existsSync(mcpRuntimeDir) ? fs.readdirSync(mcpRuntimeDir) : [], []);
+        } finally {
+          cleanupHookEnvironment(testEnv);
+        }
+      });
     }
   });
 
@@ -2839,6 +2986,85 @@ if (args.at(-1) === process.env.CC_TEST_LOCK_OWNER_PID) {
       const snapshot = readStopReviewSnapshot(testEnv);
       assert.equal(snapshot.status, "skipped_claude_not_ready");
       assert.equal(snapshot.claudeInvoked, false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("stop-review hook skips with accurate guidance when the auth probe is not conclusive", () => {
+    for (const scenario of [
+      { probe: "unauthenticated", login: true },
+      { probe: "probe-failed", login: false },
+    ]) {
+      const testEnv = createHookEnvironment();
+      try {
+        enableReviewGate(testEnv);
+        const result = runHook(
+          STOP_HOOK,
+          [],
+          { cwd: testEnv.workspaceDir, session_id: "hook-session", last_assistant_message: "review me" },
+          { ...testEnv.env, CLAUDE_FAKE_AUTH_STATUS: scenario.probe }
+        );
+
+        assert.equal(result.stdout, "");
+        assert.equal(/claude auth login/.test(result.stderr), scenario.login, scenario.probe);
+        const snapshot = readStopReviewSnapshot(testEnv);
+        assert.equal(snapshot.status, "skipped_claude_not_ready", scenario.probe);
+        assert.equal(snapshot.claudeInvoked, false, scenario.probe);
+      } finally {
+        cleanupHookEnvironment(testEnv);
+      }
+    }
+  });
+
+  it("stop-review hook reports claudeInvoked only once Claude has actually been spawned", async () => {
+    const testEnv = createHookEnvironment();
+    try {
+      enableReviewGate(testEnv);
+      const versionBarrier = path.join(testEnv.rootDir, "version-barrier");
+      const runBarrier = path.join(testEnv.rootDir, "run-barrier");
+      const child = spawn(process.execPath, [STOP_HOOK], {
+        cwd: PROJECT_ROOT,
+        env: { ...testEnv.env, CLAUDE_VERSION_BARRIER: versionBarrier, CLAUDE_RUN_BARRIER: runBarrier },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const exited = new Promise((resolve) => child.once("close", resolve));
+      child.stdin.end(JSON.stringify({
+        cwd: testEnv.workspaceDir,
+        session_id: "hook-session",
+        last_assistant_message: "review me",
+      }));
+      const until = async (ready, description) => {
+        const deadline = Date.now() + 15_000;
+        while (!ready()) {
+          assert.ok(Date.now() < deadline, `timed out waiting for ${description}`);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      };
+      try {
+        // Window 1: the protected-review version guard is running; no Claude review exists yet.
+        await until(() => fs.existsSync(`${versionBarrier}.reached`), "version guard");
+        let snapshot = readStopReviewSnapshot(testEnv);
+        assert.equal(snapshot.status, "running_claude_review");
+        assert.equal(snapshot.claudeInvoked, false);
+        fs.writeFileSync(`${versionBarrier}.release`, "1");
+
+        // Window 2: the review process is running now.
+        await until(() => fs.existsSync(`${runBarrier}.reached`), "review child");
+        // Child execution can precede the parent onSpawn callback and snapshot write.
+        await until(() => readStopReviewSnapshot(testEnv)?.claudeInvoked === true, "spawn snapshot");
+        snapshot = readStopReviewSnapshot(testEnv);
+        assert.equal(snapshot.status, "running_claude_review");
+        assert.equal(snapshot.claudeInvoked, true);
+        fs.writeFileSync(`${runBarrier}.release`, "1");
+        assert.equal(await exited, 0);
+      } finally {
+        for (const file of [versionBarrier, runBarrier]) fs.writeFileSync(`${file}.release`, "1");
+        child.kill("SIGKILL");
+      }
+      const final = readStopReviewSnapshot(testEnv);
+      assert.equal(final.status, "allow");
+      assert.equal(final.claudeInvoked, true);
     } finally {
       cleanupHookEnvironment(testEnv);
     }

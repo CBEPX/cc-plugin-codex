@@ -13,6 +13,8 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { renderWorkflowStatusReport } from "../scripts/lib/render.mjs";
+
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMPANION = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
 const cleanup = [];
@@ -93,8 +95,20 @@ async function stdin() {
   return body;
 }
 async function main() {
-  if (args[0] === "--version") return void process.stdout.write("2.1.90 (Claude Code)\\n");
-  if (args[0] === "auth" && args[1] === "status") return void process.stdout.write("authenticated\\n");
+  if (args[0] === "--version") return void process.stdout.write((process.env.FAKE_CLAUDE_VERSION ?? "2.1.90 (Claude Code)") + "\\n");
+  if (args[0] === "auth" && args[1] === "status") {
+    if (process.env.FAKE_CLAUDE_AUTH_STATUS === "unauthenticated") {
+      process.stdout.write('{"loggedIn":false,"authMethod":"none"}\\n');
+      process.exitCode = 1;
+      return;
+    }
+    if (process.env.FAKE_CLAUDE_AUTH_STATUS === "probe-failed") {
+      process.stderr.write("socket hang up\\n");
+      process.exitCode = 3;
+      return;
+    }
+    return void process.stdout.write("authenticated\\n");
+  }
   if (process.env.FAKE_CLAUDE_TURN_LOG) {
     fs.appendFileSync(process.env.FAKE_CLAUDE_TURN_LOG, "turn\\n");
   }
@@ -111,6 +125,7 @@ async function main() {
     fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({
       args,
       prompt,
+      advisorDisable: process.env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL ?? null,
       mcpConfig: mcpPath ? JSON.parse(fs.readFileSync(mcpPath, "utf8")) : null,
       settings: settingsPath ? JSON.parse(fs.readFileSync(settingsPath, "utf8")) : null,
     }) + "\\n");
@@ -155,6 +170,11 @@ async function main() {
   }
   if (process.env.FAKE_CLAUDE_LIST_TOOLS_WARNING === "1") {
     process.stdout.write("Client.listTools() called but server does not advertise tools capability - returning empty list\\n");
+  }
+  if (process.env.FAKE_CLAUDE_ADVISOR === "1") {
+    const call = { type: "server_tool_use", id: "srvtoolu_peer", name: "advisor", input: { question: "SYNTHETIC_ADVISOR_PAYLOAD" } };
+    const reply = { type: "advisor_tool_result", tool_use_id: call.id, content: { type: "advisor_redacted_result", encrypted_content: "SYNTHETIC_ADVISOR_PAYLOAD" } };
+    process.stdout.write(JSON.stringify({ type: "assistant", session_id: sessionId, message: { content: [call, reply] } }) + "\\n");
   }
   const marker = process.env.FAKE_CLAUDE_MARKER || "The repository and primary source agree.";
   const citations = {
@@ -226,10 +246,12 @@ async function main() {
         ? "Not logged in. Run claude auth login to continue."
         : process.env.FAKE_CLAUDE_FAILURE_SIGNAL === "rate"
           ? "You've hit your session limit · resets 4:50pm (Europe/Moscow)"
-          : process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
-            ? "not structured JSON"
-            : JSON.stringify(payload),
-      model: process.env.FAKE_CLAUDE_FAILURE_SIGNAL
+          : process.env.FAKE_CLAUDE_FAILURE_SIGNAL === "refusal"
+            ? "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"
+            : process.env.FAKE_CLAUDE_UNSTRUCTURED === "1"
+              ? "not structured JSON"
+              : JSON.stringify(payload),
+      model: process.env.FAKE_CLAUDE_FAILURE_SIGNAL && process.env.FAKE_CLAUDE_FAILURE_SIGNAL !== "refusal"
         ? "<synthetic>"
         : process.env.FAKE_CLAUDE_FALLBACK === "1" ? "claude-opus-5" : "claude-fable-5-1",
       modelUsage: { "claude-fable-5-1": { inputTokens: 1, outputTokens: 1, contextWindow: 1000000 } },
@@ -357,7 +379,14 @@ function readManagedStateText(testEnv) {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const candidate = path.join(current, entry.name);
       if (entry.isDirectory()) visit(candidate);
-      else if (entry.isFile()) values.push(fs.readFileSync(candidate, "utf8"));
+      else if (entry.isFile()) {
+        try {
+          values.push(fs.readFileSync(candidate, "utf8"));
+        } catch (error) {
+          // A worker can release its transient lock after directory enumeration.
+          if (!candidate.endsWith(".lock") || /** @type {NodeJS.ErrnoException} */ (error).code !== "ENOENT") throw error;
+        }
+      }
     }
   };
   visit(root);
@@ -940,6 +969,17 @@ describe("peer companion with fake Claude", () => {
         detail: null,
       },
       {
+        name: "proven subscription refusal",
+        env: {
+          FAKE_CLAUDE_TERMINAL_SUBTYPE: "success",
+          FAKE_CLAUDE_TERMINAL_REASON: "api_error",
+          FAKE_CLAUDE_TERMINAL_IS_ERROR: "1",
+          FAKE_CLAUDE_FAILURE_SIGNAL: "refusal",
+        },
+        code: "CLAUDE_SUBSCRIPTION_REFUSED",
+        detail: null,
+      },
+      {
         name: "rate precedence over sandbox prose",
         env: {
           FAKE_CLAUDE_TERMINAL_SUBTYPE: "future_terminal",
@@ -990,7 +1030,34 @@ describe("peer companion with fake Claude", () => {
       const durable = readManagedStateText(testEnv);
       assert.doesNotMatch(durable, /provider_payload_MUST_NOT_PERSIST/, testCase.name);
       assert.doesNotMatch(durable, /provider_reason_MUST_NOT_PERSIST/, testCase.name);
-      assert.doesNotMatch(durable, /Not logged in|session limit/, testCase.name);
+      assert.doesNotMatch(durable, /Not logged in|session limit|organization has disabled/, testCase.name);
+    }
+  });
+
+  it("records an unconfirmed auth probe separately from a confirmed logout", () => {
+    for (const testCase of [
+      { probe: "unauthenticated", code: "CLAUDE_AUTH" },
+      { probe: "probe-failed", code: "CLAUDE_AUTH_PROBE_FAILED" },
+    ]) {
+      const testEnv = createEnvironment();
+      const created = createPeer(testEnv);
+      submitCodexMemo(testEnv, created);
+      const claudeLease = planLease(created, "_claude_");
+      const failed = run(testEnv, [
+        "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(created.workflow.epoch), "--json",
+      ], {
+        input: attemptInput(claudeLease),
+        env: { FAKE_CLAUDE_AUTH_STATUS: testCase.probe },
+      });
+
+      assert.notEqual(failed.status, 0, testCase.probe);
+      assert.equal(failed.stderr, `${testCase.code}\n`, testCase.probe);
+      const stored = readWorkflow(testEnv, created.workflow.id);
+      assert.equal(stored.failureReason, testCase.code, testCase.probe);
+      assert.equal(stored.branches.claude.status, "retryable_failed", testCase.probe);
+      assert.equal(fs.existsSync(testEnv.claudeTurnLog), false, `${testCase.probe}: no turn may start`);
     }
   });
 
@@ -1297,6 +1364,175 @@ describe("peer companion with fake Claude", () => {
     assert.doesNotMatch(probes, /unused:/);
   });
 
+  describe("advisor policy", () => {
+    const claudeTurns = (testEnv) => fs.readFileSync(testEnv.claudeLog, "utf8").trim()
+      .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const advisorOf = (turn) => {
+      const index = turn.args.indexOf("--advisor");
+      return index < 0 ? null : turn.args[index + 1];
+    };
+    const manifestAdvisor = (workflow) => workflow.modelManifest
+      .find(({ role }) => role === "claude-advisor") ?? null;
+    const supported = (testEnv) => {
+      testEnv.env.FAKE_CLAUDE_VERSION = "2.1.296 (Claude Code)";
+      return testEnv;
+    };
+    // A Claude-first memo waits for the sibling Codex memo, so seal that first.
+    const claudeTurn = (testEnv, created, extraEnv = {}, { codex = true } = {}) => {
+      if (codex) submitCodexMemo(testEnv, created);
+      return claudeTurnOnly(testEnv, created, extraEnv);
+    };
+    const claudeTurnOnly = (testEnv, created, extraEnv = {}) => run(testEnv, [
+      "peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash,
+      "--epoch", String(created.workflow.epoch), "--json",
+    ], { input: attemptInput(planLease(created, "_claude_")), env: extraEnv });
+
+    it("omission freezes inherit: no native flag and no disable variable", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv);
+      assert.equal(manifestAdvisor(readWorkflow(testEnv, created.workflow.id))?.requestedModel, null);
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const [turn] = claudeTurns(testEnv);
+      assert.equal(advisorOf(turn), null);
+      assert.equal(turn.advisorDisable, null);
+    });
+
+    it("freezes an explicit model in the public manifest and forwards it to the memo turn", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "Fable"]);
+      assert.deepEqual(
+        manifestAdvisor(readWorkflow(testEnv, created.workflow.id)),
+        { role: "claude-advisor", requestedModel: "fable", resolvedModel: null }
+      );
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(advisorOf(claudeTurns(testEnv)[0]), "fable");
+    });
+
+    it("applies off to the child environment only", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "off"]);
+      assert.equal(manifestAdvisor(readWorkflow(testEnv, created.workflow.id)).requestedModel, "off");
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const [turn] = claudeTurns(testEnv);
+      assert.equal(turn.advisorDisable, "1");
+      assert.equal(advisorOf(turn), null);
+    });
+
+    it("keeps an inherited global disable for inherit and an explicit model", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const result = claudeTurn(testEnv, created, { CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const [turn] = claudeTurns(testEnv);
+      assert.equal(turn.advisorDisable, "1");
+      assert.equal(advisorOf(turn), "fable");
+    });
+
+    it("refuses an invalid value or an unsupported CLI before any workflow or turn exists", () => {
+      const testEnv = createEnvironment();
+      /** @type {Array<[string[], Record<string, string>, RegExp]>} */
+      const refusals = [
+        [["--advisor", "bad value"], { FAKE_CLAUDE_VERSION: "2.1.296 (Claude Code)" }, /CLAUDE_ADVISOR_INVALID/],
+        [["--advisor", "fable"], { FAKE_CLAUDE_VERSION: "2.1.292 (Claude Code)" }, /CLAUDE_ADVISOR_UNSUPPORTED[^]*2\.1\.293/],
+      ];
+      for (const [flags, env, pattern] of refusals) {
+        const result = run(testEnv, [
+          "peer-create", "--mode", "design", "--cwd", testEnv.workspaceDir,
+          "--owner-session-id", "owner-a", "--no-auto-tools", ...flags, "--json", "Compare", "designs.",
+        ], { env });
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, pattern);
+      }
+      assert.equal(countClaudeTurns(testEnv), 0);
+      const workflowsDir = path.join(peerStateDir(testEnv), "workflows");
+      assert.deepEqual(fs.existsSync(workflowsDir) ? fs.readdirSync(workflowsDir) : [], []);
+    });
+
+    it("fails a frozen explicit policy closed when the CLI no longer supports it", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const result = claudeTurn(testEnv, created, { FAKE_CLAUDE_VERSION: "2.1.292 (Claude Code)" });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /CLAUDE_ADVISOR_UNSUPPORTED/);
+      assert.equal(countClaudeTurns(testEnv), 0);
+      assert.equal(readWorkflow(testEnv, created.workflow.id).branches.claude.failureReason, "CLAUDE_ADVISOR_UNSUPPORTED");
+    });
+
+    it("reads a workflow written before the field existed as inherit", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const stored = readWorkflow(testEnv, created.workflow.id);
+      stored.modelManifest = stored.modelManifest.filter(({ role }) => role !== "claude-advisor");
+      writeWorkflow(testEnv, stored);
+      const result = claudeTurn(testEnv, created);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(advisorOf(claudeTurns(testEnv)[0]), null);
+    });
+
+    for (const value of [true, 7, ["fable"], "bad value!"]) {
+      it(`refuses a manifest holding ${JSON.stringify(value)} before a native turn`, () => {
+        const testEnv = supported(createEnvironment());
+        const created = createPeer(testEnv, ["--advisor", "fable"]);
+        const stored = readWorkflow(testEnv, created.workflow.id);
+        stored.modelManifest.find(({ role }) => role === "claude-advisor").requestedModel = value;
+        writeWorkflow(testEnv, stored);
+        const result = claudeTurn(testEnv, created);
+        assert.notEqual(result.status, 0);
+        assert.equal(countClaudeTurns(testEnv), 0);
+        assert.match(result.stderr, /CLAUDE_ADVISOR_INVALID|INVALID_MANIFEST|advisor/i);
+      });
+    }
+
+    it("keeps the frozen policy across a Claude retry and the critique after continuation", () => {
+      const testEnv = supported(createEnvironment());
+      const created = createPeer(testEnv, ["--advisor", "fable"]);
+      const failed = claudeTurn(testEnv, created, { FAKE_CLAUDE_TERMINAL_SUBTYPE: "error" }, { codex: false });
+      assert.notEqual(failed.status, 0);
+      const beforeReplace = JSON.stringify(readWorkflow(testEnv, created.workflow.id));
+      const replaced = run(testEnv, [
+        "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--mode", "design", "--retry", "--owner-session-id", "owner-a", "--json",
+        "--advisor", "off",
+      ]);
+      assert.notEqual(replaced.status, 0);
+      assert.match(replaced.stderr, /CONFLICTING_PEER_ACTION/);
+      assert.equal(JSON.stringify(readWorkflow(testEnv, created.workflow.id)), beforeReplace);
+      const retry = runJson(testEnv, [
+        "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--mode", "design", "--retry", "--owner-session-id", "owner-a", "--json",
+      ]);
+      assert.ok(retry.work.some(({ id }) => id === "claude"));
+      const retried = claudeTurn(testEnv, retry);
+      assert.equal(retried.status, 0, retried.stderr || retried.stdout);
+      const checkpointLease = planLease(retry, "_codex_", "checkpoint");
+      activate(testEnv, retry, "checkpoint", null, checkpointLease);
+      runJson(testEnv, [
+        "peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(retry.workflow.epoch), "--json",
+      ], { input: attemptInput(checkpointLease, { agreements: ["Same."], disagreements: [], decisionsNeeded: [] }) });
+      const continuation = runJson(testEnv, [
+        "peer-resume-plan", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--continue", "--owner-session-id", "owner-a", "--json",
+      ], { input: JSON.stringify({ feedback: "Compare once more." }) });
+      const critique = run(testEnv, [
+        "peer-claude-critique", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash,
+        "--epoch", String(continuation.workflow.epoch), "--json",
+      ], { input: attemptInput(planLease(continuation, "_critique_")) });
+      assert.equal(critique.status, 0, critique.stderr || critique.stdout);
+      const turns = claudeTurns(testEnv);
+      assert.deepEqual(turns.map(advisorOf), ["fable", "fable", "fable"].slice(0, turns.length));
+      assert.ok(turns.length >= 2);
+      assert.ok(turns.every((turn) => turn.advisorDisable === null));
+      assert.equal(manifestAdvisor(readWorkflow(testEnv, created.workflow.id)).requestedModel, "fable");
+    });
+  });
+
   it("probes only MCP servers represented by peer-create selection inputs", async () => {
     const testEnv = createEnvironment();
     const httpLog = path.join(testEnv.rootDir, "unused-http-requests.log");
@@ -1534,10 +1770,21 @@ describe("peer companion with fake Claude", () => {
       "--epoch", String(created.workflow.epoch), "--json",
     ], {
       input: attemptInput(claudeLease),
-      env: { FAKE_CLAUDE_FALLBACK: "1", FAKE_CLAUDE_LIST_TOOLS_WARNING: "1" },
+      env: { FAKE_CLAUDE_FALLBACK: "1", FAKE_CLAUDE_LIST_TOOLS_WARNING: "1", FAKE_CLAUDE_ADVISOR: "1" },
     });
 
     const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.deepEqual(stored.branches.claude.payload.model.advisor, {
+      requested: "inherit",
+      calls: 1,
+      countExact: true,
+      observedModel: null,
+      status: "observed",
+      diagnostics: [],
+    });
+    assert.equal(JSON.stringify(stored).includes("SYNTHETIC_ADVISOR_PAYLOAD"), false);
+    assert.equal(JSON.stringify(result).includes("SYNTHETIC_ADVISOR_PAYLOAD"), false);
+    assert.match(renderWorkflowStatusReport(stored), /\| claude advisor actual \| inherit \| inherit requested; 1 call observed; advisor model not reported \|/);
     assert.equal(result.target.status, "completed");
     assert.equal(result.target.branchId, "claude");
     assert.equal(stored.branches.claude.payload.model.requestedModel, "fable");

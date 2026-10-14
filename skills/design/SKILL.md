@@ -9,6 +9,6 @@ Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Keep the 
 
 Arguments: `$ARGUMENTS`
 
-Use the complete shared execution contract in `../../internal-skills/peer-runtime/runtime.md`. It defines the supported `--model`, `--fallback-model`, `--effort`, `--codex-model`, `--codex-effort`, repeated `--user-mcp-tool`, `--allow-project-mcp-servers`, `--no-auto-tools`, `--continue <workflow-id> [feedback]`, and `--retry <workflow-id>` forms.
+Use the complete shared execution contract in `../../internal-skills/peer-runtime/runtime.md`. It defines the supported `--model`, `--fallback-model`, `--effort`, `--advisor`, `--codex-model`, `--codex-effort`, repeated `--user-mcp-tool`, `--allow-project-mcp-servers`, `--no-auto-tools`, `--continue <workflow-id> [feedback]`, and `--retry <workflow-id>` forms.
 
 The final design answer must compare alternatives, trade-offs, decision drivers, and a recommendation grounded in the frozen peer memos. Preserve disagreements instead of forcing consensus.

@@ -8,6 +8,11 @@ Primary helper:
 - `node "<plugin-root>/scripts/claude-companion.mjs" review ...`
 - `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review ...`
 
+Routing controls:
+- Treat `--advisor <inherit|off|alias-or-id>` as a routing control, not review text. Preserve a user-supplied value exactly. Never add it when the user did not supply it.
+- Keep it in the same position in the foreground command and in the background child command. A detached review worker reads the stored policy.
+- If the companion refuses the advisor value or the Claude Code version, return that refusal unchanged. Do not retry without `--advisor`.
+
 Execution boundary:
 - Foreground review stays on the main Codex thread. Do not satisfy foreground review through a review subagent, a generic review-runner role, or any background worker abstraction.
 - Background review uses exactly one built-in forwarding child through `spawn_agent`.
@@ -27,6 +32,7 @@ Background contract:
 - Use `background-routing-context --kind review --json` from the parent user workspace before spawning the forwarding child.
 - Pass the helper's exact non-empty `workspaceRoot` back to the child as `--cwd "<workspaceRoot>"`; this keeps the reservation and job in the same workspace state.
 - Preserve `--job-id` only when reserved by the parent helper.
+- Run the review command once with that `--job-id`. After a failure, treat the id as spent: the companion may already have released it. Do not run the command again with the same id. Return the failure; the parent reserves a new id before any retry.
 - Preserve the `--owner-session-id` the parent helper returned. The helper fails with `SESSION_OWNER_REQUIRED` instead of returning an empty owner; surface that failure and do not spawn the child.
 - Preserve the parent notification path only when the helper returned a non-empty parent thread id.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.

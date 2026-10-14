@@ -4,6 +4,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +33,8 @@ import {
   MAX_STREAM_PARSER_TOOL_USES,
   MAX_STREAM_PARSER_TOUCHED_FILES,
   MAX_STREAM_PARSER_MODEL_EVENTS,
+  MAX_STREAM_PARSER_ADVISOR_CALL_IDS,
+  summarizeAdvisorTelemetry,
   MAX_STDERR_BYTES,
   getClaudeAvailability,
   getClaudeAuthStatus,
@@ -43,6 +46,7 @@ import {
   SANDBOX_REVIEW_TOOLS,
   SANDBOX_STOP_REVIEW_TOOLS,
 } from "../scripts/lib/claude-cli.mjs";
+import { pinToAnchor } from "../scripts/lib/review-worktree.mjs";
 
 function createFakeClaudeCommand(tmpDir, source) {
   const packageRoot = path.join(
@@ -1104,7 +1108,7 @@ describe("StreamParser", () => {
     assert.equal(events.length, 0);
     assert.equal(parser.state.unresolvedParseErrors, 1);
     assert.equal(parser.state.parseErrors.length, 1);
-    assert.ok(parser.state.parseErrors[0].line.includes("not valid json"));
+    assert.deepEqual(parser.state.parseErrors[0], { code: "INVALID_JSON", length: "not valid json".length });
   });
 
   it("classifies only the exact list-tools capability warning without retaining its text", () => {
@@ -1155,7 +1159,7 @@ describe("StreamParser", () => {
 
     assert.equal(parser.state.unresolvedParseErrors, MAX_STREAM_PARSER_PARSE_ERRORS + 9);
     assert.equal(parser.state.parseErrors.length, MAX_STREAM_PARSER_PARSE_ERRORS);
-    assert.ok(parser.state.parseErrors[0].line.includes(`not valid json 9`));
+    assert.deepEqual(parser.state.parseErrors[0], { code: "INVALID_JSON", length: "not valid json 9".length });
   });
 
   it("caps stored tool-use samples and touched file tracking", () => {
@@ -1557,7 +1561,7 @@ describe("runClaudeTurn", () => {
       assert.match(result.warning, /1 unrecovered parse error/);
       assert.equal(result.unresolvedParseErrors, 1);
       assert.equal(result.parseErrors.length, 1);
-      assert.equal(result.parseErrors[0].line, "not-json");
+      assert.deepEqual(result.parseErrors[0], { code: "INVALID_JSON", length: "not-json".length });
     } finally {
       process.env.PATH = oldPath;
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1696,7 +1700,7 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `const result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `if (process.argv[2] === "--version") { process.stdout.write("2.1.296 (Claude Code)\\n"); process.exit(0); }\nconst result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
       const optionValue = (args, name) => {
@@ -1763,6 +1767,7 @@ describe("runClaudeTurn", () => {
       assert.deepEqual(getClaudeAuthStatus(process.cwd()), {
         available: true,
         loggedIn: true,
+        state: "authenticated",
         detail: "authenticated",
       });
     } finally {
@@ -2917,4 +2922,1058 @@ describe("parent message final answer", () => {
     parser.feed(start() + text("Parent") + stream({ type: "message_start", message: { role: "assistant" } }, { parent_tool_use_id: "child" }) + result("Parent"));
     assert.equal(parser.state.finalMessage, "Parent");
   });
+});
+
+// ===========================================================================
+// Protected review isolation (issue #76)
+// ===========================================================================
+
+describe("protected review isolation", () => {
+  const FAKE_REVIEW_CLAUDE = [
+    `const fs = require("node:fs");`,
+    `const args = process.argv.slice(2);`,
+    `fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(args) + "\\n");`,
+    `if (args[0] === "--version") { process.stdout.write(process.env.FAKE_CLAUDE_VERSION + "\\n"); process.exit(0); }`,
+    `const result = JSON.stringify({ cwd: process.cwd(), args });`,
+    `const out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-isolation" });`,
+    `process.stdout.write(out + "\\n", () => process.exit(0));`,
+  ].join("\n");
+
+  function withFakeReviewClaude(version, fn) {
+    return async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-review-isolation-"));
+      const saved = {
+        PATH: process.env.PATH,
+        FAKE_CLAUDE_LOG: process.env.FAKE_CLAUDE_LOG,
+        FAKE_CLAUDE_VERSION: process.env.FAKE_CLAUDE_VERSION,
+      };
+      const binDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(binDir);
+      createFakeClaudeCommand(binDir, FAKE_REVIEW_CLAUDE);
+      const logFile = path.join(tmpDir, "claude-invocations.ndjson");
+      process.env.PATH = `${binDir}${path.delimiter}${saved.PATH ?? ""}`;
+      process.env.FAKE_CLAUDE_LOG = logFile;
+      process.env.FAKE_CLAUDE_VERSION = version;
+      const invocations = () =>
+        fs.existsSync(logFile)
+          ? fs.readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+          : [];
+      try {
+        await fn({ tmpDir, invocations });
+      } finally {
+        for (const [key, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    };
+  }
+
+  function git(cwd, ...args) {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  }
+
+  function initRepo(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    git(dir, "init", "--initial-branch=main");
+    git(dir, "config", "user.name", "Codex Test");
+    git(dir, "config", "user.email", "codex@example.com");
+    fs.writeFileSync(path.join(dir, "app.js"), "export const value = 1;\n");
+    git(dir, "add", "app.js");
+    git(dir, "commit", "-m", "initial");
+  }
+
+  function writeSettings(dir, name, value) {
+    fs.mkdirSync(path.join(dir, ".claude"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, ".claude", name),
+      typeof value === "string" ? value : JSON.stringify(value)
+    );
+  }
+
+  const optionValues = (args, flag) =>
+    args.flatMap((arg, index) => (arg === flag ? [args[index + 1]] : []));
+  const launchedReview = (invocations) => invocations().some((args) => args[0] === "-p");
+
+  it(
+    "loads only user setting sources on every review path",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      const reviewArgs = async (run) => JSON.parse((await run()).result).args;
+
+      for (const args of [
+        await reviewArgs(() => runClaudeReview(repo, "prompt", { permissionMode: "dontAsk" })),
+        await reviewArgs(() => runClaudeAdversarialReview(repo, "prompt", { type: "object" }, {})),
+        await reviewArgs(() => runClaudeReview(repo, "prompt", { allowedTools: SANDBOX_STOP_REVIEW_TOOLS })),
+        // A caller cannot re-enable project sources for a protected review.
+        await reviewArgs(() => runClaudeReview(repo, "prompt", { settingSources: ["user", "project", "local"] })),
+      ]) {
+        assert.deepEqual(optionValues(args, "--setting-sources"), ["user"]);
+        assert.equal(args.some((arg) => /^Bash(\(|$)/.test(arg)), false);
+      }
+    })
+  );
+
+  for (const version of [
+    "2.1.280 (Claude Code)",
+    "2.0.999",
+    "not a version",
+    "",
+    "2.1.281-rc.1 (Claude Code)",
+    "2.1.300-beta",
+    "2.1.281junk",
+    "2.1.281.0",
+    "v2.1.281",
+    "2.1.281 (Claude Code) extra",
+  ]) {
+    it(
+      `refuses a protected review before launch when the CLI reports ${JSON.stringify(version)}`,
+      withFakeReviewClaude(version, async ({ tmpDir, invocations }) => {
+        const repo = path.join(tmpDir, "repo");
+        initRepo(repo);
+        await assert.rejects(
+          runClaudeReview(repo, "prompt", {}),
+          /Claude Code CLI 2\.1\.281 or later/
+        );
+        assert.equal(launchedReview(invocations), false);
+      })
+    );
+  }
+
+  for (const version of ["2.1.281 (Claude Code)", "2.1.296 (Claude Code)", "3.0.0"]) {
+    it(
+      `accepts a protected review on CLI ${version}`,
+      withFakeReviewClaude(version, async ({ tmpDir, invocations }) => {
+        const repo = path.join(tmpDir, "repo");
+        initRepo(repo);
+        const result = await runClaudeReview(repo, "prompt", {});
+        assert.equal(result.status, "completed");
+        assert.equal(launchedReview(invocations), true);
+      })
+    );
+  }
+
+  it(
+    "projects deny and ask rules from the original linked worktree, primary local settings and reviewed tree",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const primary = path.join(tmpDir, "primary");
+      initRepo(primary);
+      writeSettings(primary, "settings.json", {
+        permissions: {
+          deny: ["Read(./secrets/**)"],
+          ask: ["WebFetch(domain:example.com)"],
+          allow: ["Bash", "Read(//etc/**)"],
+          additionalDirectories: ["/"],
+        },
+        hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "touch pwned" }] }] },
+        env: { PROJECT_ENV: "1" },
+      });
+      git(primary, "add", ".claude/settings.json");
+      git(primary, "commit", "-m", "project settings");
+      // Untracked local settings live in the primary checkout even for linked worktrees.
+      writeSettings(primary, "settings.local.json", { permissions: { deny: ["Read(/private.txt)"] } });
+
+      const original = path.join(tmpDir, "original");
+      git(primary, "worktree", "add", "-b", "feature", original);
+      // The user's uncommitted edit drops the committed deny and adds another.
+      writeSettings(original, "settings.json", { permissions: { deny: ["Read(~/.aws/**)"] } });
+
+      const reviewed = path.join(tmpDir, "reviewed");
+      git(primary, "worktree", "add", "--detach", reviewed, "feature");
+
+      if (process.platform === "win32") {
+        await assert.rejects(
+          runClaudeReview(reviewed, "prompt", { originalCwd: original }),
+          { code: "PROJECT_SETTINGS_UNSUPPORTED", message: /Windows drive, UNC or backslash path/ }
+        );
+        assert.equal(launchedReview(invocations), false);
+        return;
+      }
+
+      const result = await runClaudeReview(reviewed, "prompt", { originalCwd: original });
+      const { cwd, args } = JSON.parse(result.result);
+      const realOriginal = fs.realpathSync.native(original);
+
+      assert.equal(fs.realpathSync.native(cwd), fs.realpathSync.native(reviewed));
+      assert.deepEqual(optionValues(args, "--setting-sources"), ["user"]);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        "Read(./secrets/**)",
+        `Read(/${realOriginal}/**/private.txt)`,
+        `Read(/${realOriginal}/**/secrets/**)`,
+        "Read(/private.txt)",
+        "Read(~/.aws/**)",
+        "WebFetch(domain:example.com)",
+      ].sort());
+      const allowed = optionValues(args, "--allowedTools");
+      assert.equal(allowed.includes("Bash"), false);
+      assert.equal(allowed.includes("Read(//etc/**)"), false);
+      assert.equal(args.includes("--add-dir"), false);
+    })
+  );
+
+  it(
+    "keeps relative rules anchored at the review cwd when the review runs in the original checkout",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      writeSettings(repo, "settings.json", {
+        permissions: { deny: ["Read(./secrets/**)", "Edit(/src/**)", "Read(//etc/passwd)"] },
+      });
+
+      const { args } = JSON.parse((await runClaudeReview(repo, "prompt", {})).result);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        "Edit(/src/**)",
+        "Read(./secrets/**)",
+        "Read(//etc/passwd)",
+      ]);
+    })
+  );
+
+  for (const [name, content] of [
+    ["invalid JSON", "{not json"],
+    ["a non-object document", "[]"],
+    ["a non-object permissions block", { permissions: ["Read(.env)"] }],
+    ["a non-array deny list", { permissions: { deny: "Read(.env)" } }],
+    ["a non-string rule", { permissions: { ask: [42] } }],
+    ["a negated deny exception", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } }],
+    ["a negated ask exception", { permissions: { ask: ["Edit(!docs/**)"] } }],
+    ["a rule with whitespace outside the specifier", { permissions: { deny: ["Read .env"] } }],
+    ["an empty specifier", { permissions: { deny: ["Read()"] } }],
+    ["a rule with a control character", { permissions: { deny: ["Read(.env\n)"] } }],
+    ["a rule shaped like a long CLI flag", { permissions: { deny: ["--dangerously-skip-permissions"] } }],
+    ["a rule shaped like a short CLI flag", { permissions: { ask: ["-p"] } }],
+    ["an MCP rule with a parameter", { permissions: { deny: ["mcp__github__create_issue(repo:x)"] } }],
+    ["an unknown restrictive permission key", { permissions: { blockReadsOutsideWorkingDirectories: true } }],
+  ]) {
+    it(
+      `refuses a review before launch when project settings contain ${name}`,
+      withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+        const repo = path.join(tmpDir, "repo");
+        initRepo(repo);
+        writeSettings(repo, "settings.json", content);
+        await assert.rejects(runClaudeReview(repo, "prompt", {}), /PROJECT_SETTINGS_UNSUPPORTED/);
+        assert.equal(launchedReview(invocations), false);
+      })
+    );
+  }
+
+  it(
+    "refuses a review when malformed local settings sit in the primary checkout of a linked worktree",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const primary = path.join(tmpDir, "primary");
+      initRepo(primary);
+      writeSettings(primary, "settings.local.json", { permissions: { deny: ["Read(!x)"] } });
+      const linked = path.join(tmpDir, "linked");
+      git(primary, "worktree", "add", "-b", "feature", linked);
+
+      await assert.rejects(runClaudeReview(linked, "prompt", {}), /settings\.local\.json/);
+      assert.equal(launchedReview(invocations), false);
+    })
+  );
+
+  function relocatedSubdirFixture(tmpDir, committedSettings, originalSettings) {
+    const repo = path.join(tmpDir, "repo");
+    initRepo(repo);
+    const sub = path.join(repo, "sub");
+    writeSettings(sub, "settings.json", committedSettings);
+    git(repo, "add", "sub/.claude/settings.json");
+    git(repo, "commit", "-m", "subdirectory settings");
+    // The user's checkout no longer carries the committed policy.
+    writeSettings(sub, "settings.json", originalSettings);
+    const reviewed = path.join(tmpDir, "reviewed");
+    git(repo, "worktree", "add", "--detach", reviewed, "HEAD");
+    return { sub, reviewed };
+  }
+
+  it(
+    "keeps a rule that exists only in the reviewed subdirectory settings",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const { sub, reviewed } = relocatedSubdirFixture(
+        tmpDir,
+        { permissions: { deny: ["Read(/reviewed-only.txt)"] } },
+        { permissions: { deny: [] } }
+      );
+
+      if (process.platform === "win32") {
+        await assert.rejects(
+          runClaudeReview(reviewed, "prompt", { originalCwd: sub }),
+          { code: "PROJECT_SETTINGS_UNSUPPORTED", message: /Windows drive, UNC or backslash path/ }
+        );
+        assert.equal(launchedReview(invocations), false);
+        return;
+      }
+
+      const { args } = JSON.parse((await runClaudeReview(reviewed, "prompt", { originalCwd: sub })).result);
+      const realReviewed = fs.realpathSync.native(reviewed);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        `Read(/${realReviewed}/sub/**/reviewed-only.txt)`,
+        "Read(/reviewed-only.txt)",
+      ].sort());
+    })
+  );
+
+  for (const [name, committed] of [
+    ["malformed", "{"],
+    ["negated", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } }],
+  ]) {
+    it(
+      `refuses a review before launch when only the reviewed subdirectory settings are ${name}`,
+      withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+        const { sub, reviewed } = relocatedSubdirFixture(tmpDir, committed, { permissions: {} });
+        const reviewedSettings = path.join("reviewed", "sub", ".claude", "settings.json");
+
+        await assert.rejects(runClaudeReview(reviewed, "prompt", { originalCwd: sub }), (error) => {
+          const { message } = /** @type {Error} */ (error);
+          assert.match(message, /PROJECT_SETTINGS_UNSUPPORTED/);
+          assert.ok(message.includes(reviewedSettings), message);
+          return true;
+        });
+        assert.equal(launchedReview(invocations), false);
+      })
+    );
+  }
+
+  it("compares stable CLI versions against any minimum for reuse by other capabilities", async () => {
+    const { isClaudeVersionAtLeast } = await import("../scripts/lib/claude-cli.mjs");
+    assert.equal(typeof isClaudeVersionAtLeast, "function");
+    assert.equal(isClaudeVersionAtLeast("2.1.293 (Claude Code)", "2.1.293"), true);
+    assert.equal(isClaudeVersionAtLeast("2.1.292 (Claude Code)", "2.1.293"), false);
+    assert.equal(isClaudeVersionAtLeast("2.2.0", "2.1.293"), true);
+    assert.equal(isClaudeVersionAtLeast("2.1.293-rc.1 (Claude Code)", "2.1.293"), false);
+  });
+
+  it(
+    "tells the caller not to edit project permission rules when protection cannot be preserved",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      writeSettings(repo, "settings.json", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } });
+
+      await assert.rejects(runClaudeReview(repo, "prompt", {}), (error) => {
+        const { message } = /** @type {Error} */ (error);
+        assert.match(message, /could not be preserved/);
+        assert.match(message, /Do not edit or remove project permission rules/);
+        assert.doesNotMatch(message, /fix or remove/i);
+        return true;
+      });
+    })
+  );
+
+  it(
+    "keeps subdirectory rules anchored at the matching reviewed subdirectory after relocation",
+    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      const sub = path.join(repo, "sub");
+      writeSettings(sub, "settings.json", { permissions: { deny: ["Read(./data/secret.txt)"] } });
+      git(repo, "add", "sub/.claude/settings.json");
+      git(repo, "commit", "-m", "subdirectory settings");
+      const reviewed = path.join(tmpDir, "reviewed");
+      git(repo, "worktree", "add", "--detach", reviewed, "HEAD");
+
+      if (process.platform === "win32") {
+        await assert.rejects(
+          runClaudeReview(reviewed, "prompt", { originalCwd: sub }),
+          { code: "PROJECT_SETTINGS_UNSUPPORTED", message: /Windows drive, UNC or backslash path/ }
+        );
+        assert.equal(launchedReview(invocations), false);
+        return;
+      }
+
+      const { args } = JSON.parse((await runClaudeReview(reviewed, "prompt", { originalCwd: sub })).result);
+      const realSub = fs.realpathSync.native(sub);
+      const realReviewed = fs.realpathSync.native(reviewed);
+      assert.deepEqual(optionValues(args, "--disallowedTools").sort(), [
+        "Read(./data/secret.txt)",
+        `Read(/${realReviewed}/sub/**/data/secret.txt)`,
+        `Read(/${realSub}/**/data/secret.txt)`,
+      ].sort());
+    })
+  );
+});
+
+function withFakeClaudeBinary(source, run) {
+  return async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-diagnostics-"));
+    const oldPath = process.env.PATH ?? "";
+    const oldApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      createFakeClaudeCommand(tmpDir, source);
+      process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+      await run({ tmpDir });
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = oldApiKey;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  };
+}
+
+describe("getClaudeAuthStatus classification", () => {
+  const authStatusSource = (body) =>
+    `const args = process.argv.slice(2);\nif (args[0] === "auth" && args[1] === "status") {\n${body}\n}\n`;
+
+  for (const scenario of [
+    {
+      name: "native JSON login reports authenticated",
+      body: `process.stdout.write('{"loggedIn":true,"authMethod":"claude.ai"}\\n');`,
+      state: "authenticated",
+      loggedIn: true,
+    },
+    {
+      name: "native JSON loggedIn=false with exit 1 is confirmed unauthenticated",
+      body: `process.stdout.write('{"loggedIn":false,"authMethod":"none"}\\n'); process.exit(1);`,
+      state: "unauthenticated",
+      loggedIn: false,
+      recommendsLogin: true,
+    },
+    {
+      name: "native JSON loggedIn=false with exit 0 is confirmed unauthenticated",
+      body: `process.stdout.write('{"loggedIn":false}\\n');`,
+      state: "unauthenticated",
+      loggedIn: false,
+      recommendsLogin: true,
+    },
+    {
+      name: "legacy not-authenticated stderr with exit 1 is confirmed unauthenticated",
+      body: `process.stderr.write("not authenticated\\n"); process.exit(1);`,
+      state: "unauthenticated",
+      loggedIn: false,
+      recommendsLogin: true,
+    },
+    {
+      name: "an unexplained nonzero exit is a probe failure, not proof of logout",
+      body: `process.stderr.write("socket hang up\\n"); process.exit(3);`,
+      state: "probe_failed",
+      loggedIn: false,
+      recommendsLogin: false,
+    },
+  ]) {
+    it(
+      scenario.name,
+      withFakeClaudeBinary(authStatusSource(scenario.body), () => {
+        const status = getClaudeAuthStatus(process.cwd());
+
+        assert.equal(status.state, scenario.state);
+        assert.equal(status.loggedIn, scenario.loggedIn);
+        assert.equal(status.available, true);
+        assert.equal(/claude auth login/.test(status.detail), Boolean(scenario.recommendsLogin));
+      })
+    );
+  }
+
+  it("reports a spawn failure separately from authentication", () => {
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-missing-"));
+    const oldPath = process.env.PATH;
+    const oldApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.PATH = emptyDir;
+    try {
+      const status = getClaudeAuthStatus(process.cwd());
+
+      assert.equal(status.state, "spawn_failed");
+      assert.equal(status.available, false);
+      assert.equal(status.loggedIn, false);
+      assert.doesNotMatch(status.detail, /claude auth login/);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldApiKey !== undefined) process.env.ANTHROPIC_API_KEY = oldApiKey;
+      fs.rmSync(emptyDir, { recursive: true, force: true });
+    }
+  });
+
+  it(
+    "reports a real probe timeout without recommending login",
+    { timeout: 30_000 },
+    withFakeClaudeBinary(authStatusSource("setInterval(() => {}, 1000);"), () => {
+      const started = Date.now();
+      const status = getClaudeAuthStatus(process.cwd());
+
+      assert.equal(status.state, "timeout");
+      assert.equal(status.loggedIn, false);
+      assert.equal(status.available, true);
+      assert.doesNotMatch(status.detail, /claude auth login/);
+      assert.ok(Date.now() - started >= 9_000, "the production probe timeout is unchanged");
+    })
+  );
+
+  it("keeps the explicit API-key path ready without running the probe", () => {
+    const oldApiKey = process.env.ANTHROPIC_API_KEY;
+    const oldPath = process.env.PATH;
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    process.env.PATH = "";
+    try {
+      assert.deepEqual(getClaudeAuthStatus(process.cwd()), {
+        available: true,
+        loggedIn: true,
+        state: "api_key",
+        detail: "API key configured",
+      });
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = oldApiKey;
+    }
+  });
+});
+
+describe("organization subscription refusal and unsupported CLI options", () => {
+  const REFUSAL =
+    "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access";
+
+  it("classifies the refusal from failed-command stderr without a terminal event", () => {
+    const failure = classifyClaudeFailure({
+      stderr: REFUSAL,
+      exitCode: 1,
+      receivedTerminalEvent: false,
+    });
+
+    assert.equal(failure.kind, "claude_subscription_refused");
+    assert.equal(failure.message, REFUSAL);
+  });
+
+  it("classifies the refusal from an error terminal result", () => {
+    const failure = classifyClaudeFailure({
+      finalMessage: REFUSAL,
+      terminalErrorText: REFUSAL,
+      exitCode: 1,
+      receivedTerminalEvent: true,
+    });
+
+    assert.equal(failure.kind, "claude_subscription_refused");
+    assert.equal(failure.message, REFUSAL);
+  });
+
+  it("does not treat a successful answer that quotes the refusal as a failure", () => {
+    assert.equal(
+      classifyClaudeFailure({
+        finalMessage: `The CLI printed: ${REFUSAL}`,
+        exitCode: 0,
+        receivedTerminalEvent: true,
+      }),
+      null
+    );
+    assert.equal(
+      classifyClaudeFailure({
+        stderr: REFUSAL,
+        exitCode: 0,
+        receivedTerminalEvent: true,
+      }),
+      null
+    );
+  });
+
+  it(
+    "keeps terminal API error details while reporting a refusal from a real error result",
+    withFakeClaudeBinary(
+      `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: ${JSON.stringify(REFUSAL)}, session_id: "refused", model: "claude-opus-5-5" }) + "\\n", () => process.exit(1));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt");
+
+        assert.equal(result.status, "failed");
+        assert.equal(result.failure.kind, "claude_subscription_refused");
+        assert.equal(result.failure.terminalCategory, "CLAUDE_API_ERROR");
+      }
+    )
+  );
+
+  // Streamed answer text that quotes the refusal is not terminal evidence, whatever
+  // category the run ends in; only an API-error terminal's own result text can prove it.
+  const streamedQuote = JSON.stringify(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", delta: { type: "text_delta", text: REFUSAL } },
+  }));
+  for (const scenario of [
+    {
+      name: "an error_max_turns terminal after a streamed quote",
+      terminal: { subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: "" },
+      streamed: true,
+      kind: "claude_max_turns",
+    },
+    {
+      name: "an empty API-error terminal after a streamed quote",
+      terminal: { subtype: "success", terminal_reason: "api_error", is_error: true, result: "" },
+      streamed: true,
+      kind: "claude_api_error",
+    },
+    {
+      name: "a max-turns terminal whose own result text quotes the refusal",
+      terminal: { subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: REFUSAL },
+      streamed: false,
+      kind: "claude_max_turns",
+    },
+    {
+      name: "a budget terminal whose own result text quotes the refusal",
+      terminal: { subtype: "error_max_budget_usd", terminal_reason: "budget_exhausted", is_error: true, result: REFUSAL },
+      streamed: false,
+      kind: "claude_max_budget",
+    },
+  ]) {
+    it(
+      `keeps the real failure category for ${scenario.name}`,
+      withFakeClaudeBinary(
+        `${scenario.streamed ? `process.stdout.write(${streamedQuote} + "\\n");\n` : ""}process.stdout.write(JSON.stringify({ type: "result", session_id: "quoted", model: "claude-opus-5-5", ...${JSON.stringify(scenario.terminal)} }) + "\\n", () => process.exit(1));\n`,
+        async () => {
+          const result = await runClaudeTurn(process.cwd(), "prompt");
+
+          assert.equal(result.status, "failed");
+          assert.equal(result.failure.kind, scenario.kind);
+          assert.equal(result.finalModel, "claude-opus-5-5");
+        }
+      )
+    );
+  }
+
+  it(
+    "still reports a refusal that arrives as the API-error terminal's own result",
+    withFakeClaudeBinary(
+      `process.stdout.write(${streamedQuote} + "\\n");\nprocess.stdout.write(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: ${JSON.stringify(REFUSAL)}, session_id: "refused", model: "claude-opus-5-5" }) + "\\n", () => process.exit(1));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt");
+
+        assert.equal(result.failure.kind, "claude_subscription_refused");
+        assert.equal(result.failure.terminalCategory, "CLAUDE_API_ERROR");
+      }
+    )
+  );
+
+  it(
+    "completes a real run whose successful answer discusses the refusal",
+    withFakeClaudeBinary(
+      `process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, terminal_reason: "completed", result: ${JSON.stringify(`Explanation: ${REFUSAL}`)}, session_id: "discussed" }) + "\\n", () => process.exit(0));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt");
+
+        assert.equal(result.status, "completed");
+        assert.equal(result.failure, null);
+      }
+    )
+  );
+
+  it(
+    "reports an unknown required option from a real failed run",
+    withFakeClaudeBinary(
+      `process.stderr.write("error: unknown option '--setting-sources'\\n", () => process.exit(1));\n`,
+      async () => {
+        const result = await runClaudeTurn(process.cwd(), "prompt", { settingSources: ["user"] });
+
+        assert.equal(result.status, "failed");
+        assert.equal(result.failure.kind, "claude_cli_unsupported");
+        assert.equal(result.failure.option, "--setting-sources");
+      }
+    )
+  );
+
+  it("ignores option-error text that is not failed-command stderr", () => {
+    const text = "error: unknown option '--setting-sources'";
+
+    assert.equal(classifyClaudeFailure({ finalMessage: `Docs say: ${text}` }), null);
+    assert.equal(
+      classifyClaudeFailure({ stderr: text, exitCode: 0, receivedTerminalEvent: true }),
+      null
+    );
+  });
+});
+
+describe("relative project rule pinning", () => {
+  const relativeRead = { tool: "Read", specifier: "./secret.txt", rule: "Read(./secret.txt)" };
+
+  it("pins a relative rule below a POSIX anchor", () => {
+    assert.equal(pinToAnchor(relativeRead, "/home/dev/repo"), "Read(//home/dev/repo/**/secret.txt)");
+  });
+
+  it("refuses to guess a pinned form for Windows drive, UNC, or backslash anchors", () => {
+    for (const anchor of ["C:\\Users\\dev\\repo", "c:/Users/dev/repo", "\\\\server\\share\\repo", "/tmp/odd\\name"]) {
+      assert.throws(
+        () => pinToAnchor(relativeRead, anchor),
+        (/** @type {Error & { code?: string }} */ error) => {
+          assert.equal(error.code, "PROJECT_SETTINGS_UNSUPPORTED");
+          assert.match(error.message, /cannot be pinned/);
+          assert.match(error.message, /Do not edit or remove project permission rules/);
+          return true;
+        },
+        anchor
+      );
+    }
+  });
+
+  it("leaves rules that need no pinning alone, whatever the anchor", () => {
+    for (const rule of [
+      { tool: "Read", specifier: "//etc/passwd" },
+      { tool: "Read", specifier: "~/.ssh/**" },
+      { tool: "Bash", specifier: "rm -rf" },
+      { tool: "WebFetch", specifier: undefined },
+    ]) {
+      assert.equal(pinToAnchor(rule, "C:\\Users\\dev\\repo"), null);
+    }
+  });
+});
+
+// ===========================================================================
+// Advisor telemetry (kept here so the claude-cli mutation shard runs it)
+// ===========================================================================
+
+// Synthetic marker only. No fixture holds text from a real advisor conversation.
+const MARKER = "SYNTHETIC_ADVISOR_PAYLOAD";
+// Sanitized native shapes from tests/fixtures/advisor-evidence.json, with synthetic payload markers.
+const call = (id) => ({ type: "server_tool_use", id, name: "advisor", input: { question: MARKER } });
+const reply = (id) => ({
+  type: "advisor_tool_result",
+  tool_use_id: id,
+  content: { type: "advisor_redacted_result", encrypted_content: MARKER },
+});
+const full = (blocks, extra = {}) =>
+  JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", content: blocks }, ...extra });
+const partial = (block, extra = {}) =>
+  JSON.stringify({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: block }, ...extra });
+const terminal = (extra = {}) =>
+  JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Answer text.", session_id: "sess-advisor", model: "claude-opus-5-5", ...extra });
+const MALFORMED = [
+  `{"type":"advisor_tool_result","encrypted_content":"${MARKER}",`,
+  `{"type":"advisor_tool_result","padding":"${"x".repeat(500)}","encrypted_content":${MARKER}}`,
+];
+
+function parse(lines, requested = "fable") {
+  const parser = new StreamParser();
+  const progress = parser.feed(lines.join("\n") + "\n");
+  progress.push(...parser.flush());
+  return { parser, progress, advisor: summarizeAdvisorTelemetry(parser.state.advisor, requested) };
+}
+
+function assertNoPayload(value, where) {
+  assert.equal(JSON.stringify(value).includes(MARKER), false, `advisor payload leaked through ${where}`);
+}
+
+describe("advisor call telemetry in the stream parser", () => {
+  it("counts the same call ID in partial and full records once and does not count the result block", () => {
+    const { parser, progress, advisor } = parse([
+      partial(call("srvtoolu_a")),
+      partial(reply("srvtoolu_a")),
+      full([call("srvtoolu_a"), reply("srvtoolu_a")]),
+      terminal(),
+    ]);
+    assert.deepEqual(advisor, {
+      requested: "fable",
+      calls: 1,
+      countExact: true,
+      observedModel: null,
+      status: "observed",
+      diagnostics: [],
+    });
+    assertNoPayload({ state: parser.state, progress }, "parser state or progress");
+  });
+
+  it("counts distinct IDs and ignores repeated records of one call", () => {
+    const { advisor } = parse([
+      full([call("srvtoolu_a")]),
+      full([call("srvtoolu_a")]),
+      partial(call("srvtoolu_b")),
+      full([call("srvtoolu_b"), reply("srvtoolu_b")]),
+      terminal(),
+    ]);
+    assert.equal(advisor.calls, 2);
+    assert.equal(advisor.countExact, true);
+  });
+
+  it("does not count a result that arrives before its call", () => {
+    const { advisor } = parse([partial(reply("srvtoolu_a")), partial(call("srvtoolu_a")), terminal()]);
+    assert.equal(advisor.calls, 1);
+    assert.equal(advisor.status, "observed");
+  });
+
+  for (const [name, id] of [["a missing", undefined], ["a numeric", 7], ["an oversized", "x".repeat(129)], ["a spaced", "bad id"]]) {
+    it(`marks the count incomplete for ${name} call ID`, () => {
+      const { parser, progress, advisor } = parse([full([call("srvtoolu_a")]), partial(call(id)), terminal()]);
+      assert.equal(advisor.calls, 1, "calls holds only identified calls");
+      assert.equal(advisor.countExact, false);
+      assert.equal(advisor.status, "incomplete");
+      assert.deepEqual(advisor.diagnostics, ["CALL_ID_MISSING"]);
+      assertNoPayload({ state: parser.state, progress }, "parser state or progress");
+    });
+  }
+
+  it("bounds the retained IDs and reports an inexact count when the bound is reached", () => {
+    const lines = [];
+    for (let index = 0; index < MAX_STREAM_PARSER_ADVISOR_CALL_IDS + 5; index++) lines.push(partial(call(`srvtoolu_${index}`)));
+    const { parser, advisor } = parse([...lines, ...lines, terminal()]);
+    assert.equal(parser.state.advisor.callIds.length, MAX_STREAM_PARSER_ADVISOR_CALL_IDS);
+    assert.equal(advisor.calls, MAX_STREAM_PARSER_ADVISOR_CALL_IDS);
+    assert.equal(advisor.countExact, false);
+    assert.equal(advisor.status, "incomplete");
+    assert.deepEqual(advisor.diagnostics, ["CALL_ID_LIMIT"]);
+  });
+
+  it("keeps forwarded subagent advisor blocks out of primary accounting and progress", () => {
+    const nested = { parent_tool_use_id: "toolu_task" };
+    const { parser, progress, advisor } = parse([
+      full([call("srvtoolu_nested"), reply("srvtoolu_nested")], nested),
+      partial(call("srvtoolu_nested_partial"), nested),
+      terminal(),
+    ]);
+    assert.equal(advisor.calls, 0);
+    assert.equal(advisor.status, "not_observed");
+    assertNoPayload({ state: parser.state, progress }, "subagent progress");
+  });
+
+  it("reports zero calls on a successful turn as not observed, not as disabled", () => {
+    const { parser, advisor } = parse([terminal()], "inherit");
+    assert.equal(parser.state.receivedTerminalEvent, true);
+    assert.deepEqual(advisor, {
+      requested: "inherit",
+      calls: 0,
+      countExact: true,
+      observedModel: null,
+      status: "not_observed",
+      diagnostics: [],
+    });
+  });
+
+  it("keeps primary model, tools, touched files, answer text and context attribution", () => {
+    const { parser } = parse([
+      JSON.stringify({ type: "system", subtype: "init", session_id: "sess-advisor", model: "claude-opus-5-5" }),
+      partial({ type: "tool_use", id: "toolu_w", name: "Write", input: { file_path: "src/a.txt" } }),
+      partial(call("srvtoolu_a")),
+      full([{ type: "tool_use", id: "toolu_w", name: "Write", input: { file_path: "src/a.txt" } }, call("srvtoolu_a"), reply("srvtoolu_a")]),
+      JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Answer text." } } }),
+      terminal({
+        model: undefined,
+        modelUsage: {
+          "claude-opus-5-5": { contextWindow: 200000 },
+          "claude-fable-5-1": { contextWindow: 1000000 },
+        },
+      }),
+    ]);
+    assert.equal(parser.state.finalModel, "claude-opus-5-5");
+    assert.equal(parser.state.contextWindow, 200000);
+    assert.deepEqual(parser.state.toolUses, [{ tool: "Write", input: { file_path: "src/a.txt" } }]);
+    assert.deepEqual(parser.state.touchedFiles, ["src/a.txt"]);
+    assert.equal(parser.state.finalMessage, "Answer text.");
+    assert.deepEqual(parser.state.modelEvents, []);
+  });
+
+  it("keeps a bounded error count without raw text for malformed records", () => {
+    for (const line of MALFORMED) {
+      const { parser, progress, advisor } = parse([full([call("srvtoolu_a")]), line, terminal()]);
+      assert.equal(parser.state.unresolvedParseErrors, 1);
+      assert.deepEqual(parser.state.parseErrors, [{ code: "INVALID_JSON", length: line.length }]);
+      assert.equal(advisor.calls, 1, "a malformed record does not discard the valid primary stream");
+      assert.equal(parser.state.finalMessage, "Answer text.");
+      assertNoPayload({ state: parser.state, progress }, "malformed-record diagnostics");
+    }
+  });
+
+  it("does not forward raw native events in progress", () => {
+    const { progress } = parse([
+      JSON.stringify({ type: "system", subtype: "api_retry", attempt: 1, extra: MARKER }),
+      JSON.stringify({ type: "system", subtype: "model_fallback", from_model: "claude-opus-5-5", to_model: "claude-sonnet-5-5", extra: MARKER }),
+      terminal({ extra: MARKER }),
+    ]);
+    assert.ok(progress.length >= 2);
+    for (const event of progress) assert.equal("data" in event, false);
+    assertNoPayload(progress, "progress events");
+  });
+});
+
+describe("runClaudeTurn advisor telemetry and spawn lifecycle", () => {
+  function withFakeClaude(source, run) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-advisor-"));
+    const oldPath = process.env.PATH ?? "";
+    createFakeClaudeCommand(tmpDir, source);
+    process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+    return Promise.resolve().then(run).finally(() => {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+  }
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("returns the observed call after a terminal failure", () => {
+    const lines = [
+      full([call("srvtoolu_a"), reply("srvtoolu_a")]),
+      terminal({ subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: "partial" }),
+    ];
+    return withFakeClaude(
+      `process.stdout.write(${JSON.stringify(lines.join("\n") + "\n")}, () => process.exit(1));\n`,
+      async () => {
+        // An explicit model needs a version probe; "inherit" keeps this test on the stream path.
+        const result = await runClaudeTurn(process.cwd(), "prompt", { advisor: "inherit" });
+        assert.equal(result.status, "failed");
+        assert.equal(result.failure.terminalCategory, "CLAUDE_MAX_TURNS");
+        assert.equal(result.finalModel, "claude-opus-5-5");
+        assert.deepEqual(result.advisor, {
+          requested: "inherit",
+          calls: 1,
+          countExact: true,
+          observedModel: null,
+          status: "observed",
+          diagnostics: [],
+        });
+        assertNoPayload(result, "the runClaudeTurn result");
+      }
+    );
+  });
+
+  it("stops and reaps the child before it rejects when onSpawn throws", () => {
+    let pid = null;
+    return withFakeClaude("process.stdin.resume();\nsetInterval(() => {}, 1000);\n", async () => {
+      try {
+        await assert.rejects(
+          runClaudeTurn(process.cwd(), "prompt", {
+            onSpawn: (spawned) => {
+              pid = spawned.pid;
+              throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+            },
+          }),
+          { code: "ENOSPC" }
+        );
+        assert.ok(Number.isInteger(pid));
+        assert.equal(alive(pid), false, "the child must be stopped and reaped before the rejection");
+      } finally {
+        if (pid && alive(pid)) {
+          try { process.kill(-pid, "SIGKILL"); } catch {}
+        }
+      }
+    });
+  });
+
+  it("stops progress after onSpawn fails and still rejects with the spawn error after the child stops", () => {
+    // A separate runner process: before the fix, the progress exception is uncaught and would kill this test runner.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-progress-"));
+    const marker = path.join(tmpDir, "ready.json");
+    createFakeClaudeCommand(
+      tmpDir,
+      `process.on("SIGTERM", () => {});\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid }));\nsetInterval(() => process.stdout.write(JSON.stringify({ type: "system", subtype: "api_retry" }) + "\\n"), 25);\n`
+    );
+    const runner = path.join(tmpDir, "runner.mjs");
+    const moduleUrl = new URL("../scripts/lib/claude-cli.mjs", import.meta.url).href;
+    fs.writeFileSync(runner, `import fs from "node:fs";
+import { runClaudeTurn } from ${JSON.stringify(moduleUrl)};
+try {
+  await runClaudeTurn(${JSON.stringify(tmpDir)}, "prompt", {
+    onSpawn() {
+      const until = Date.now() + 5000;
+      while (!fs.existsSync(${JSON.stringify(marker)}) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      if (!fs.existsSync(${JSON.stringify(marker)})) throw new Error("FIXTURE_NOT_READY");
+      throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+    },
+    onProgress() { throw new Error("PROGRESS_ENOSPC"); },
+  });
+  process.exitCode = 2;
+} catch (error) {
+  console.log(JSON.stringify({ code: error.code ?? error.message }));
+}
+`);
+    let pid = null;
+    try {
+      const result = spawnSync(process.execPath, [runner], {
+        encoding: "utf8",
+        timeout: 20_000,
+        env: { ...process.env, PATH: `${tmpDir}${path.delimiter}${process.env.PATH ?? ""}` },
+      });
+      if (fs.existsSync(marker)) pid = JSON.parse(fs.readFileSync(marker, "utf8")).pid;
+      assert.ok(Number.isInteger(pid), "the fake Claude child must report readiness");
+      assert.equal(result.stderr.includes("PROGRESS_ENOSPC"), false, "progress must not run after onSpawn failed");
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout.trim()), { code: "ENOSPC" });
+      assert.equal(alive(pid), false, "the child must be stopped before the rejection");
+    } finally {
+      if (Number.isInteger(pid) && alive(pid)) {
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops a SIGTERM-ignoring descendant in the child group before it rejects", () => {
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-descendant-"));
+    const marker = path.join(markerDir, "ready.json");
+    // The descendant ignores SIGTERM first, then reports its pid and parent.
+    const descendant = `process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid, parent: process.ppid })); setInterval(() => {}, 1000);`;
+    let pid = null;
+    let descendantPid = null;
+    return withFakeClaude(
+      `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: "ignore" });\nsetInterval(() => {}, 1000);\n`,
+      async () => {
+        try {
+          await assert.rejects(
+            runClaudeTurn(process.cwd(), "prompt", {
+              onSpawn: (spawned) => {
+                pid = spawned.pid;
+                const until = Date.now() + 5000;
+                while (!fs.existsSync(marker) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+                const ready = JSON.parse(fs.readFileSync(marker, "utf8"));
+                assert.equal(ready.parent, pid);
+                descendantPid = ready.pid;
+                throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+              },
+            }),
+            { code: "ENOSPC" }
+          );
+          assert.equal(alive(pid), false, "the direct child must be stopped");
+          assert.equal(alive(descendantPid), false, "the descendant must be stopped before the rejection");
+        } finally {
+          for (const owned of [descendantPid, pid]) {
+            if (Number.isInteger(owned) && alive(owned)) {
+              try { process.kill(owned, "SIGKILL"); } catch {}
+            }
+          }
+          fs.rmSync(markerDir, { recursive: true, force: true });
+        }
+      }
+    );
+  });
+});
+
+describe("StreamParser untrusted metadata", () => {
+  const METADATA_MARKER = "SYNTHETIC_ADVISOR_PRIVATE_METADATA";
+  const oversized = "x_" + METADATA_MARKER.repeat(50);
+  const feed = (...events) => {
+    const parser = new StreamParser();
+    const progress = parser.feed(events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+    progress.push(...parser.flush());
+    assert.equal(JSON.stringify({ state: parser.state, progress }).includes(METADATA_MARKER), false, "metadata payload retained");
+    return parser;
+  };
+
+  it("keeps an unknown event type only as a bounded token", () => {
+    const parser = feed({ type: { advisor_tool_result: { encrypted_content: METADATA_MARKER } } }, { type: oversized }, { type: "unknown_event-2" });
+    assert.deepEqual(parser.state.unknownEvents.map(({ type }) => type), [null, null, "unknown_event-2"]);
+  });
+
+  it("does not adopt an object-valued or oversized session id, and still adopts a valid one", () => {
+    const parser = feed(
+      { type: "system", subtype: "init", session_id: { advisor: METADATA_MARKER } },
+      { type: "system", subtype: "init", session_id: oversized }
+    );
+    assert.equal(parser.state.sessionId, null);
+    const recovered = feed(
+      { type: "system", subtype: "init", session_id: oversized },
+      { type: "result", subtype: "success", is_error: false, result: "Answer text.", session_id: "11111111-2222-4333-8444-555555555555" }
+    );
+    assert.equal(recovered.state.sessionId, "11111111-2222-4333-8444-555555555555");
+    assert.equal(recovered.state.finalMessage, "Answer text.");
+  });
+
+  for (const field of ["subtype", "terminal_reason"]) {
+    it(`replaces an oversized terminal ${field} and keeps the turn fail-closed`, () => {
+      const event = { type: "result", subtype: "success", is_error: false, result: "Answer text.", [field]: oversized };
+      const parser = feed(event);
+      assert.equal(parser.state.terminalSubtype === "success" ? parser.state.terminalReason : parser.state.terminalSubtype, "unsupported_metadata");
+      assert.equal(validateTurnCompletion(parser.state, 0).failure?.terminalCategory, "CLAUDE_UNKNOWN_TERMINAL");
+      assert.equal(parser.state.finalMessage, "Answer text.");
+    });
+  }
 });

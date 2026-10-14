@@ -18,6 +18,7 @@ import {
   renderCancelReport,
   renderWorkflowStatusReport,
   renderWorkflowResult,
+  formatAdvisorTelemetry,
 } from "../scripts/lib/render.mjs";
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,40 @@ describe("validateReviewResultShape", () => {
 // ---------------------------------------------------------------------------
 // formatJobLine
 // ---------------------------------------------------------------------------
+
+describe("formatAdvisorTelemetry", () => {
+  const telemetry = (fields) => ({ requested: "fable", calls: 0, countExact: true, observedModel: null, status: "not_observed", diagnostics: [], ...fields });
+
+  it("returns an empty string for absent or malformed telemetry", () => {
+    for (const value of [undefined, null, "observed", {}, { calls: -1 }, { calls: 1.5 }, { calls: "2" }]) {
+      assert.equal(formatAdvisorTelemetry(value), "");
+    }
+  });
+
+  it("states no observed calls without a model claim", () => {
+    assert.equal(formatAdvisorTelemetry(telemetry({})), "fable requested; no calls observed");
+  });
+
+  it("uses singular and plural call counts", () => {
+    assert.equal(formatAdvisorTelemetry(telemetry({ calls: 1, status: "observed" })), "fable requested; 1 call observed; advisor model not reported");
+    assert.equal(formatAdvisorTelemetry(telemetry({ calls: 3, status: "observed" })), "fable requested; 3 calls observed; advisor model not reported");
+  });
+
+  it("states an incomplete count as a lower bound, also with zero identified calls", () => {
+    assert.equal(
+      formatAdvisorTelemetry(telemetry({ calls: 0, countExact: false, status: "incomplete" })),
+      "fable requested; at least 0 calls observed (count incomplete); advisor model not reported"
+    );
+    assert.equal(
+      formatAdvisorTelemetry(telemetry({ calls: 2, countExact: false, status: "incomplete" })),
+      "fable requested; at least 2 calls observed (count incomplete); advisor model not reported"
+    );
+  });
+
+  it("falls back to inherit for a non-string requested policy", () => {
+    assert.equal(formatAdvisorTelemetry(telemetry({ requested: 7 })), "inherit requested; no calls observed");
+  });
+});
 
 describe("formatJobLine", () => {
   it("includes job id and status", () => {
@@ -436,6 +471,37 @@ describe("renderTaskResult", () => {
     assert.match(output, /Not logged in/);
   });
 
+  it("renders a proven organization subscription refusal without login or retry advice", () => {
+    const output = renderTaskResult({
+      rawOutput: "UNTRUSTED_PARTIAL_PROVIDER_MARKER",
+      failure: {
+        kind: "claude_subscription_refused",
+        terminalCategory: "CLAUDE_API_ERROR",
+        message: "Your organization has disabled Claude subscription access for Claude Code",
+      },
+    });
+
+    assert.match(output, /organization has disabled Claude subscription access/i);
+    assert.match(output, /ANTHROPIC_API_KEY|administrator/);
+    assert.doesNotMatch(output, /auth login|usage limit/i);
+    assert.doesNotMatch(output, /UNTRUSTED_PARTIAL_PROVIDER_MARKER/);
+  });
+
+  it("renders an unsupported required CLI option as an operator action", () => {
+    const output = renderTaskResult({
+      failure: {
+        kind: "claude_cli_unsupported",
+        option: "--setting-sources",
+        message: "error: unknown option '--setting-sources'",
+      },
+    });
+
+    assert.match(output, /does not support the required option --setting-sources/);
+    assert.match(output, /operator must update Claude Code/);
+    assert.match(output, /did not retry without it/);
+    assert.doesNotMatch(output, /auth login/);
+  });
+
   it("renders bounded structured terminal failures without partial provider text", () => {
     const output = renderTaskResult({
       rawOutput: "UNTRUSTED_PARTIAL_PROVIDER_MARKER",
@@ -748,6 +814,20 @@ describe("peer workflow rendering", () => {
 // ---------------------------------------------------------------------------
 
 describe("renderJobStatusReport", () => {
+  it("names a proven refusal in the Failure row instead of the generic terminal category", () => {
+    const output = renderJobStatusReport({
+      id: "task-1",
+      status: "failed",
+      failure: {
+        kind: "claude_subscription_refused",
+        terminalCategory: "CLAUDE_API_ERROR",
+        message: "Your organization has disabled Claude subscription access",
+      },
+    });
+
+    assert.match(output, /\| Failure \| claude_subscription_refused \|/);
+  });
+
   it("renders job status as a key-value markdown table with links", () => {
     const job = {
       id: "j1",

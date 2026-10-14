@@ -24,8 +24,10 @@ import {
   isAmbiguousLegacyIdentity,
   isProcessAlive,
   isProcessGroupAlive,
+  terminateProcessTree,
   terminateProcessTreeIfIdentityMatches,
 } from "./process.mjs";
+import { collectProjectReviewRestrictions } from "./review-worktree.mjs";
 
 const CLAUDE_BIN = "claude";
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
@@ -34,6 +36,8 @@ export const MAX_STREAM_PARSER_DIAGNOSTICS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
 export const MAX_STREAM_PARSER_TOUCHED_FILES = 256;
 export const MAX_STREAM_PARSER_MODEL_EVENTS = 50;
+export const MAX_STREAM_PARSER_ADVISOR_CALL_IDS = 256;
+const ADVISOR_CALL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 export const MAX_STDERR_BYTES = 64 * 1024;
 export const SANDBOX_TEMP_DIR = normalizePathSlashes(path.resolve(os.tmpdir()));
 
@@ -129,6 +133,14 @@ function pushBoundedTail(list, value, maxEntries) {
   if (list.length > maxEntries) {
     list.splice(0, list.length - maxEntries);
   }
+}
+
+// Untrusted stream metadata is kept only as a short identifier token. Anything
+// else (objects, long strings) can carry private payload and is not retained.
+const METADATA_TOKEN_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const UNSUPPORTED_METADATA = "unsupported_metadata";
+function metadataToken(value) {
+  return typeof value === "string" && METADATA_TOKEN_RE.test(value) ? value : null;
 }
 
 function pushUniqueBoundedTail(list, value, maxEntries) {
@@ -320,6 +332,10 @@ const CLAUDE_ERROR_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+(?:hit|reached)\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|\b429\b/i;
 const CLAUDE_AUTH_ERROR_RE =
   /\bnot (?:logged|signed) in\b|\bnot authenticated\b|\bauthentication required\b|\binvalid api key\b|\b(?:oauth|access) token\b.{0,80}\bexpired\b|\bclaude auth login\b/i;
+// Exact refusal observed from Claude Code when an organization disables subscription access.
+const CLAUDE_SUBSCRIPTION_REFUSAL_RE =
+  /\borganization has disabled Claude subscription access\b/i;
+const CLAUDE_UNKNOWN_OPTION_RE = /\berror: unknown option '(-{1,2}[A-Za-z0-9][\w-]*)'/;
 const CLAUDE_USAGE_LIMIT_EPOCH_RE =
   /\b(?:claude\s+ai\s+)?(?:session|usage)\s+limit\s+reached\|(\d{10}|\d{13})\b/i;
 const CLAUDE_USAGE_LIMIT_EPOCH_GLOBAL_RE =
@@ -408,6 +424,36 @@ export function classifyClaudeFailure(value = {}) {
     return {
       kind: "claude_auth",
       message,
+      resetText: null,
+    };
+  }
+  // Both signals below need a real error: the result text of an API-error terminal
+  // event (`terminalErrorText`, never the merged streamed answer), or stderr from a
+  // command that failed before any terminal event. A successful answer, or a run that
+  // ends for another reason, is not a refusal just because its text quotes the message.
+  const failedBeforeTerminal = Boolean(
+    stderr &&
+      value.exitCode !== 0 &&
+      Number.isInteger(value.exitCode) &&
+      value.receivedTerminalEvent === false
+  );
+  if (
+    (typeof value.terminalErrorText === "string" &&
+      CLAUDE_SUBSCRIPTION_REFUSAL_RE.test(value.terminalErrorText)) ||
+    (failedBeforeTerminal && CLAUDE_SUBSCRIPTION_REFUSAL_RE.test(stderr))
+  ) {
+    return {
+      kind: "claude_subscription_refused",
+      message,
+      resetText: null,
+    };
+  }
+  const unknownOption = failedBeforeTerminal ? CLAUDE_UNKNOWN_OPTION_RE.exec(stderr) : null;
+  if (unknownOption) {
+    return {
+      kind: "claude_cli_unsupported",
+      message,
+      option: unknownOption[1],
       resetText: null,
     };
   }
@@ -564,30 +610,218 @@ export function getClaudeAvailability(cwd) {
   }
 }
 
+// Oldest Claude Code CLI supported for protected (project-isolated) reviews.
+// 2.1.281 forwards --setting-sources to spawned sessions (official changelog);
+// a documented conservative floor, not a tested matrix of later releases.
+export const MIN_PROTECTED_REVIEW_CLAUDE_VERSION = "2.1.281";
+
+// Stable releases only: "2.1.296" or "2.1.296 (Claude Code)". Prereleases and
+// unknown suffixes are not trusted to carry a capability.
+function parseClaudeVersion(text) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?: \(Claude Code\))?$/.exec(String(text ?? "").trim());
+  return match ? match.slice(1).map(Number) : null;
+}
+
+/** True when `versionText` is a stable Claude Code release at or above `minimum`. */
+export function isClaudeVersionAtLeast(versionText, minimum) {
+  const found = parseClaudeVersion(versionText);
+  const floor = parseClaudeVersion(minimum);
+  if (!found || !floor) return false;
+  const difference = found.map((part, index) => part - floor[index]).find((part) => part !== 0);
+  return difference === undefined || difference > 0;
+}
+
+function assertProtectedReviewSupport(cwd) {
+  const availability = getClaudeAvailability(cwd);
+  if (
+    availability.available &&
+    isClaudeVersionAtLeast(availability.detail, MIN_PROTECTED_REVIEW_CLAUDE_VERSION)
+  ) {
+    return;
+  }
+  const detail = availability.available
+    ? `found ${JSON.stringify(availability.detail || "no version")}`
+    : availability.detail;
+  throw Object.assign(
+    new Error(
+      `CLAUDE_REVIEW_UNSUPPORTED: Protected reviews require Claude Code CLI ${MIN_PROTECTED_REVIEW_CLAUDE_VERSION} or later (${detail}). ` +
+        "The review did not start. An operator must update Claude Code; the plugin does not retry with weaker isolation."
+    ),
+    { code: "CLAUDE_REVIEW_UNSUPPORTED" }
+  );
+}
+
+// Oldest stable CLI known to accept the hidden `--advisor <model>` flag. The
+// flag is not listed in `--help`, so support is decided from the version alone.
+export const MIN_ADVISOR_CLAUDE_VERSION = "2.1.293";
+const ADVISOR_DISABLE_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL";
+const ADVISOR_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}(\[[A-Za-z0-9]{1,16}\])?$/;
+
+/**
+ * Normalize an advisor policy: `undefined` (not given), "inherit", "off", or an
+ * alias/model id for the native `--advisor` flag. Throws before any model turn.
+ */
+export function normalizeAdvisorPolicy(value) {
+  if (value == null) return undefined;
+  if (typeof value !== "string") {
+    const kind = Array.isArray(value) ? "array" : typeof value;
+    throw Object.assign(
+      new Error(`CLAUDE_ADVISOR_INVALID: Invalid advisor of type ${kind}. Use inherit, off, a model alias, or a model ID.`),
+      { code: "CLAUDE_ADVISOR_INVALID" }
+    );
+  }
+  const text = value.trim();
+  const lowered = text.toLowerCase();
+  if (lowered === "inherit" || lowered === "off") return lowered;
+  if (!ADVISOR_MODEL_RE.test(text)) {
+    throw Object.assign(
+      new Error(
+        `CLAUDE_ADVISOR_INVALID: Invalid advisor ${JSON.stringify(text.slice(0, 40))}. ` +
+          "Use inherit, off, a model alias, or a model ID."
+      ),
+      { code: "CLAUDE_ADVISOR_INVALID" }
+    );
+  }
+  return MODEL_ALIASES.get(lowered) ?? text;
+}
+
+const isExplicitAdvisor = (policy) => policy !== undefined && policy !== "inherit" && policy !== "off";
+
+/** Refuse an explicit advisor model before a turn when the CLI cannot be proven to support it. */
+export function assertAdvisorSupport(cwd, policy) {
+  if (!isExplicitAdvisor(normalizeAdvisorPolicy(policy))) return;
+  const availability = getClaudeAvailability(cwd);
+  if (availability.available && isClaudeVersionAtLeast(availability.detail, MIN_ADVISOR_CLAUDE_VERSION)) {
+    return;
+  }
+  const detail = availability.available
+    ? `found ${JSON.stringify(availability.detail || "no version")}`
+    : availability.detail;
+  throw Object.assign(
+    new Error(
+      `CLAUDE_ADVISOR_UNSUPPORTED: An explicit advisor requires Claude Code CLI ${MIN_ADVISOR_CLAUDE_VERSION} or later (${detail}). ` +
+        "The turn did not start. Update Claude Code, or use --advisor inherit or --advisor off. " +
+        "The plugin does not retry without the requested advisor."
+    ),
+    { code: "CLAUDE_ADVISOR_UNSUPPORTED" }
+  );
+}
+
+/**
+ * Probe `claude auth status`. `state` separates a confirmed logout
+ * ("unauthenticated") from probe failures that prove nothing about the login:
+ * "timeout", "spawn_failed" and "probe_failed". `loggedIn` is true only for
+ * "authenticated" and "api_key".
+ */
 export function getClaudeAuthStatus(cwd) {
   if (process.env.ANTHROPIC_API_KEY) {
-    return { available: true, loggedIn: true, detail: "API key configured" };
+    return { available: true, loggedIn: true, state: "api_key", detail: "API key configured" };
   }
-  try {
-    const command = resolveClaudeCommand();
-    if (command.error) {
-      return { available: false, loggedIn: false, detail: command.error };
-    }
-    const result = spawnSync(command.executable, [...command.prefixArgs, "auth", "status"], {
-      cwd,
-      encoding: "utf8",
-      timeout: 10_000,
-      windowsHide: true,
-    });
-    if (result.status !== 0) throw new Error("not authenticated");
-    return { available: true, loggedIn: true, detail: "authenticated" };
-  } catch {
+  const command = resolveClaudeCommand();
+  if (command.error) {
+    return { available: false, loggedIn: false, state: "spawn_failed", detail: command.error };
+  }
+  const result = spawnSync(command.executable, [...command.prefixArgs, "auth", "status"], {
+    cwd,
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  const spawnError = /** @type {NodeJS.ErrnoException | undefined} */ (result.error);
+  if (spawnError?.code === "ETIMEDOUT") {
     return {
       available: true,
       loggedIn: false,
+      state: "timeout",
+      detail: "`claude auth status` did not finish within 10 seconds",
+    };
+  }
+  if (spawnError) {
+    return {
+      available: false,
+      loggedIn: false,
+      state: "spawn_failed",
+      detail: `claude CLI could not be started (${spawnError.code ?? spawnError.message})`,
+    };
+  }
+  const stdout = String(result.stdout ?? "");
+  let reported = null;
+  try {
+    reported = JSON.parse(stdout);
+  } catch {}
+  if (
+    reported?.loggedIn === false ||
+    (result.status !== 0 && CLAUDE_AUTH_ERROR_RE.test(`${stdout}\n${result.stderr ?? ""}`))
+  ) {
+    return {
+      available: true,
+      loggedIn: false,
+      state: "unauthenticated",
       detail: "not authenticated — run `claude auth login`",
     };
   }
+  if (result.status === 0) {
+    return { available: true, loggedIn: true, state: "authenticated", detail: "authenticated" };
+  }
+  return {
+    available: true,
+    loggedIn: false,
+    state: "probe_failed",
+    detail: `\`claude auth status\` failed (${result.status === null ? `signal ${result.signal}` : `exit ${result.status}`})`,
+  };
+}
+
+/**
+ * Turn a failed `getClaudeAuthStatus` result into a stable code and a message
+ * that recommends `claude auth login` only for a confirmed logout.
+ */
+export function claudeAuthProblem(status) {
+  if (status.loggedIn) return null;
+  switch (status.state) {
+    case "unauthenticated":
+      return {
+        code: "CLAUDE_AUTH",
+        message: "Claude Code CLI is not authenticated. Run `claude auth login` and retry.",
+      };
+    case "timeout":
+      return {
+        code: "CLAUDE_AUTH_PROBE_TIMEOUT",
+        message:
+          "The Claude Code authentication check timed out, so the login state is unknown. Run `claude auth status`, then retry.",
+      };
+    case "probe_failed":
+      return {
+        code: "CLAUDE_AUTH_PROBE_FAILED",
+        message: `The Claude Code authentication check failed, so the login state is unknown (${status.detail}). Run \`claude auth status\` to see why, then retry.`,
+      };
+    default:
+      return {
+        code: "CLAUDE_UNAVAILABLE",
+        message:
+          "Claude Code CLI is not installed or is missing required runtime support. Install it, then rerun `$cc:setup`.",
+      };
+  }
+}
+
+/**
+ * Bounded advisor telemetry for one primary turn. `requested` is the plugin
+ * policy; the other fields are observations. `calls` counts distinct advisor
+ * call IDs and is a lower bound when `countExact` is false. Zero calls is
+ * "not_observed", not proof that the advisor was disabled. The native stream
+ * does not identify the advisor model, so `observedModel` stays null.
+ */
+export function summarizeAdvisorTelemetry(advisor, requested) {
+  const calls = Array.isArray(advisor?.callIds) ? advisor.callIds.length : 0;
+  const diagnostics = Array.isArray(advisor?.diagnostics) ? [...advisor.diagnostics] : [];
+  const countExact = diagnostics.length === 0;
+  return {
+    requested: normalizeAdvisorPolicy(requested) ?? "inherit",
+    calls,
+    countExact,
+    observedModel: null,
+    status: !countExact ? "incomplete" : calls > 0 ? "observed" : "not_observed",
+    diagnostics,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +838,7 @@ export class StreamParser {
       terminalSubtype: null,
       terminalReason: null,
       terminalIsError: null,
+      terminalResultText: "",
       receivedTerminalEvent: false,
       unknownEvents: [],
       parseErrors: [],
@@ -611,6 +846,7 @@ export class StreamParser {
       streamDiagnostics: [],
       toolUses: [],
       touchedFiles: [],
+      advisor: { callIds: [], diagnostics: [] },
       modelEvents: [],
       finalModel: null,
       contextWindow: null,
@@ -652,15 +888,22 @@ export class StreamParser {
       );
       return null;
     }
+    let event;
     try {
-      const event = JSON.parse(line);
+      event = JSON.parse(line);
+    } catch {
+      // Keep no raw text: the line and the JSON.parse message can both hold private payload.
+      return this._recordParseError("INVALID_JSON", line);
+    }
+    try {
       // Forwarded subagent events (--forward-subagent-text) carry
       // parent_tool_use_id. Surface them as display-only progress; never let
       // them touch parent-turn state (finalMessage/toolUses/session/model).
       if (event.parent_tool_use_id) return this._handleSubagentEvent(event);
       // Extract session_id from any event
-      if (event.session_id && !this.state.sessionId) {
-        this.state.sessionId = event.session_id;
+      const sessionId = metadataToken(event.session_id);
+      if (sessionId && !this.state.sessionId) {
+        this.state.sessionId = sessionId;
       }
       const modelEvent = compactModelEvent(event);
       if (modelEvent) {
@@ -673,7 +916,6 @@ export class StreamParser {
         return {
           kind: "model_fallback",
           modelFallback: modelEvent,
-          data: event,
           message: formatModelEventMessage(modelEvent),
           phase: "model_fallback",
           threadId: this.state.sessionId,
@@ -686,6 +928,8 @@ export class StreamParser {
       if (hasSyntheticModelSignal(event) && hasClaudeAuthText(event)) {
         this.state.hasTerminalAuthSignal = true;
       }
+      // Full records only feed advisor accounting; tools and text come from stream events.
+      if (event.type === "assistant") this._recordAdvisorCalls(event.message?.content);
       switch (event.type) {
         case "stream_event":
           return this._handleStreamEvent(event);
@@ -693,12 +937,18 @@ export class StreamParser {
           return this._handleSystemEvent(event);
         case "result":
           this.state.receivedTerminalEvent = true;
+          // A sentinel, not null: classification must stay fail-closed for unusable values.
           this.state.terminalSubtype =
-            typeof event.subtype === "string" ? event.subtype : null;
+            typeof event.subtype === "string" ? metadataToken(event.subtype) ?? UNSUPPORTED_METADATA : null;
           this.state.terminalReason =
-            typeof event.terminal_reason === "string" ? event.terminal_reason : null;
+            typeof event.terminal_reason === "string"
+              ? metadataToken(event.terminal_reason) ?? UNSUPPORTED_METADATA
+              : null;
           this.state.terminalIsError =
             typeof event.is_error === "boolean" ? event.is_error : null;
+          // Kept apart from finalMessage, which merges streamed answer text.
+          this.state.terminalResultText =
+            typeof event.result === "string" ? event.result : "";
           {
             const terminalModel = normalizeObservedModel(
               extractRawObservedModel(event)
@@ -725,22 +975,40 @@ export class StreamParser {
             }
           }
           this.state.structuredOutput = event.structured_output ?? null;
-          if (event.session_id) this.state.sessionId = event.session_id;
-          return { kind: "result", data: event };
+          if (sessionId) this.state.sessionId = sessionId;
+          return { kind: "result" };
         default:
           pushBoundedTail(this.state.unknownEvents, {
-            type: event.type,
+            type: metadataToken(event.type),
             ts: Date.now(),
           }, MAX_STREAM_PARSER_UNKNOWN_EVENTS);
           return null;
       }
-    } catch (err) {
-      this.state.unresolvedParseErrors++;
-      pushBoundedTail(this.state.parseErrors, {
-        line: line.slice(0, 200),
-        error: err.message,
-      }, MAX_STREAM_PARSER_PARSE_ERRORS);
-      return null;
+    } catch {
+      return this._recordParseError("EVENT_HANDLING_FAILED", line);
+    }
+  }
+
+  _recordParseError(code, line) {
+    this.state.unresolvedParseErrors++;
+    pushBoundedTail(this.state.parseErrors, { code, length: line.length }, MAX_STREAM_PARSER_PARSE_ERRORS);
+    return null;
+  }
+
+  /** Record advisor call IDs only. Input, advice and encrypted content are never kept. */
+  _recordAdvisorCalls(blocks) {
+    if (!Array.isArray(blocks)) return;
+    const advisor = this.state.advisor;
+    for (const block of blocks) {
+      if (block?.type !== "server_tool_use" || block.name !== "advisor") continue;
+      const id = block.id;
+      if (typeof id !== "string" || !ADVISOR_CALL_ID_RE.test(id)) {
+        pushUniqueBoundedTail(advisor.diagnostics, "CALL_ID_MISSING", MAX_STREAM_PARSER_DIAGNOSTICS);
+      } else if (!advisor.callIds.includes(id)) {
+        // A full set cannot detect a later repeat of a new ID, so the count becomes a lower bound.
+        if (advisor.callIds.length < MAX_STREAM_PARSER_ADVISOR_CALL_IDS) advisor.callIds.push(id);
+        else pushUniqueBoundedTail(advisor.diagnostics, "CALL_ID_LIMIT", MAX_STREAM_PARSER_DIAGNOSTICS);
+      }
     }
   }
 
@@ -795,6 +1063,10 @@ export class StreamParser {
           phase: "thinking",
           threadId: this.state.sessionId,
         };
+      }
+      if (cb?.type === "server_tool_use") {
+        this._recordAdvisorCalls([cb]);
+        return null;
       }
       if (cb?.type === "tool_use") {
         pushBoundedTail(
@@ -893,7 +1165,6 @@ export class StreamParser {
       return {
         kind: "system",
         subtype: "api_retry",
-        data: event,
         message: "API retry in progress",
         phase: "retry",
         threadId: this.state.sessionId,
@@ -1514,6 +1785,10 @@ export function buildArgs(prompt, options = {}) {
   if (effort) {
     args.push("--effort", effort);
   }
+  const advisor = normalizeAdvisorPolicy(options.advisor);
+  if (isExplicitAdvisor(advisor)) {
+    args.push("--advisor", advisor);
+  }
   if (options.sessionId) {
     args.push("--session-id", options.sessionId);
   }
@@ -1546,6 +1821,9 @@ export function buildArgs(prompt, options = {}) {
   if (options.permissionMode) {
     args.push("--permission-mode", options.permissionMode);
   }
+  if (options.settingSources) {
+    args.push("--setting-sources", options.settingSources.join(","));
+  }
   if (options.settingsFile) {
     args.push("--settings", options.settingsFile);
   }
@@ -1561,7 +1839,7 @@ export function buildArgs(prompt, options = {}) {
 
 /**
  * Execute a Claude Code turn with streaming progress.
- * Returns { status, sessionId, finalMessage, structuredOutput, receivedTerminalEvent, terminalSubtype, terminalReason, terminalIsError, toolUses, touchedFiles, stderr, pid, pidIdentity }
+ * Returns { status, sessionId, finalMessage, structuredOutput, receivedTerminalEvent, terminalSubtype, terminalReason, terminalIsError, toolUses, touchedFiles, advisor, stderr, pid, pidIdentity }
  */
 export async function runClaudeTurn(cwd, prompt, options = {}) {
   const args = buildArgs(prompt, {
@@ -1570,6 +1848,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
   });
   const requestedModel = resolveModel(options.model) ?? null;
   const requestedEffort = resolveEffort(options.effort) ?? null;
+  assertAdvisorSupport(cwd, options.advisor);
   const command = resolveClaudeCommand();
   if (command.error) {
     return {
@@ -1592,6 +1871,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       parseErrors: [],
       unresolvedParseErrors: 0,
       streamDiagnostics: [],
+      advisor: summarizeAdvisorTelemetry(null, options.advisor),
       failure: classifyClaudeFailure({
         stderr: command.error,
         exitCode: -1,
@@ -1616,6 +1896,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         // Env var, not the --forward-subagent-text flag: older claude builds
         // ignore unknown env vars but reject unknown CLI flags.
         CLAUDE_CODE_FORWARD_SUBAGENT_TEXT: "1",
+        // Child only. Other policies never touch an inherited disable.
+        ...(normalizeAdvisorPolicy(options.advisor) === "off" ? { [ADVISOR_DISABLE_ENV]: "1" } : {}),
       },
     });
 
@@ -1637,12 +1919,9 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       // Best-effort — may fail on some platforms
     }
 
-    // Notify caller of child PID at spawn time (before execution completes)
-    if (options.onSpawn) {
-      options.onSpawn({ pid: proc.pid, pidIdentity });
-    }
-
     const parser = new StreamParser();
+    let spawnCallbackError = null;
+    let forceKillTimer = null;
     let stderr = "";
 
     proc.stderr.setEncoding("utf8");
@@ -1652,6 +1931,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
 
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk) => {
+      // After onSpawn failed, the turn only stops the child: drain stdout, but parse and report nothing.
+      if (spawnCallbackError) return;
       const events = parser.feed(chunk);
       for (const evt of events) {
         if (options.onProgress) {
@@ -1661,6 +1942,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     });
 
     proc.on("close", (code) => {
+      if (spawnCallbackError) {
+        clearTimeout(forceKillTimer);
+        stopSpawnedGroup(proc.pid).finally(() => reject(spawnCallbackError));
+        return;
+      }
       // Flush remaining buffer
       const remaining = parser.flush();
       for (const evt of remaining) {
@@ -1692,6 +1978,12 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         finalMessage: parser.state.finalMessage,
         finalMessageHasLimitSignal: parser.state.hasTerminalLimitSignal,
         finalMessageHasAuthSignal: parser.state.hasTerminalAuthSignal,
+        // Only an API-error terminal's own result text can prove a refusal.
+        terminalErrorText:
+          parser.state.terminalIsError === true &&
+          validation.failure?.terminalCategory === "CLAUDE_API_ERROR"
+            ? parser.state.terminalResultText
+            : "",
         stderr,
         exitCode: code ?? 1,
         receivedTerminalEvent: parser.state.receivedTerminalEvent,
@@ -1699,11 +1991,16 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       if (detectedFailure && validation.status !== "failed") {
         validation = { status: "failed" };
       }
-      const failure = validation.failure &&
+      let failure = validation.failure &&
         !parser.state.hasTerminalLimitSignal &&
         !parser.state.hasTerminalAuthSignal
         ? validation.failure
         : detectedFailure ?? validation.failure ?? null;
+      // A proven refusal is more specific than the generic terminal API error;
+      // keep the terminal category so job metadata stays complete.
+      if (detectedFailure?.kind === "claude_subscription_refused" && validation.failure) {
+        failure = { ...validation.failure, ...detectedFailure };
+      }
       if (
         requestedModel &&
         finalModel &&
@@ -1743,6 +2040,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         parseErrors: [...parser.state.parseErrors],
         unresolvedParseErrors: parser.state.unresolvedParseErrors,
         streamDiagnostics: [...parser.state.streamDiagnostics],
+        advisor: summarizeAdvisorTelemetry(parser.state.advisor, options.advisor),
         failure,
         stderr,
         pid: proc.pid,
@@ -1751,6 +2049,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     });
 
     proc.on("error", (err) => {
+      if (spawnCallbackError) {
+        clearTimeout(forceKillTimer);
+        reject(spawnCallbackError);
+        return;
+      }
       resolve({
         status: "failed",
         exitCode: -1,
@@ -1771,6 +2074,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         parseErrors: [],
         unresolvedParseErrors: 0,
         streamDiagnostics: [],
+        advisor: summarizeAdvisorTelemetry(null, options.advisor),
         failure: classifyClaudeFailure({
           stderr: err.message,
           exitCode: -1,
@@ -1781,6 +2085,21 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         pidIdentity,
       });
     });
+
+    // Notify caller of child PID at spawn time (before execution completes).
+    // Listeners exist first: if the callback throws, the turn rejects only on
+    // close, after the child is stopped and reaped.
+    if (options.onSpawn) {
+      try {
+        options.onSpawn({ pid: proc.pid, pidIdentity });
+      } catch (error) {
+        spawnCallbackError = error;
+        try { terminateProcessTree(proc.pid); } catch {}
+        forceKillTimer = setTimeout(() => {
+          try { process.kill(-proc.pid, "SIGKILL"); } catch {}
+        }, 5000);
+      }
+    }
 
     // Unref only for background workers — foreground callers need the process to keep Node alive
     if (options.background) {
@@ -1801,8 +2120,16 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
  * user's own permission rules can still approve it (e.g. `Bash(git diff:*)`).
  * Unless `options.tools` is given, the exposed built-ins are therefore derived
  * from the allowlist (MCP entries excluded, `Bash(...)` -> `Bash`).
+ *
+ * Every review loads only user (plus managed) settings, so project hooks, env,
+ * allow rules, MCP servers and instruction files never load. Project deny/ask
+ * rules from `cwd` and `options.originalCwd` (the user's checkout when `cwd`
+ * is a review worktree) are re-applied through `--disallowedTools`. Throws
+ * before launching Claude when the CLI is too old or a rule cannot be kept.
  */
 export async function runClaudeReview(cwd, prompt, options = {}) {
+  assertProtectedReviewSupport(cwd);
+  const projectRestrictions = collectProjectReviewRestrictions(cwd, options.originalCwd ?? cwd);
   const allowedTools = options.allowedTools ?? SANDBOX_REVIEW_TOOLS;
   const tools = options.tools ?? [...new Set(
     allowedTools
@@ -1816,6 +2143,8 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     ...options,
     allowedTools,
     tools,
+    settingSources: ["user"],
+    disallowedTools: [...new Set([...(options.disallowedTools ?? []), ...projectRestrictions])],
   });
 
   return {
@@ -1834,6 +2163,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     parseErrors: result.parseErrors,
     unresolvedParseErrors: result.unresolvedParseErrors,
     streamDiagnostics: result.streamDiagnostics,
+    advisor: result.advisor,
     terminalSubtype: result.terminalSubtype,
     terminalReason: result.terminalReason,
     terminalIsError: result.terminalIsError,
@@ -1995,6 +2325,19 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
     cancelled: false,
     note: `Process group ${pid} still alive after SIGKILL`,
   };
+}
+
+/**
+ * After the leader of an owned child group exits, stop descendants that
+ * ignored SIGTERM: wait 5 s, then SIGKILL and wait 3 s, as cancelClaudeProcess
+ * does. The group id stays reserved while any member lives, so the signal
+ * cannot reach a recycled process. Windows already ran `taskkill /T /F`.
+ */
+async function stopSpawnedGroup(pgid) {
+  if (process.platform === "win32" || !Number.isInteger(pgid) || !isProcessGroupAlive(pgid)) return;
+  if (await waitForProcessGroup(pgid, 5000)) return;
+  try { process.kill(-pgid, "SIGKILL"); } catch {}
+  await waitForProcessGroup(pgid, 3000);
 }
 
 async function waitForProcessGroup(pgid, timeoutMs) {

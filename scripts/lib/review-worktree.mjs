@@ -5,10 +5,12 @@
 /**
  * Ephemeral git worktree lifecycle for review/adversarial-review runs.
  *
- * A review is run inside a throwaway `git worktree` so that any side effect that
- * slips past the allowlist (a stray `Bash` injection, a tool that writes outside
- * `/tmp`, etc.) is contained and disappears on cleanup. The worktree shares the
- * primary repo's object database, so creating one is cheap.
+ * A branch review runs inside a throwaway `git worktree` so that the reviewed
+ * commit is checked out apart from the user's checkout and is removed on
+ * cleanup. This is not a filesystem sandbox: absolute paths stay reachable and
+ * containment comes from the Bash-free tool allowlist and permission rules.
+ * The worktree shares the primary repo's object database, so creating one is
+ * cheap.
  */
 
 import { spawnSync } from "node:child_process";
@@ -135,7 +137,8 @@ function cleanupWorktreeDir(worktreePath) {
  * that the reviewer is supposed to inspect — `git status` would report clean,
  * `git diff` would show nothing, and the MCP server pointed at the worktree
  * would mislead Claude into thinking the repo is unchanged. Instead we run in
- * the original repo and rely on the Bash-free allowlist for containment.
+ * the original repo; the Bash-free allowlist limits what Claude can do there,
+ * but nothing isolates the checkout itself.
  *
  * Returns `{ cwd, gitRoot, cleanup }`. `gitRoot` is the path the MCP git server
  * should be rooted at; `cwd` is what the Claude CLI should treat as the
@@ -184,4 +187,198 @@ export function pruneStaleReviewWorktrees(repoRoot, { maxAgeMs = 6 * 60 * 60 * 1
     if (now - stat.mtimeMs < maxAgeMs) continue;
     safeRemoveWorktree(repoRoot, full);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Project permission restrictions for protected reviews
+// ---------------------------------------------------------------------------
+
+const PROJECT_SETTINGS_FILES = ["settings.json", "settings.local.json"];
+// Keys that only grant capability or pick a mode. Reviews force `dontAsk`, so
+// dropping them cannot weaken a restriction.
+const IGNORED_PERMISSION_KEYS = new Set([
+  "allow",
+  "additionalDirectories",
+  "defaultMode",
+  "disableBypassPermissionsMode",
+  "disableAutoMode",
+]);
+// The first character can never be "-": rules become argv values, and a value
+// shaped like a flag would be parsed as a separate Claude CLI option.
+const RULE_PATTERN = /^([A-Za-z_*][A-Za-z0-9_*.-]*)(?:\((.*)\))?$/s;
+
+function projectSettingsUnsupported(file, reason) {
+  return Object.assign(
+    new Error(
+      `PROJECT_SETTINGS_UNSUPPORTED: ${file}: ${reason}. ` +
+        "The review did not start because this project permission protection could not be preserved in an isolated review. " +
+        "Do not edit or remove project permission rules to pass this check; changing that policy is a human decision."
+    ),
+    { code: "PROJECT_SETTINGS_UNSUPPORTED" }
+  );
+}
+
+/**
+ * Directories whose `.claude/` may hold settings Claude Code would apply to a
+ * session started in `dir`: the directory itself, its worktree root, and the
+ * primary checkout, which stores local settings for linked worktrees.
+ */
+function projectSettingsDirs(dir) {
+  const dirs = [dir];
+  const top = runGit(dir, ["rev-parse", "--show-toplevel"]);
+  if (top.status === 0) dirs.push(top.stdout.trim());
+  const common = runGit(dir, ["rev-parse", "--git-common-dir"]);
+  if (common.status === 0) {
+    const commonDir = path.resolve(dir, common.stdout.trim());
+    if (path.basename(commonDir) === ".git") dirs.push(path.dirname(commonDir));
+  }
+  return dirs;
+}
+
+function readRestrictionRules(file) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return [];
+    throw projectSettingsUnsupported(file, `cannot be inspected (${error?.code ?? "error"})`);
+  }
+  if (!stat.isFile()) throw projectSettingsUnsupported(file, "is not a regular file");
+
+  let settings;
+  try {
+    settings = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    throw projectSettingsUnsupported(file, "is not valid JSON");
+  }
+  const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!isObject(settings)) throw projectSettingsUnsupported(file, "is not a JSON object");
+  if (settings.permissions === undefined) return [];
+  if (!isObject(settings.permissions)) {
+    throw projectSettingsUnsupported(file, "permissions is not an object");
+  }
+
+  const rules = [];
+  for (const [key, value] of Object.entries(settings.permissions)) {
+    if (IGNORED_PERMISSION_KEYS.has(key)) continue;
+    if (key !== "deny" && key !== "ask") {
+      throw projectSettingsUnsupported(file, `permissions.${key} is not supported`);
+    }
+    if (!Array.isArray(value)) {
+      throw projectSettingsUnsupported(file, `permissions.${key} is not an array`);
+    }
+    for (const rule of value) {
+      const match = typeof rule === "string" ? RULE_PATTERN.exec(rule) : null;
+      const [, tool, specifier] = match ?? [];
+      if (
+        !match ||
+        specifier === "" ||
+        /\p{Cc}/u.test(rule) ||
+        (specifier !== undefined && tool.startsWith("mcp__"))
+      ) {
+        throw projectSettingsUnsupported(file, `permissions.${key} rule ${JSON.stringify(rule)} is not supported`);
+      }
+      // Negation only cancels rules from its own source; flattening sources
+      // into one CLI list would change what it cancels.
+      if (specifier?.startsWith("!")) {
+        throw projectSettingsUnsupported(file, `permissions.${key} negated rule ${JSON.stringify(rule)} is not supported`);
+      }
+      rules.push({ tool, specifier, rule });
+    }
+  }
+  return rules;
+}
+
+/** `//`-anchored copy of a cwd-relative Read/Edit rule, widened to any depth under `anchor`. */
+export function pinToAnchor({ tool, specifier }, anchor) {
+  if (
+    (tool !== "Read" && tool !== "Edit") ||
+    specifier === undefined ||
+    specifier.startsWith("//") ||
+    specifier.startsWith("~/")
+  ) {
+    return null;
+  }
+  // The `//` form is POSIX-only. Converting a Windows drive, UNC or backslash
+  // path would be a guess that no Windows runner has qualified, so refuse.
+  if (/^[A-Za-z]:|\\/.test(anchor)) {
+    throw projectSettingsUnsupported(
+      anchor,
+      "the original checkout path is a Windows drive, UNC or backslash path, so its relative rules cannot be pinned"
+    );
+  }
+  if (/[*?[\]!]/.test(anchor)) {
+    throw projectSettingsUnsupported(
+      anchor,
+      "the original checkout path contains glob characters, so its relative rules cannot be pinned"
+    );
+  }
+  return `${tool}(/${anchor}/**/${specifier.replace(/^\.?\//, "")})`;
+}
+
+/**
+ * Collect project `deny` and `ask` rules (dontAsk denies asks) that Claude Code
+ * would apply in the original checkout and in the reviewed tree, for
+ * `--disallowedTools`. Project settings are read as untrusted data and never
+ * loaded by Claude. CLI rules anchor at the review cwd like project rules, so
+ * rules pass through verbatim. When the review runs elsewhere (a worktree),
+ * the original tree's relative Read/Edit rules also get `//` copies pinned to
+ * the original cwd and, when that cwd is below the repo root, to the matching
+ * subdirectory of the review cwd, whose own reviewed settings are collected and
+ * pinned there too. Throws PROJECT_SETTINGS_UNSUPPORTED for anything whose
+ * meaning cannot be preserved.
+ */
+export function collectProjectReviewRestrictions(reviewCwd, originalCwd = reviewCwd) {
+  const realOrNull = (file) => {
+    try {
+      return fs.realpathSync.native(file);
+    } catch {
+      return null;
+    }
+  };
+  const realReview = realOrNull(reviewCwd) ?? path.resolve(reviewCwd);
+  const realOriginal = realOrNull(originalCwd) ?? path.resolve(originalCwd);
+  const relocated = realReview !== realOriginal;
+  // Original rules anchor at the user's cwd. A review worktree starts at the
+  // repo root, so a cwd below the root maps to the same subdirectory there.
+  let subdir = "";
+  if (relocated) {
+    const prefix = runGit(originalCwd, ["rev-parse", "--show-prefix"]);
+    if (prefix.status !== 0) {
+      throw projectSettingsUnsupported(originalCwd, "its location inside the repository could not be determined");
+    }
+    subdir = prefix.stdout.trim().replace(/\/$/, "");
+  }
+  const reviewSubdir = subdir ? path.join(realReview, subdir) : null;
+  const originalAnchors = relocated ? [realOriginal, ...(reviewSubdir ? [reviewSubdir] : [])] : [];
+
+  // Each settings file maps to the `//` anchors its relative rules need beyond
+  // the verbatim copy (which anchors at the review cwd).
+  const files = new Map();
+  const addFiles = (dirs, anchors) => {
+    for (const settingsDir of dirs) {
+      for (const name of PROJECT_SETTINGS_FILES) {
+        const file = path.join(settingsDir, ".claude", name);
+        const key = realOrNull(file) ?? path.resolve(file);
+        files.set(key, { file, anchors: [...new Set([...(files.get(key)?.anchors ?? []), ...anchors])] });
+      }
+    }
+  };
+  addFiles(projectSettingsDirs(reviewCwd), []);
+  addFiles(projectSettingsDirs(originalCwd), originalAnchors);
+  // The reviewed tree's copy of the user's subdirectory keeps its own policy,
+  // even though Claude starts at the review root.
+  if (reviewSubdir) addFiles([reviewSubdir], [reviewSubdir]);
+
+  const restrictions = new Set();
+  for (const { file, anchors } of files.values()) {
+    for (const parsed of readRestrictionRules(file)) {
+      restrictions.add(parsed.rule);
+      for (const anchor of anchors) {
+        const pinned = pinToAnchor(parsed, anchor);
+        if (pinned) restrictions.add(pinned);
+      }
+    }
+  }
+  return [...restrictions];
 }

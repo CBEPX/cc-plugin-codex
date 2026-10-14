@@ -109,7 +109,14 @@ export function exportReadPayload(payload, outputPath) {
   const outputFile = path.resolve(outputPath);
   const bytes = Buffer.from(JSON.stringify(payload, null, 2) + "\n", "utf8");
   const fd = fs.openSync(outputFile, "wx", 0o600);
-  const created = fs.fstatSync(fd);
+  let created;
+  try {
+    created = fs.fstatSync(fd);
+  } catch (error) {
+    // Without the created file's identity the path cannot be proven ours, so keep it.
+    try { fs.closeSync(fd); } catch {}
+    throw error;
+  }
   try {
     fs.writeFileSync(fd, bytes);
     fs.closeSync(fd);

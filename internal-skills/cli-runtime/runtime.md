@@ -23,9 +23,12 @@ Command selection:
 - The caller's background or foreground choice changes only subagent execution. It does not change the companion command you build.
 
 Routing controls:
-- Treat `--cwd`, `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Treat `--cwd`, `--model`, `--effort`, `--advisor`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
 - Preserve the parent helper's exact non-empty `workspaceRoot` as `--cwd "<workspaceRoot>"`; never substitute the plugin root or the child's default working directory.
 - Leave `--model` and `--effort` unset unless the user explicitly asks for them, and preserve explicit values exactly. The companion command applies its own defaults; Fable has no implicit effort but supports explicit effort such as `medium`.
+- Leave `--advisor` unset unless the user explicitly supplied it. Preserve its value exactly. The value is `inherit`, `off`, or a model alias or ID. It is not task text. Never move it into the task text or the prompt file.
+- On `--resume` or `--resume-last`, an omitted `--advisor` keeps the policy of the original task. The companion selects that policy from the same owner and Claude session. Do not look it up and do not add it.
+- If the companion refuses the advisor value or the Claude Code version, return that refusal unchanged. Do not retry without `--advisor`, with another value, or with a changed environment.
 - `--view-state on-terminal` means the user will see this companion result in the current turn, so the companion may mark any terminal outcome viewed.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`. New tasks without any owning session fail with `SESSION_OWNER_REQUIRED`; return that failure unchanged.
@@ -41,6 +44,8 @@ Routing controls:
 Task defaults:
 - Default to `--write` unless the user explicitly wants read-only behavior or only review, diagnosis, or research without edits.
 - Preserve the user's task text apart from stripping routing flags.
+- Copy the resolved task text byte-for-byte into the command. Do not append a period or other terminal punctuation, add quotes, or change a leading slash command such as `/simplify`.
+- Run the `task` command once with its `--job-id`. After a failure, treat the id as spent: the companion may already have released it. Do not run the command again with the same id. Return the failure; the parent reserves a new id before any retry.
 - If the resolved task text is multi-line, contains shell-hostile quoting, or includes XML-style blocks, prefer staging it in a temporary prompt file and pass it through `--prompt-file` instead of inlining it in one shell string.
 - When staging a prompt file, keep the exact task text byte-for-byte and prefer a temporary path outside the repository checkout so the rescue flow does not dirty the repo.
 - Use a structured file-write path to create that prompt file when possible. Do not solve shell quoting by wrapping the same long task inside another brittle inline shell command.
