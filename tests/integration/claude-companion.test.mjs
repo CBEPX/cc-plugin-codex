@@ -848,7 +848,7 @@ function createParentIdentityBarrier(testEnv) {
         while (Date.now() < deadline) {
           const job = fs.readdirSync(jobsDir).filter(name => name.endsWith(".json"))
             .map(name => JSON.parse(fs.readFileSync(path.join(jobsDir, name), "utf8")))
-            .find(job => job.workerPid === workerPid && job.status === "running" && job.pid !== workerPid);
+            .find(job => job.workerPid === workerPid && job.status === "running" && Number.isInteger(job.pid) && job.pid > 0 && job.pid !== workerPid);
           if (job) {
             fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify(job));
             return original.call(this, command, args, ...rest);

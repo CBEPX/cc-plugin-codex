@@ -22,12 +22,12 @@ const shards = {
     mutate: [
       // Persistence lifecycle, session lookup, and terminal job transitions.
       "scripts/lib/state.mjs:87-108",
-      "scripts/lib/state.mjs:177-298",
-      "scripts/lib/state.mjs:330-380",
-      "scripts/lib/state.mjs:457-843",
-      "scripts/lib/state.mjs:892-1065",
-      "scripts/lib/state.mjs:1131-1196",
-      "scripts/lib/state.mjs:1202-1248",
+      "scripts/lib/state.mjs:177-302",
+      "scripts/lib/state.mjs:334-384",
+      "scripts/lib/state.mjs:461-847",
+      "scripts/lib/state.mjs:896-1071",
+      "scripts/lib/state.mjs:1137-1202",
+      "scripts/lib/state.mjs:1208-1254",
     ],
   },
   "tracked-jobs": {

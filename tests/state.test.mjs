@@ -1401,6 +1401,49 @@ describe("current session marker", () => {
     assert.equal(getCurrentSession(repoDir), "session-a");
   });
 
+  it("waits for a live marker writer beyond three collisions without stealing its lock", async () => {
+    setCurrentSession(repoDir, "session-a");
+    const holder = spawn(process.execPath, ["--input-type=module", "-e", `
+      import fs from "node:fs";
+      import { withStateFileLock } from ${JSON.stringify(STATE_MODULE_URL)};
+      withStateFileLock(${JSON.stringify(markerFile())}, () => {
+        process.send("locked");
+        const releaseRequest = ${JSON.stringify(path.join(repoDir, "release-holder"))};
+        const deadline = Date.now() + 5_000;
+        while (!fs.existsSync(releaseRequest)) {
+          if (Date.now() >= deadline) throw new Error("Missing release request");
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800);
+        fs.writeFileSync(${JSON.stringify(path.join(repoDir, "holder-finished"))}, "done");
+      }, { skipLockOwnerIdentity: true });
+    `], { stdio: ["ignore", "ignore", "inherit", "ipc"] });
+    const exited = new Promise((resolve) => holder.once("exit", resolve));
+    try {
+      await new Promise((resolve, reject) => {
+        holder.once("message", resolve);
+        holder.once("error", reject);
+        holder.once("exit", () => reject(new Error("Lock holder exited before readiness")));
+      });
+      assert.throws(() => setCurrentSession(repoDir, "hook-session", {
+        lock: { deadlineAt: performance.now() + 2_000, skipLockOwnerIdentity: true },
+      }), isLockBusyError);
+      fs.writeFileSync(path.join(repoDir, "release-holder"), "release");
+      assert.equal(setCurrentSession(repoDir, "session-b", {
+        lock: { skipLockOwnerIdentity: true },
+        shouldWrite: (current) => {
+          assert.ok(fs.existsSync(path.join(repoDir, "holder-finished")), "must wait for the live owner");
+          return current?.sessionId === "session-a";
+        },
+      }), true);
+      assert.equal(getCurrentSession(repoDir), "session-b");
+      assert.equal(fs.existsSync(`${markerFile()}.lock`), false);
+    } finally {
+      holder.kill();
+      await exited;
+    }
+  });
+
   it("serializes marker writes and owner-checked clears on the marker lock", () => {
     setCurrentSession(repoDir, "session-b");
     const before = fs.readFileSync(markerFile(), "utf8");
