@@ -486,7 +486,7 @@ Restart Codex so the newly installed plugin is loaded, then run `$cc:setup` and 
 
 ### Maintainer release qualification (#27)
 
-This is an opt-in, credential-gated manual check against the installed exact `v1.7.5` tag and artifact. It is separate from hermetic CI and was not run as part of this documentation task. Record each result without printing secrets:
+This is an opt-in, credential-gated manual check against the selected exact tag and artifact. It is separate from hermetic CI. Record each result without printing secrets:
 
 - [ ] Record the exact tag, commit, artifact basename, byte size, and SHA-256; confirm the installed marketplace/plugin ref and cache metadata match.
 - [ ] Restart Codex, run `$cc:setup`, then run `$cc:setup --check`; record the read-only readiness result and confirm no `$cc:doctor` command is required.
@@ -498,6 +498,36 @@ This is an opt-in, credential-gated manual check against the installed exact `v1
 - [ ] Review rendered output and logs for redaction: no credentials, raw leases, raw MCP configuration, headers, prompts, queries marked sensitive, or unrestricted provider output.
 
 Do not treat CI as proof of these live provider, model, citation, or credential-dependent gates. Store only redacted evidence and keep live qualification approval separate from source, CI, and artifact readiness.
+
+#### Native peer evidence gate
+
+Use `scripts/qualify-peer-live.mjs` during manual peer qualification. The script requires `--live` and never starts a model or changes runtime settings.
+
+Capture the baseline after `peer-create` reserves a workflow, before either memo worker starts. Use a disposable linked worktree. Use new output paths outside that worktree. Replace the sample paths, tag, and workflow ID with actual values:
+
+```bash
+node scripts/qualify-peer-live.mjs --live capture \
+  --workspace /absolute/disposable-worktree \
+  --runtime-root /absolute/installed-plugin \
+  --source-repo /absolute/pinned-source \
+  --revision v1.7.12 --mode installed \
+  --workflow-id workflow-ID \
+  --output /absolute/evidence/baseline.json
+```
+
+Complete the memo, critique, and synthesis stages through the peer runtime. Then check the result:
+
+```bash
+node scripts/qualify-peer-live.mjs --live verify \
+  --baseline /absolute/evidence/baseline.json \
+  --output /absolute/evidence/report.json
+```
+
+Installed mode compares file bytes and the entry set under the shipped paths against an exact local Git tag. Extra files, directories, and symlinks under those paths fail the check. To check candidate source, use `--mode candidate` with a full 40-character commit ID. Neither mode binds a workflow to the checked runtime or proves artifact publication, installation activation, or a client restart. The release checklist above still applies.
+
+The gate checks pinned Draft-07 schemas, frozen manifests, memo citations, native model metadata, and both exact Brave calls in the Claude memo. Use a full Claude model ID. Aliases do not pass qualification. The memo and critique must report that exact model without fallback. The gate checks critique content and allowed tools through the existing peer contract. A candidate's memo and critique must report the frozen advisor policy with an exact, consistent count. An incomplete observation or an `off` policy with observed calls fails. Zero advisor calls mean `not_observed`. The supported stream does not identify the advisor model, so `observedModel` must remain `null`. A requested Fable model is not proof of its invocation.
+
+The workspace inventory includes ignored files, modes, empty directories, and symlink targets. The inventory does not follow symlinks or cover Git metadata outside the linked worktree. The report records `workspaceEntriesUnchanged` and excludes memo text and advisor payload. Both memos and the critique must complete on their first attempt. Failed or incomplete workflows, failed branch attempt history, memo or critique retries, and model fallbacks do not pass this gate.
 
 ### Uninstall
 
