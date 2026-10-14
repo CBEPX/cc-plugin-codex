@@ -305,7 +305,7 @@ function stdioProbe(config, timeoutMs) {
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "cc-plugin-codex", version: "1.7.12" },
+        clientInfo: { name: "cc-plugin-codex", version: "1.8.0" },
       },
     });
   });
@@ -394,7 +394,7 @@ async function httpProbe(config, timeoutMs) {
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "cc-plugin-codex", version: "1.7.12" },
+        clientInfo: { name: "cc-plugin-codex", version: "1.8.0" },
       },
     }, null, deadline);
     if (initialized.statusCode === 401 || initialized.statusCode === 403) {
