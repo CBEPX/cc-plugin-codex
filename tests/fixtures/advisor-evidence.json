@@ -1,0 +1,17 @@
+{
+  "source": "Existing local Claude transcript, inspected without copying prompt or advice content",
+  "primaryModel": "claude-opus-5-5",
+  "call": {
+    "type": "server_tool_use",
+    "id": "sanitized-advisor-id",
+    "name": "advisor",
+    "input": {}
+  },
+  "result": {
+    "type": "advisor_tool_result",
+    "tool_use_id": "sanitized-advisor-id",
+    "content": { "type": "advisor_redacted_result", "encrypted_content": "OMITTED" }
+  },
+  "observedAdvisorModel": null,
+  "note": "The observed blocks contain no advisor model field. Requested advisor and observed advisor model are distinct."
+}

@@ -24,6 +24,7 @@ import {
   isAmbiguousLegacyIdentity,
   isProcessAlive,
   isProcessGroupAlive,
+  terminateProcessTree,
   terminateProcessTreeIfIdentityMatches,
 } from "./process.mjs";
 import { collectProjectReviewRestrictions } from "./review-worktree.mjs";
@@ -35,6 +36,8 @@ export const MAX_STREAM_PARSER_DIAGNOSTICS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
 export const MAX_STREAM_PARSER_TOUCHED_FILES = 256;
 export const MAX_STREAM_PARSER_MODEL_EVENTS = 50;
+export const MAX_STREAM_PARSER_ADVISOR_CALL_IDS = 256;
+const ADVISOR_CALL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 export const MAX_STDERR_BYTES = 64 * 1024;
 export const SANDBOX_TEMP_DIR = normalizePathSlashes(path.resolve(os.tmpdir()));
 
@@ -130,6 +133,14 @@ function pushBoundedTail(list, value, maxEntries) {
   if (list.length > maxEntries) {
     list.splice(0, list.length - maxEntries);
   }
+}
+
+// Untrusted stream metadata is kept only as a short identifier token. Anything
+// else (objects, long strings) can carry private payload and is not retained.
+const METADATA_TOKEN_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const UNSUPPORTED_METADATA = "unsupported_metadata";
+function metadataToken(value) {
+  return typeof value === "string" && METADATA_TOKEN_RE.test(value) ? value : null;
 }
 
 function pushUniqueBoundedTail(list, value, maxEntries) {
@@ -792,6 +803,27 @@ export function claudeAuthProblem(status) {
   }
 }
 
+/**
+ * Bounded advisor telemetry for one primary turn. `requested` is the plugin
+ * policy; the other fields are observations. `calls` counts distinct advisor
+ * call IDs and is a lower bound when `countExact` is false. Zero calls is
+ * "not_observed", not proof that the advisor was disabled. The native stream
+ * does not identify the advisor model, so `observedModel` stays null.
+ */
+export function summarizeAdvisorTelemetry(advisor, requested) {
+  const calls = Array.isArray(advisor?.callIds) ? advisor.callIds.length : 0;
+  const diagnostics = Array.isArray(advisor?.diagnostics) ? [...advisor.diagnostics] : [];
+  const countExact = diagnostics.length === 0;
+  return {
+    requested: normalizeAdvisorPolicy(requested) ?? "inherit",
+    calls,
+    countExact,
+    observedModel: null,
+    status: !countExact ? "incomplete" : calls > 0 ? "observed" : "not_observed",
+    diagnostics,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Stream Parser — fail-safe with chunk-boundary buffering
 // ---------------------------------------------------------------------------
@@ -814,6 +846,7 @@ export class StreamParser {
       streamDiagnostics: [],
       toolUses: [],
       touchedFiles: [],
+      advisor: { callIds: [], diagnostics: [] },
       modelEvents: [],
       finalModel: null,
       contextWindow: null,
@@ -855,15 +888,22 @@ export class StreamParser {
       );
       return null;
     }
+    let event;
     try {
-      const event = JSON.parse(line);
+      event = JSON.parse(line);
+    } catch {
+      // Keep no raw text: the line and the JSON.parse message can both hold private payload.
+      return this._recordParseError("INVALID_JSON", line);
+    }
+    try {
       // Forwarded subagent events (--forward-subagent-text) carry
       // parent_tool_use_id. Surface them as display-only progress; never let
       // them touch parent-turn state (finalMessage/toolUses/session/model).
       if (event.parent_tool_use_id) return this._handleSubagentEvent(event);
       // Extract session_id from any event
-      if (event.session_id && !this.state.sessionId) {
-        this.state.sessionId = event.session_id;
+      const sessionId = metadataToken(event.session_id);
+      if (sessionId && !this.state.sessionId) {
+        this.state.sessionId = sessionId;
       }
       const modelEvent = compactModelEvent(event);
       if (modelEvent) {
@@ -876,7 +916,6 @@ export class StreamParser {
         return {
           kind: "model_fallback",
           modelFallback: modelEvent,
-          data: event,
           message: formatModelEventMessage(modelEvent),
           phase: "model_fallback",
           threadId: this.state.sessionId,
@@ -889,6 +928,8 @@ export class StreamParser {
       if (hasSyntheticModelSignal(event) && hasClaudeAuthText(event)) {
         this.state.hasTerminalAuthSignal = true;
       }
+      // Full records only feed advisor accounting; tools and text come from stream events.
+      if (event.type === "assistant") this._recordAdvisorCalls(event.message?.content);
       switch (event.type) {
         case "stream_event":
           return this._handleStreamEvent(event);
@@ -896,10 +937,13 @@ export class StreamParser {
           return this._handleSystemEvent(event);
         case "result":
           this.state.receivedTerminalEvent = true;
+          // A sentinel, not null: classification must stay fail-closed for unusable values.
           this.state.terminalSubtype =
-            typeof event.subtype === "string" ? event.subtype : null;
+            typeof event.subtype === "string" ? metadataToken(event.subtype) ?? UNSUPPORTED_METADATA : null;
           this.state.terminalReason =
-            typeof event.terminal_reason === "string" ? event.terminal_reason : null;
+            typeof event.terminal_reason === "string"
+              ? metadataToken(event.terminal_reason) ?? UNSUPPORTED_METADATA
+              : null;
           this.state.terminalIsError =
             typeof event.is_error === "boolean" ? event.is_error : null;
           // Kept apart from finalMessage, which merges streamed answer text.
@@ -931,22 +975,40 @@ export class StreamParser {
             }
           }
           this.state.structuredOutput = event.structured_output ?? null;
-          if (event.session_id) this.state.sessionId = event.session_id;
-          return { kind: "result", data: event };
+          if (sessionId) this.state.sessionId = sessionId;
+          return { kind: "result" };
         default:
           pushBoundedTail(this.state.unknownEvents, {
-            type: event.type,
+            type: metadataToken(event.type),
             ts: Date.now(),
           }, MAX_STREAM_PARSER_UNKNOWN_EVENTS);
           return null;
       }
-    } catch (err) {
-      this.state.unresolvedParseErrors++;
-      pushBoundedTail(this.state.parseErrors, {
-        line: line.slice(0, 200),
-        error: err.message,
-      }, MAX_STREAM_PARSER_PARSE_ERRORS);
-      return null;
+    } catch {
+      return this._recordParseError("EVENT_HANDLING_FAILED", line);
+    }
+  }
+
+  _recordParseError(code, line) {
+    this.state.unresolvedParseErrors++;
+    pushBoundedTail(this.state.parseErrors, { code, length: line.length }, MAX_STREAM_PARSER_PARSE_ERRORS);
+    return null;
+  }
+
+  /** Record advisor call IDs only. Input, advice and encrypted content are never kept. */
+  _recordAdvisorCalls(blocks) {
+    if (!Array.isArray(blocks)) return;
+    const advisor = this.state.advisor;
+    for (const block of blocks) {
+      if (block?.type !== "server_tool_use" || block.name !== "advisor") continue;
+      const id = block.id;
+      if (typeof id !== "string" || !ADVISOR_CALL_ID_RE.test(id)) {
+        pushUniqueBoundedTail(advisor.diagnostics, "CALL_ID_MISSING", MAX_STREAM_PARSER_DIAGNOSTICS);
+      } else if (!advisor.callIds.includes(id)) {
+        // A full set cannot detect a later repeat of a new ID, so the count becomes a lower bound.
+        if (advisor.callIds.length < MAX_STREAM_PARSER_ADVISOR_CALL_IDS) advisor.callIds.push(id);
+        else pushUniqueBoundedTail(advisor.diagnostics, "CALL_ID_LIMIT", MAX_STREAM_PARSER_DIAGNOSTICS);
+      }
     }
   }
 
@@ -1001,6 +1063,10 @@ export class StreamParser {
           phase: "thinking",
           threadId: this.state.sessionId,
         };
+      }
+      if (cb?.type === "server_tool_use") {
+        this._recordAdvisorCalls([cb]);
+        return null;
       }
       if (cb?.type === "tool_use") {
         pushBoundedTail(
@@ -1099,7 +1165,6 @@ export class StreamParser {
       return {
         kind: "system",
         subtype: "api_retry",
-        data: event,
         message: "API retry in progress",
         phase: "retry",
         threadId: this.state.sessionId,
@@ -1774,7 +1839,7 @@ export function buildArgs(prompt, options = {}) {
 
 /**
  * Execute a Claude Code turn with streaming progress.
- * Returns { status, sessionId, finalMessage, structuredOutput, receivedTerminalEvent, terminalSubtype, terminalReason, terminalIsError, toolUses, touchedFiles, stderr, pid, pidIdentity }
+ * Returns { status, sessionId, finalMessage, structuredOutput, receivedTerminalEvent, terminalSubtype, terminalReason, terminalIsError, toolUses, touchedFiles, advisor, stderr, pid, pidIdentity }
  */
 export async function runClaudeTurn(cwd, prompt, options = {}) {
   const args = buildArgs(prompt, {
@@ -1806,6 +1871,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       parseErrors: [],
       unresolvedParseErrors: 0,
       streamDiagnostics: [],
+      advisor: summarizeAdvisorTelemetry(null, options.advisor),
       failure: classifyClaudeFailure({
         stderr: command.error,
         exitCode: -1,
@@ -1853,12 +1919,9 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       // Best-effort — may fail on some platforms
     }
 
-    // Notify caller of child PID at spawn time (before execution completes)
-    if (options.onSpawn) {
-      options.onSpawn({ pid: proc.pid, pidIdentity });
-    }
-
     const parser = new StreamParser();
+    let spawnCallbackError = null;
+    let forceKillTimer = null;
     let stderr = "";
 
     proc.stderr.setEncoding("utf8");
@@ -1868,6 +1931,8 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
 
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk) => {
+      // After onSpawn failed, the turn only stops the child: drain stdout, but parse and report nothing.
+      if (spawnCallbackError) return;
       const events = parser.feed(chunk);
       for (const evt of events) {
         if (options.onProgress) {
@@ -1877,6 +1942,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     });
 
     proc.on("close", (code) => {
+      if (spawnCallbackError) {
+        clearTimeout(forceKillTimer);
+        stopSpawnedGroup(proc.pid).finally(() => reject(spawnCallbackError));
+        return;
+      }
       // Flush remaining buffer
       const remaining = parser.flush();
       for (const evt of remaining) {
@@ -1970,6 +2040,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         parseErrors: [...parser.state.parseErrors],
         unresolvedParseErrors: parser.state.unresolvedParseErrors,
         streamDiagnostics: [...parser.state.streamDiagnostics],
+        advisor: summarizeAdvisorTelemetry(parser.state.advisor, options.advisor),
         failure,
         stderr,
         pid: proc.pid,
@@ -1978,6 +2049,11 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     });
 
     proc.on("error", (err) => {
+      if (spawnCallbackError) {
+        clearTimeout(forceKillTimer);
+        reject(spawnCallbackError);
+        return;
+      }
       resolve({
         status: "failed",
         exitCode: -1,
@@ -1998,6 +2074,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         parseErrors: [],
         unresolvedParseErrors: 0,
         streamDiagnostics: [],
+        advisor: summarizeAdvisorTelemetry(null, options.advisor),
         failure: classifyClaudeFailure({
           stderr: err.message,
           exitCode: -1,
@@ -2008,6 +2085,21 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         pidIdentity,
       });
     });
+
+    // Notify caller of child PID at spawn time (before execution completes).
+    // Listeners exist first: if the callback throws, the turn rejects only on
+    // close, after the child is stopped and reaped.
+    if (options.onSpawn) {
+      try {
+        options.onSpawn({ pid: proc.pid, pidIdentity });
+      } catch (error) {
+        spawnCallbackError = error;
+        try { terminateProcessTree(proc.pid); } catch {}
+        forceKillTimer = setTimeout(() => {
+          try { process.kill(-proc.pid, "SIGKILL"); } catch {}
+        }, 5000);
+      }
+    }
 
     // Unref only for background workers — foreground callers need the process to keep Node alive
     if (options.background) {
@@ -2071,6 +2163,7 @@ export async function runClaudeReview(cwd, prompt, options = {}) {
     parseErrors: result.parseErrors,
     unresolvedParseErrors: result.unresolvedParseErrors,
     streamDiagnostics: result.streamDiagnostics,
+    advisor: result.advisor,
     terminalSubtype: result.terminalSubtype,
     terminalReason: result.terminalReason,
     terminalIsError: result.terminalIsError,
@@ -2232,6 +2325,19 @@ export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
     cancelled: false,
     note: `Process group ${pid} still alive after SIGKILL`,
   };
+}
+
+/**
+ * After the leader of an owned child group exits, stop descendants that
+ * ignored SIGTERM: wait 5 s, then SIGKILL and wait 3 s, as cancelClaudeProcess
+ * does. The group id stays reserved while any member lives, so the signal
+ * cannot reach a recycled process. Windows already ran `taskkill /T /F`.
+ */
+async function stopSpawnedGroup(pgid) {
+  if (process.platform === "win32" || !Number.isInteger(pgid) || !isProcessGroupAlive(pgid)) return;
+  if (await waitForProcessGroup(pgid, 5000)) return;
+  try { process.kill(-pgid, "SIGKILL"); } catch {}
+  await waitForProcessGroup(pgid, 3000);
 }
 
 async function waitForProcessGroup(pgid, timeoutMs) {

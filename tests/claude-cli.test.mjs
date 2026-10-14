@@ -33,6 +33,8 @@ import {
   MAX_STREAM_PARSER_TOOL_USES,
   MAX_STREAM_PARSER_TOUCHED_FILES,
   MAX_STREAM_PARSER_MODEL_EVENTS,
+  MAX_STREAM_PARSER_ADVISOR_CALL_IDS,
+  summarizeAdvisorTelemetry,
   MAX_STDERR_BYTES,
   getClaudeAvailability,
   getClaudeAuthStatus,
@@ -1106,7 +1108,7 @@ describe("StreamParser", () => {
     assert.equal(events.length, 0);
     assert.equal(parser.state.unresolvedParseErrors, 1);
     assert.equal(parser.state.parseErrors.length, 1);
-    assert.ok(parser.state.parseErrors[0].line.includes("not valid json"));
+    assert.deepEqual(parser.state.parseErrors[0], { code: "INVALID_JSON", length: "not valid json".length });
   });
 
   it("classifies only the exact list-tools capability warning without retaining its text", () => {
@@ -1157,7 +1159,7 @@ describe("StreamParser", () => {
 
     assert.equal(parser.state.unresolvedParseErrors, MAX_STREAM_PARSER_PARSE_ERRORS + 9);
     assert.equal(parser.state.parseErrors.length, MAX_STREAM_PARSER_PARSE_ERRORS);
-    assert.ok(parser.state.parseErrors[0].line.includes(`not valid json 9`));
+    assert.deepEqual(parser.state.parseErrors[0], { code: "INVALID_JSON", length: "not valid json 9".length });
   });
 
   it("caps stored tool-use samples and touched file tracking", () => {
@@ -1559,7 +1561,7 @@ describe("runClaudeTurn", () => {
       assert.match(result.warning, /1 unrecovered parse error/);
       assert.equal(result.unresolvedParseErrors, 1);
       assert.equal(result.parseErrors.length, 1);
-      assert.equal(result.parseErrors[0].line, "not-json");
+      assert.deepEqual(result.parseErrors[0], { code: "INVALID_JSON", length: "not-json".length });
     } finally {
       process.env.PATH = oldPath;
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -3584,4 +3586,367 @@ describe("relative project rule pinning", () => {
       assert.equal(pinToAnchor(rule, "C:\\Users\\dev\\repo"), null);
     }
   });
+});
+
+// ===========================================================================
+// Advisor telemetry (kept here so the claude-cli mutation shard runs it)
+// ===========================================================================
+
+// Synthetic marker only. No fixture holds text from a real advisor conversation.
+const MARKER = "SYNTHETIC_ADVISOR_PAYLOAD";
+// Sanitized native shapes from tests/fixtures/advisor-evidence.json, with synthetic payload markers.
+const call = (id) => ({ type: "server_tool_use", id, name: "advisor", input: { question: MARKER } });
+const reply = (id) => ({
+  type: "advisor_tool_result",
+  tool_use_id: id,
+  content: { type: "advisor_redacted_result", encrypted_content: MARKER },
+});
+const full = (blocks, extra = {}) =>
+  JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", content: blocks }, ...extra });
+const partial = (block, extra = {}) =>
+  JSON.stringify({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: block }, ...extra });
+const terminal = (extra = {}) =>
+  JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Answer text.", session_id: "sess-advisor", model: "claude-opus-5-5", ...extra });
+const MALFORMED = [
+  `{"type":"advisor_tool_result","encrypted_content":"${MARKER}",`,
+  `{"type":"advisor_tool_result","padding":"${"x".repeat(500)}","encrypted_content":${MARKER}}`,
+];
+
+function parse(lines, requested = "fable") {
+  const parser = new StreamParser();
+  const progress = parser.feed(lines.join("\n") + "\n");
+  progress.push(...parser.flush());
+  return { parser, progress, advisor: summarizeAdvisorTelemetry(parser.state.advisor, requested) };
+}
+
+function assertNoPayload(value, where) {
+  assert.equal(JSON.stringify(value).includes(MARKER), false, `advisor payload leaked through ${where}`);
+}
+
+describe("advisor call telemetry in the stream parser", () => {
+  it("counts the same call ID in partial and full records once and does not count the result block", () => {
+    const { parser, progress, advisor } = parse([
+      partial(call("srvtoolu_a")),
+      partial(reply("srvtoolu_a")),
+      full([call("srvtoolu_a"), reply("srvtoolu_a")]),
+      terminal(),
+    ]);
+    assert.deepEqual(advisor, {
+      requested: "fable",
+      calls: 1,
+      countExact: true,
+      observedModel: null,
+      status: "observed",
+      diagnostics: [],
+    });
+    assertNoPayload({ state: parser.state, progress }, "parser state or progress");
+  });
+
+  it("counts distinct IDs and ignores repeated records of one call", () => {
+    const { advisor } = parse([
+      full([call("srvtoolu_a")]),
+      full([call("srvtoolu_a")]),
+      partial(call("srvtoolu_b")),
+      full([call("srvtoolu_b"), reply("srvtoolu_b")]),
+      terminal(),
+    ]);
+    assert.equal(advisor.calls, 2);
+    assert.equal(advisor.countExact, true);
+  });
+
+  it("does not count a result that arrives before its call", () => {
+    const { advisor } = parse([partial(reply("srvtoolu_a")), partial(call("srvtoolu_a")), terminal()]);
+    assert.equal(advisor.calls, 1);
+    assert.equal(advisor.status, "observed");
+  });
+
+  for (const [name, id] of [["a missing", undefined], ["a numeric", 7], ["an oversized", "x".repeat(129)], ["a spaced", "bad id"]]) {
+    it(`marks the count incomplete for ${name} call ID`, () => {
+      const { parser, progress, advisor } = parse([full([call("srvtoolu_a")]), partial(call(id)), terminal()]);
+      assert.equal(advisor.calls, 1, "calls holds only identified calls");
+      assert.equal(advisor.countExact, false);
+      assert.equal(advisor.status, "incomplete");
+      assert.deepEqual(advisor.diagnostics, ["CALL_ID_MISSING"]);
+      assertNoPayload({ state: parser.state, progress }, "parser state or progress");
+    });
+  }
+
+  it("bounds the retained IDs and reports an inexact count when the bound is reached", () => {
+    const lines = [];
+    for (let index = 0; index < MAX_STREAM_PARSER_ADVISOR_CALL_IDS + 5; index++) lines.push(partial(call(`srvtoolu_${index}`)));
+    const { parser, advisor } = parse([...lines, ...lines, terminal()]);
+    assert.equal(parser.state.advisor.callIds.length, MAX_STREAM_PARSER_ADVISOR_CALL_IDS);
+    assert.equal(advisor.calls, MAX_STREAM_PARSER_ADVISOR_CALL_IDS);
+    assert.equal(advisor.countExact, false);
+    assert.equal(advisor.status, "incomplete");
+    assert.deepEqual(advisor.diagnostics, ["CALL_ID_LIMIT"]);
+  });
+
+  it("keeps forwarded subagent advisor blocks out of primary accounting and progress", () => {
+    const nested = { parent_tool_use_id: "toolu_task" };
+    const { parser, progress, advisor } = parse([
+      full([call("srvtoolu_nested"), reply("srvtoolu_nested")], nested),
+      partial(call("srvtoolu_nested_partial"), nested),
+      terminal(),
+    ]);
+    assert.equal(advisor.calls, 0);
+    assert.equal(advisor.status, "not_observed");
+    assertNoPayload({ state: parser.state, progress }, "subagent progress");
+  });
+
+  it("reports zero calls on a successful turn as not observed, not as disabled", () => {
+    const { parser, advisor } = parse([terminal()], "inherit");
+    assert.equal(parser.state.receivedTerminalEvent, true);
+    assert.deepEqual(advisor, {
+      requested: "inherit",
+      calls: 0,
+      countExact: true,
+      observedModel: null,
+      status: "not_observed",
+      diagnostics: [],
+    });
+  });
+
+  it("keeps primary model, tools, touched files, answer text and context attribution", () => {
+    const { parser } = parse([
+      JSON.stringify({ type: "system", subtype: "init", session_id: "sess-advisor", model: "claude-opus-5-5" }),
+      partial({ type: "tool_use", id: "toolu_w", name: "Write", input: { file_path: "src/a.txt" } }),
+      partial(call("srvtoolu_a")),
+      full([{ type: "tool_use", id: "toolu_w", name: "Write", input: { file_path: "src/a.txt" } }, call("srvtoolu_a"), reply("srvtoolu_a")]),
+      JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Answer text." } } }),
+      terminal({
+        model: undefined,
+        modelUsage: {
+          "claude-opus-5-5": { contextWindow: 200000 },
+          "claude-fable-5-1": { contextWindow: 1000000 },
+        },
+      }),
+    ]);
+    assert.equal(parser.state.finalModel, "claude-opus-5-5");
+    assert.equal(parser.state.contextWindow, 200000);
+    assert.deepEqual(parser.state.toolUses, [{ tool: "Write", input: { file_path: "src/a.txt" } }]);
+    assert.deepEqual(parser.state.touchedFiles, ["src/a.txt"]);
+    assert.equal(parser.state.finalMessage, "Answer text.");
+    assert.deepEqual(parser.state.modelEvents, []);
+  });
+
+  it("keeps a bounded error count without raw text for malformed records", () => {
+    for (const line of MALFORMED) {
+      const { parser, progress, advisor } = parse([full([call("srvtoolu_a")]), line, terminal()]);
+      assert.equal(parser.state.unresolvedParseErrors, 1);
+      assert.deepEqual(parser.state.parseErrors, [{ code: "INVALID_JSON", length: line.length }]);
+      assert.equal(advisor.calls, 1, "a malformed record does not discard the valid primary stream");
+      assert.equal(parser.state.finalMessage, "Answer text.");
+      assertNoPayload({ state: parser.state, progress }, "malformed-record diagnostics");
+    }
+  });
+
+  it("does not forward raw native events in progress", () => {
+    const { progress } = parse([
+      JSON.stringify({ type: "system", subtype: "api_retry", attempt: 1, extra: MARKER }),
+      JSON.stringify({ type: "system", subtype: "model_fallback", from_model: "claude-opus-5-5", to_model: "claude-sonnet-5-5", extra: MARKER }),
+      terminal({ extra: MARKER }),
+    ]);
+    assert.ok(progress.length >= 2);
+    for (const event of progress) assert.equal("data" in event, false);
+    assertNoPayload(progress, "progress events");
+  });
+});
+
+describe("runClaudeTurn advisor telemetry and spawn lifecycle", () => {
+  function withFakeClaude(source, run) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-advisor-"));
+    const oldPath = process.env.PATH ?? "";
+    createFakeClaudeCommand(tmpDir, source);
+    process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
+    return Promise.resolve().then(run).finally(() => {
+      process.env.PATH = oldPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+  }
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("returns the observed call after a terminal failure", () => {
+    const lines = [
+      full([call("srvtoolu_a"), reply("srvtoolu_a")]),
+      terminal({ subtype: "error_max_turns", terminal_reason: "max_turns", is_error: true, result: "partial" }),
+    ];
+    return withFakeClaude(
+      `process.stdout.write(${JSON.stringify(lines.join("\n") + "\n")}, () => process.exit(1));\n`,
+      async () => {
+        // An explicit model needs a version probe; "inherit" keeps this test on the stream path.
+        const result = await runClaudeTurn(process.cwd(), "prompt", { advisor: "inherit" });
+        assert.equal(result.status, "failed");
+        assert.equal(result.failure.terminalCategory, "CLAUDE_MAX_TURNS");
+        assert.equal(result.finalModel, "claude-opus-5-5");
+        assert.deepEqual(result.advisor, {
+          requested: "inherit",
+          calls: 1,
+          countExact: true,
+          observedModel: null,
+          status: "observed",
+          diagnostics: [],
+        });
+        assertNoPayload(result, "the runClaudeTurn result");
+      }
+    );
+  });
+
+  it("stops and reaps the child before it rejects when onSpawn throws", () => {
+    let pid = null;
+    return withFakeClaude("process.stdin.resume();\nsetInterval(() => {}, 1000);\n", async () => {
+      try {
+        await assert.rejects(
+          runClaudeTurn(process.cwd(), "prompt", {
+            onSpawn: (spawned) => {
+              pid = spawned.pid;
+              throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+            },
+          }),
+          { code: "ENOSPC" }
+        );
+        assert.ok(Number.isInteger(pid));
+        assert.equal(alive(pid), false, "the child must be stopped and reaped before the rejection");
+      } finally {
+        if (pid && alive(pid)) {
+          try { process.kill(-pid, "SIGKILL"); } catch {}
+        }
+      }
+    });
+  });
+
+  it("stops progress after onSpawn fails and still rejects with the spawn error after the child stops", () => {
+    // A separate runner process: before the fix, the progress exception is uncaught and would kill this test runner.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-progress-"));
+    const marker = path.join(tmpDir, "ready.json");
+    createFakeClaudeCommand(
+      tmpDir,
+      `process.on("SIGTERM", () => {});\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid }));\nsetInterval(() => process.stdout.write(JSON.stringify({ type: "system", subtype: "api_retry" }) + "\\n"), 25);\n`
+    );
+    const runner = path.join(tmpDir, "runner.mjs");
+    const moduleUrl = new URL("../scripts/lib/claude-cli.mjs", import.meta.url).href;
+    fs.writeFileSync(runner, `import fs from "node:fs";
+import { runClaudeTurn } from ${JSON.stringify(moduleUrl)};
+try {
+  await runClaudeTurn(${JSON.stringify(tmpDir)}, "prompt", {
+    onSpawn() {
+      const until = Date.now() + 5000;
+      while (!fs.existsSync(${JSON.stringify(marker)}) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      if (!fs.existsSync(${JSON.stringify(marker)})) throw new Error("FIXTURE_NOT_READY");
+      throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+    },
+    onProgress() { throw new Error("PROGRESS_ENOSPC"); },
+  });
+  process.exitCode = 2;
+} catch (error) {
+  console.log(JSON.stringify({ code: error.code ?? error.message }));
+}
+`);
+    let pid = null;
+    try {
+      const result = spawnSync(process.execPath, [runner], {
+        encoding: "utf8",
+        timeout: 20_000,
+        env: { ...process.env, PATH: `${tmpDir}${path.delimiter}${process.env.PATH ?? ""}` },
+      });
+      if (fs.existsSync(marker)) pid = JSON.parse(fs.readFileSync(marker, "utf8")).pid;
+      assert.ok(Number.isInteger(pid), "the fake Claude child must report readiness");
+      assert.equal(result.stderr.includes("PROGRESS_ENOSPC"), false, "progress must not run after onSpawn failed");
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout.trim()), { code: "ENOSPC" });
+      assert.equal(alive(pid), false, "the child must be stopped before the rejection");
+    } finally {
+      if (Number.isInteger(pid) && alive(pid)) {
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops a SIGTERM-ignoring descendant in the child group before it rejects", () => {
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-claude-descendant-"));
+    const marker = path.join(markerDir, "ready.json");
+    // The descendant ignores SIGTERM first, then reports its pid and parent.
+    const descendant = `process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid, parent: process.ppid })); setInterval(() => {}, 1000);`;
+    let pid = null;
+    let descendantPid = null;
+    return withFakeClaude(
+      `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: "ignore" });\nsetInterval(() => {}, 1000);\n`,
+      async () => {
+        try {
+          await assert.rejects(
+            runClaudeTurn(process.cwd(), "prompt", {
+              onSpawn: (spawned) => {
+                pid = spawned.pid;
+                const until = Date.now() + 5000;
+                while (!fs.existsSync(marker) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+                const ready = JSON.parse(fs.readFileSync(marker, "utf8"));
+                assert.equal(ready.parent, pid);
+                descendantPid = ready.pid;
+                throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+              },
+            }),
+            { code: "ENOSPC" }
+          );
+          assert.equal(alive(pid), false, "the direct child must be stopped");
+          assert.equal(alive(descendantPid), false, "the descendant must be stopped before the rejection");
+        } finally {
+          for (const owned of [descendantPid, pid]) {
+            if (Number.isInteger(owned) && alive(owned)) {
+              try { process.kill(owned, "SIGKILL"); } catch {}
+            }
+          }
+          fs.rmSync(markerDir, { recursive: true, force: true });
+        }
+      }
+    );
+  });
+});
+
+describe("StreamParser untrusted metadata", () => {
+  const METADATA_MARKER = "SYNTHETIC_ADVISOR_PRIVATE_METADATA";
+  const oversized = "x_" + METADATA_MARKER.repeat(50);
+  const feed = (...events) => {
+    const parser = new StreamParser();
+    const progress = parser.feed(events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+    progress.push(...parser.flush());
+    assert.equal(JSON.stringify({ state: parser.state, progress }).includes(METADATA_MARKER), false, "metadata payload retained");
+    return parser;
+  };
+
+  it("keeps an unknown event type only as a bounded token", () => {
+    const parser = feed({ type: { advisor_tool_result: { encrypted_content: METADATA_MARKER } } }, { type: oversized }, { type: "unknown_event-2" });
+    assert.deepEqual(parser.state.unknownEvents.map(({ type }) => type), [null, null, "unknown_event-2"]);
+  });
+
+  it("does not adopt an object-valued or oversized session id, and still adopts a valid one", () => {
+    const parser = feed(
+      { type: "system", subtype: "init", session_id: { advisor: METADATA_MARKER } },
+      { type: "system", subtype: "init", session_id: oversized }
+    );
+    assert.equal(parser.state.sessionId, null);
+    const recovered = feed(
+      { type: "system", subtype: "init", session_id: oversized },
+      { type: "result", subtype: "success", is_error: false, result: "Answer text.", session_id: "11111111-2222-4333-8444-555555555555" }
+    );
+    assert.equal(recovered.state.sessionId, "11111111-2222-4333-8444-555555555555");
+    assert.equal(recovered.state.finalMessage, "Answer text.");
+  });
+
+  for (const field of ["subtype", "terminal_reason"]) {
+    it(`replaces an oversized terminal ${field} and keeps the turn fail-closed`, () => {
+      const event = { type: "result", subtype: "success", is_error: false, result: "Answer text.", [field]: oversized };
+      const parser = feed(event);
+      assert.equal(parser.state.terminalSubtype === "success" ? parser.state.terminalReason : parser.state.terminalSubtype, "unsupported_metadata");
+      assert.equal(validateTurnCompletion(parser.state, 0).failure?.terminalCategory, "CLAUDE_UNKNOWN_TERMINAL");
+      assert.equal(parser.state.finalMessage, "Answer text.");
+    });
+  }
 });

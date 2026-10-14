@@ -134,6 +134,7 @@ import {
   buildSingleJobSnapshot,
   buildSingleStatusSnapshot,
   buildStatusSnapshot,
+  hasNotableAdvisorTelemetry,
   readStoredJob,
   resolveCancelableJob,
   resolveCancelableTarget,
@@ -178,6 +179,7 @@ import {
 } from "./lib/workflows.mjs";
 import {
   describeProvenClaudeFailure,
+  formatAdvisorTelemetry,
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
@@ -708,6 +710,13 @@ function appendModelFallbackSummary(rendered, events) {
     "",
   ];
   return lines.join("\n");
+}
+
+function appendAdvisorSummary(rendered, advisor) {
+  if (!hasNotableAdvisorTelemetry(advisor)) {
+    return rendered;
+  }
+  return `${String(rendered ?? "").trimEnd()}\n\nAdvisor: ${formatAdvisorTelemetry(advisor)}\n`;
 }
 
 function resolveClaudeExitStatus(result) {
@@ -1501,11 +1510,12 @@ async function executeReviewRun(request) {
         modelFallbacks,
         parseErrors: result.parseErrors ?? [],
         unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
-        streamDiagnostics: result.streamDiagnostics ?? []
+        streamDiagnostics: result.streamDiagnostics ?? [],
+        advisor: result.advisor ?? null
       }
     };
     const boundedFailure = renderBoundedClaudeReviewFailure(result);
-    const rendered = appendModelFallbackSummary(
+    const rendered = appendAdvisorSummary(appendModelFallbackSummary(
       boundedFailure
         ? boundedFailure
         : [
@@ -1517,7 +1527,7 @@ async function executeReviewRun(request) {
             ""
           ].join("\n"),
       modelFallbacks
-    );
+    ), result.advisor);
 
     return {
       exitStatus: resolveClaudeExitStatus(result),
@@ -1618,7 +1628,8 @@ async function executeReviewRun(request) {
       modelFallbacks,
       parseErrors: result.parseErrors ?? [],
       unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
-      streamDiagnostics: result.streamDiagnostics ?? []
+      streamDiagnostics: result.streamDiagnostics ?? [],
+      advisor: result.advisor ?? null
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
@@ -1631,7 +1642,7 @@ async function executeReviewRun(request) {
     threadId: result.sessionId,
     turnId: null,
     payload,
-    rendered: appendModelFallbackSummary(
+    rendered: appendAdvisorSummary(appendModelFallbackSummary(
       boundedFailure
         ? boundedFailure
         : renderReviewResult(parsed, {
@@ -1640,7 +1651,7 @@ async function executeReviewRun(request) {
             reasoningSummary: null
           }),
       modelFallbacks
-    ),
+    ), result.advisor),
     summary:
       boundedFailure?.trim() ??
       formatClaudeFailureSummary(
@@ -1737,7 +1748,7 @@ async function executeTaskRun(request) {
     typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.stderr ?? "";
   const modelFallbacks = normalizeModelFallbacks(result.modelEvents);
-  const rendered = appendModelFallbackSummary(
+  const rendered = appendAdvisorSummary(appendModelFallbackSummary(
     renderTaskResult({
         rawOutput,
         failureMessage,
@@ -1745,7 +1756,7 @@ async function executeTaskRun(request) {
       }
     ),
     modelFallbacks
-  );
+  ), result.advisor);
   const payload = {
     status: result.status,
     warning: result.warning ?? null,
@@ -1759,6 +1770,7 @@ async function executeTaskRun(request) {
     parseErrors: result.parseErrors ?? [],
     unresolvedParseErrors: result.unresolvedParseErrors ?? 0,
     streamDiagnostics: result.streamDiagnostics ?? [],
+    advisor: result.advisor ?? null,
     rawOutput,
     touchedFiles: Array.isArray(result.touchedFiles)
       ? result.touchedFiles
@@ -3772,6 +3784,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       modelFallbacks: normalizePeerModelFallbacks(result.modelEvents),
       contextWindow: result.contextWindow ?? null,
       streamDiagnostics: normalizePeerStreamDiagnostics(result.streamDiagnostics),
+      advisor: result.advisor ?? null,
     };
     const payload = critique
       ? {

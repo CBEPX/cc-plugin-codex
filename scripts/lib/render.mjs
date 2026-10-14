@@ -241,6 +241,20 @@ function appendModelFallbackSuffix(suffix, events, output = "") {
   return next;
 }
 
+/** One line for bounded advisor telemetry; empty for records without it. */
+export function formatAdvisorTelemetry(advisor) {
+  if (!advisor || typeof advisor !== "object" || !Number.isSafeInteger(advisor.calls) || advisor.calls < 0) {
+    return "";
+  }
+  const calls = `${advisor.calls} call${advisor.calls === 1 ? "" : "s"}`;
+  const incomplete = advisor.status === "incomplete";
+  return [
+    `${typeof advisor.requested === "string" ? advisor.requested : "inherit"} requested`,
+    incomplete ? `at least ${calls} observed (count incomplete)` : advisor.calls > 0 ? `${calls} observed` : "no calls observed",
+    advisor.calls > 0 || incomplete ? "advisor model not reported" : null,
+  ].filter(Boolean).join("; ");
+}
+
 function isPendingJob(job) {
   return (
     job?.status === "queued" ||
@@ -543,6 +557,8 @@ function renderWorkflowDetails(workflow, options = {}) {
       claudeModel.finalModel ?? "unknown",
       formatModelFallbacks(claudeModel.modelFallbacks),
     ]);
+    const advisor = formatAdvisorTelemetry(claudeModel.advisor);
+    if (advisor) modelRows.push(["claude advisor actual", claudeModel.advisor.requested ?? "inherit", advisor, ""]);
   }
   if (modelRows.length > 0) {
     lines.push("", "Models:", "", "| Role | Requested | Resolved/final | Fallbacks |", "| --- | --- | --- | --- |");
@@ -624,6 +640,7 @@ export function renderJobStatusReport(job, platform = process.platform) {
   pushKeyValueTableRow(lines, "Requested model", job.requestedModel ?? "");
   pushKeyValueTableRow(lines, "Final model", job.finalModel ?? "");
   pushKeyValueTableRow(lines, "Context window", job.contextWindow ?? "");
+  pushKeyValueTableRow(lines, "Advisor", formatAdvisorTelemetry(job.advisor));
   pushKeyValueTableRow(lines, "Started", job.startedAt ?? "");
   pushKeyValueTableRow(lines, "Ended", job.completedAt ?? "");
   if (isPendingJob(job)) pushKeyValueTableRow(lines, "Elapsed", job.elapsed ?? "");

@@ -153,6 +153,7 @@ export function enrichJob(job, options = {}) {
     requestedModel: job.requestedModel ?? telemetry?.requestedModel ?? null,
     finalModel: job.finalModel ?? telemetry?.finalModel ?? null,
     contextWindow: job.contextWindow ?? telemetry?.contextWindow ?? null,
+    ...(hasNotableAdvisorTelemetry(job.advisor ?? telemetry?.advisor) ? { advisor: job.advisor ?? telemetry?.advisor } : {}),
     progressPreview:
       ACTIVE_STATUSES.has(job.status) || job.status === "failed"
         ? readJobProgressPreview(managedLogFile, maxProgressLines)
@@ -524,4 +525,13 @@ export function resolveCancelableTarget(cwd, reference) {
   if (targets.length === 1) return targets[0];
   if (targets.length > 1) throw new Error("Multiple Claude Code jobs or peer workflows are active. Pass an id to $cc:cancel.");
   throw new Error("No active Claude Code jobs or peer workflows to cancel.");
+}
+
+/**
+ * True unless the policy was inherited and the stream showed no call. Status
+ * and rendered output omit the default case, so bounded read views keep their size.
+ */
+export function hasNotableAdvisorTelemetry(advisor) {
+  return Boolean(advisor && typeof advisor === "object" &&
+    (advisor.requested !== "inherit" || advisor.status !== "not_observed"));
 }

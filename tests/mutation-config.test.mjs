@@ -60,7 +60,7 @@ const expectations = [
   ["scripts/lib/tracked-jobs.mjs:310-434", ["validOwnerId", "resolveSessionOwner", "createJobRecord", "createJobProgressUpdater"]],
   ["scripts/lib/tracked-jobs.mjs:453-586", ["runTrackedJob"]],
   ["scripts/lib/job-control.mjs:44-52", ["resolveRequiredOwnerSessionId"]],
-  ["scripts/lib/job-control.mjs:211-527", ["matchJobReference", "buildStatusSnapshot", "resolveCancelableJob", "resolveCancelableTarget"]],
+  ["scripts/lib/job-control.mjs:212-528", ["matchJobReference", "buildStatusSnapshot", "resolveCancelableJob", "resolveCancelableTarget"]],
   ["scripts/installer-cli.mjs:98-236", ["readPersonalMarketplace", "prepareLegacyLocalCleanup", "isPluginAlreadyAbsent", "isPluginUninstallRefused"]],
   ["scripts/installer-cli.mjs:277-377", ["installOrUpdate", "uninstall"]],
 ];

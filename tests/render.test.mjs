@@ -18,6 +18,7 @@ import {
   renderCancelReport,
   renderWorkflowStatusReport,
   renderWorkflowResult,
+  formatAdvisorTelemetry,
 } from "../scripts/lib/render.mjs";
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,40 @@ describe("validateReviewResultShape", () => {
 // ---------------------------------------------------------------------------
 // formatJobLine
 // ---------------------------------------------------------------------------
+
+describe("formatAdvisorTelemetry", () => {
+  const telemetry = (fields) => ({ requested: "fable", calls: 0, countExact: true, observedModel: null, status: "not_observed", diagnostics: [], ...fields });
+
+  it("returns an empty string for absent or malformed telemetry", () => {
+    for (const value of [undefined, null, "observed", {}, { calls: -1 }, { calls: 1.5 }, { calls: "2" }]) {
+      assert.equal(formatAdvisorTelemetry(value), "");
+    }
+  });
+
+  it("states no observed calls without a model claim", () => {
+    assert.equal(formatAdvisorTelemetry(telemetry({})), "fable requested; no calls observed");
+  });
+
+  it("uses singular and plural call counts", () => {
+    assert.equal(formatAdvisorTelemetry(telemetry({ calls: 1, status: "observed" })), "fable requested; 1 call observed; advisor model not reported");
+    assert.equal(formatAdvisorTelemetry(telemetry({ calls: 3, status: "observed" })), "fable requested; 3 calls observed; advisor model not reported");
+  });
+
+  it("states an incomplete count as a lower bound, also with zero identified calls", () => {
+    assert.equal(
+      formatAdvisorTelemetry(telemetry({ calls: 0, countExact: false, status: "incomplete" })),
+      "fable requested; at least 0 calls observed (count incomplete); advisor model not reported"
+    );
+    assert.equal(
+      formatAdvisorTelemetry(telemetry({ calls: 2, countExact: false, status: "incomplete" })),
+      "fable requested; at least 2 calls observed (count incomplete); advisor model not reported"
+    );
+  });
+
+  it("falls back to inherit for a non-string requested policy", () => {
+    assert.equal(formatAdvisorTelemetry(telemetry({ requested: 7 })), "inherit requested; no calls observed");
+  });
+});
 
 describe("formatJobLine", () => {
   it("includes job id and status", () => {

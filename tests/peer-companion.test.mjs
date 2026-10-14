@@ -13,6 +13,8 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { renderWorkflowStatusReport } from "../scripts/lib/render.mjs";
+
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMPANION = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
 const cleanup = [];
@@ -168,6 +170,11 @@ async function main() {
   }
   if (process.env.FAKE_CLAUDE_LIST_TOOLS_WARNING === "1") {
     process.stdout.write("Client.listTools() called but server does not advertise tools capability - returning empty list\\n");
+  }
+  if (process.env.FAKE_CLAUDE_ADVISOR === "1") {
+    const call = { type: "server_tool_use", id: "srvtoolu_peer", name: "advisor", input: { question: "SYNTHETIC_ADVISOR_PAYLOAD" } };
+    const reply = { type: "advisor_tool_result", tool_use_id: call.id, content: { type: "advisor_redacted_result", encrypted_content: "SYNTHETIC_ADVISOR_PAYLOAD" } };
+    process.stdout.write(JSON.stringify({ type: "assistant", session_id: sessionId, message: { content: [call, reply] } }) + "\\n");
   }
   const marker = process.env.FAKE_CLAUDE_MARKER || "The repository and primary source agree.";
   const citations = {
@@ -1756,10 +1763,21 @@ describe("peer companion with fake Claude", () => {
       "--epoch", String(created.workflow.epoch), "--json",
     ], {
       input: attemptInput(claudeLease),
-      env: { FAKE_CLAUDE_FALLBACK: "1", FAKE_CLAUDE_LIST_TOOLS_WARNING: "1" },
+      env: { FAKE_CLAUDE_FALLBACK: "1", FAKE_CLAUDE_LIST_TOOLS_WARNING: "1", FAKE_CLAUDE_ADVISOR: "1" },
     });
 
     const stored = readWorkflow(testEnv, created.workflow.id);
+    assert.deepEqual(stored.branches.claude.payload.model.advisor, {
+      requested: "inherit",
+      calls: 1,
+      countExact: true,
+      observedModel: null,
+      status: "observed",
+      diagnostics: [],
+    });
+    assert.equal(JSON.stringify(stored).includes("SYNTHETIC_ADVISOR_PAYLOAD"), false);
+    assert.equal(JSON.stringify(result).includes("SYNTHETIC_ADVISOR_PAYLOAD"), false);
+    assert.match(renderWorkflowStatusReport(stored), /\| claude advisor actual \| inherit \| inherit requested; 1 call observed; advisor model not reported \|/);
     assert.equal(result.target.status, "completed");
     assert.equal(result.target.branchId, "claude");
     assert.equal(stored.branches.claude.payload.model.requestedModel, "fable");

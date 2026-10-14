@@ -222,6 +222,7 @@ async function runStopReview(cwd, input = {}, onSpawn = undefined, advisor = und
         claudeWarning: result.warning ?? null,
         claudeStderr: result.stderr ?? "",
         claudeSessionId: result.sessionId ?? null,
+        advisor: result.advisor ?? null,
         promptBytes,
         reason: detail
           ? `The stop-time Claude Code review failed: ${detail}`
@@ -236,6 +237,7 @@ async function runStopReview(cwd, input = {}, onSpawn = undefined, advisor = und
       claudeWarning: result.warning ?? null,
       claudeStderr: result.stderr ?? "",
       claudeSessionId: result.sessionId ?? null,
+      advisor: result.advisor ?? null,
       promptBytes,
     };
   } catch (err) {
@@ -489,12 +491,17 @@ async function main() {
   const review = await runStopReview(cwd, input, ({ pid }) => {
     if (!Number.isInteger(pid) || pid <= 0) return;
     claudeSpawned = true;
-    persistSnapshot({
-      status: "running_claude_review",
-      claudeInvoked: true,
-      runningTaskNote,
-      ...fingerprintFields,
-    });
+    try {
+      persistSnapshot({
+        status: "running_claude_review",
+        claudeInvoked: true,
+        runningTaskNote,
+        ...fingerprintFields,
+      });
+    } catch (error) {
+      // Diagnostic only: the review continues and the final snapshot records the invocation.
+      logNote(`Could not record the running Stop review snapshot: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, config.stopReviewAdvisor);
   if (!review.ok) {
     const refused = Boolean(review.protectionCode);
@@ -510,6 +517,7 @@ async function main() {
       claudeWarning: review.claudeWarning,
       claudeStderr: review.claudeStderr,
       claudeSessionId: review.claudeSessionId,
+      advisor: review.advisor,
       promptBytes: review.promptBytes,
       runningTaskNote,
       ...fingerprintFields,
@@ -535,6 +543,7 @@ async function main() {
     claudeWarning: review.claudeWarning,
     claudeStderr: review.claudeStderr,
     claudeSessionId: review.claudeSessionId,
+    advisor: review.advisor,
     promptBytes: review.promptBytes,
     runningTaskNote,
     ...fingerprintFields,

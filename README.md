@@ -170,7 +170,18 @@ Claude Code can call a stronger advisor model during a turn. The plugin does not
 
 The plugin refuses an invalid value, an older CLI, and an unverifiable version before any model turn. It does not retry without the advisor. It does not read `claude --help`, because Claude Code hides this flag. The plugin never unsets a global disable, so an explicit model does not override your `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` setting. The plugin does not check which primary and advisor models work together. Claude Code reports an unsupported pair.
 
-This setting records the request only. It does not show that an advisor ran or which model answered.
+This setting records the request only. Task and review JSON, `status`, `result`, peer model metadata, and the Stop snapshot can also contain an `advisor` object. This object reports what the native stream showed for the primary turn:
+
+- `requested` is the plugin policy: `inherit`, `off`, or the model value. It is not an observation.
+- `calls` is the number of distinct advisor call IDs. Calls from subagents do not count. A result block is not a call.
+- `countExact` is `false` when a call has no valid ID or the plugin already stores 256 IDs. Then `calls` is a lower bound.
+- `status` is `observed`, `not_observed`, or `incomplete`. Zero calls means that the stream showed no call. It does not show that the advisor was disabled.
+- `observedModel` is always `null`. The stream does not identify the advisor model, so the plugin does not infer it from the request, your settings, or the primary model.
+- `diagnostics` contains the codes `CALL_ID_MISSING` and `CALL_ID_LIMIT` when they apply.
+
+Rendered output and `status` omit the object when the policy is `inherit` and the stream showed no call. The full result payload keeps it.
+
+The plugin keeps only call IDs during the turn. It does not store the advisor input, the advice, or the encrypted content. A stream line that is not valid JSON adds `{ "code": "INVALID_JSON", "length": <n> }` to `parseErrors`, without the line text. The plugin does not estimate advisor usage or cost. Records from earlier versions have no `advisor` object and stay readable.
 
 `$cc:rescue --resume` keeps the policy of the original task when you omit `--advisor`. The same version check applies. `--advisor inherit` resets the policy. A fresh task never takes the policy of an earlier task. `$cc:design` and `$cc:research` freeze the policy in the workflow when they start. The memo, the critique, and every retry use it, and `--continue` and `--retry` reject `--advisor`. For the stop-time review gate, use `$cc:setup --stop-review-advisor`.
 
@@ -379,7 +390,8 @@ The snapshot is shared by sessions in the same workspace and is replaced by the 
 - **Skip-on-no-edits.** The gate computes a working-tree fingerprint baseline and skips review when the last Codex turn made no net edits.
 - **Requires a recorded user turn.** If the UserPromptSubmit hook did not record a baseline for this session, the gate skips review instead of reviewing unrelated or headless work.
 - **Requires an owning session.** If no session id resolves, the gate records `skipped_missing_owner_session` without listing jobs or invoking Claude.
-- **Advisor policy.** The default is `inherit`. `$cc:setup --stop-review-advisor <inherit|off|alias-or-id>` sets `stopReviewAdvisor` for the workspace. If the installed Claude Code is too old for the configured model, the gate blocks the turn and shows a message for the operator. The Stop snapshot records `claudeInvoked: false`. The gate does not retry without the advisor.
+- **Advisor policy.** The default is `inherit`. `$cc:setup --stop-review-advisor <inherit|off|alias-or-id>` sets `stopReviewAdvisor` for the workspace. If the installed Claude Code is too old for the configured model, the gate blocks the turn and shows a message for the operator. The Stop snapshot records `claudeInvoked: false`. The gate does not retry without the advisor. The snapshot and the history keep the `advisor` object of each completed review.
+- **Snapshot write failure after spawn.** If the gate cannot write the running snapshot after Claude Code starts, it logs the error and continues. The final snapshot records `claudeInvoked: true`. A failure of the final write still stops the hook with an error.
 - **Not in nested sessions.** Child sessions (e.g., rescue subagents) suppress the gate to avoid feedback loops.
 
 **Only enable when you're actively monitoring the session.**
