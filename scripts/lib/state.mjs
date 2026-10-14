@@ -188,7 +188,11 @@ export function setCurrentSession(cwd, sessionId, options = {}) {
       updatedAt: nowIso(),
     });
     return true;
-  }, options.lock);
+  }, {
+    deadlineAt: performance.now() + 2_000,
+    retryUntilDeadline: !Number.isFinite(options.lock?.deadlineAt),
+    ...options.lock,
+  });
 }
 
 function readCurrentSessionPayload(cwd) {
@@ -1029,7 +1033,9 @@ function acquireJobLock(lockFile, options = {}) {
           attempt -= 1;
           continue;
         }
-        if (err.code === "EEXIST" && attempt < CAS_MAX_RETRIES - 1) {
+        // Ordinary marker writes can wait through a burst of concurrent launches.
+        if (err.code === "EEXIST" &&
+            ((options.retryUntilDeadline && Number.isFinite(options.deadlineAt)) || attempt < CAS_MAX_RETRIES - 1)) {
           let delay =
             CAS_RETRY_DELAY_MS + Math.random() * CAS_RETRY_DELAY_MS;
           const remaining = remainingLockDeadlineMs(options);
