@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v1.8.1
+
+- Correct the Darwin integration fixture to wait for a positive child PID before it releases the parent identity lookup. A running worker with a null child PID is not a published child. Runtime behavior is unchanged.
+- Publish the advisor and reliability changes from v1.8.0. The v1.8.0 tag remains for provenance, but its Release was not published.
+
+
 ## v1.8.0
 
 ### Added
