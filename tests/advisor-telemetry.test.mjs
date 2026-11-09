@@ -60,7 +60,7 @@ function writeFakeClaude(binDir) {
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 async function main() {
-  if (args[0] === "--version") return void process.stdout.write("2.1.296 (Claude Code)\\n");
+  if (args[0] === "--version") return void process.stdout.write("2.1.319 (Claude Code)\\n");
   if (args[0] === "auth") return void process.stdout.write('{"loggedIn":true}\\n');
   for await (const chunk of process.stdin) void chunk;
   const lines = process.env.FAKE_STREAM_FILE ? JSON.parse(fs.readFileSync(process.env.FAKE_STREAM_FILE, "utf8")) : [];

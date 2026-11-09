@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a bounded trusted `PostToolUse` dispatcher for fenced automatic research continuation on an existing shared native Codex server, with `--manual-continue` opt-out and explicit unavailable/manual recovery. Store checkpoint/final delivery separately from parent consumption. Preserve legacy/design behavior, current collaboration mode, permissions, ownership and epoch fences. Keep workers inside their sandbox and deliver only stored workflow events after native ancestry checks. Persist native interruption fences and preserve unrelated queued user input. Require separate trust for the new `PostToolUse` and `Interrupt` hooks. Use native WebSocket transport without a separate Codex server or automatic resume.
+
+- Add research search selection with `--search-provider all|native|brave|firecrawl`. The default uses all available selected providers for each participant. Freeze separate Codex and Claude search routes, require result receipts, and retain partial provider failures as gaps. Page reads do not count as native search. Preserve legacy workflow acceptance rules.
+- Accept the exact Firecrawl search tool after a read-only schema check. Reject action-bearing schemas and destructive declarations. Do not grant crawl, agent, or script tools.
+- Show the optional native Claude login expiry in setup output without storing account fields.
+
+### Fixed
+
+- Classify the observed expired OAuth session terminal error as an authentication failure, including native generic API-error results. Preserve the native terminal category.
+- Require Claude Code 2.1.314 or later for protected reviews after upstream fixes to excluded settings sources and resumed sandbox checks. Validate the new boolean `permissions.denyInsteadOfPrompting` setting while preserving the plugin's `dontAsk` review policy.
+
 ## v1.8.1
 
 - Give ordinary current-session marker writes a two-second lock deadline instead of failing after three collisions. Preserve live-owner checks and conditional writes. Hook callers with explicit deadlines retain their retry limit and deadline. The default deadline also bounds lock identity probes and reports `ELOCKTIMEOUT` on expiry instead of `ELOCKBUSY`.

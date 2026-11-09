@@ -67,6 +67,26 @@ test("runtime identity compares installed bytes with an exact local tag, and dis
   assert.throws(()=>api.verifyRuntimeIdentity({...options,mode:"candidate",revision:git(source,"rev-parse","HEAD")}),/Draft.?07|schema/i,"unsupported native schema dialect passed");
 });
 const brave=["mcp__brave-search__brave_web_search","mcp__brave-search__brave_llm_context"];
+test("qualification accepts frozen native research without requiring a Brave installation", (t) => {
+  const root = fixture(t);
+  fs.writeFileSync(path.join(root, "source.txt"), "source\n");
+  const wf = workflow(root);
+  wf.toolManifest = [];
+  wf.searchProvider = "native";
+  wf.searchManifest = [
+    { role: "codex", provider: "native", toolIds: ["web.run"] },
+    { role: "claude", provider: "native", toolIds: ["WebSearch"] },
+  ];
+  for (const role of ["codex", "claude"]) wf.branches[role].payload = {
+    ...structuredClone(wf.branches[role].payload),
+    toolEvents: [{ tool: "Read" }, { tool: role === "codex" ? "web.run" : "WebSearch", operation: "search", toolUseId: role + "-search" }],
+    toolResults: [{ toolUseId: role + "-search", isError: false }],
+  };
+  const result = api.verifyPeerEvidence(wf);
+  assert.ok("searchCoverage" in result);
+  assert.equal(result.searchCoverage.codex[0].status, "succeeded");
+  assert.equal(result.searchCoverage.claude[0].status, "succeeded");
+});
 function workflow(root) {
   const model={requestedModel:"claude-sonnet-5-5",finalModel:"claude-sonnet-5-5",contextWindow:1000000,modelFallbacks:[],streamDiagnostics:[],advisor:undefined};
   const memo={content:{findings:["private memo"]},repoCitations:[{path:path.join(root,"source.txt"),line:1}],webCitations:["https://example.com/docs"],toolEvents:[{tool:"Read"},...brave.map(tool=>({tool}))],model};

@@ -91,7 +91,7 @@ async function readStdin() {
 
 async function main() {
   if (args[0] === "--version") {
-    process.stdout.write("2.1.296 (Claude Code)\\n");
+    process.stdout.write("2.1.319 (Claude Code)\\n");
     return;
   }
 
@@ -2298,7 +2298,7 @@ function currentSessionMarkerPath(testEnv, workspaceDir) {
 
 // Trust only the lifecycle hooks' exact current hashes; UserPromptSubmit also writes the
 // marker, so it stays untrusted to leave SessionStart as the only possible writer.
-function trustLifecycleHooks(testEnv, cwd) {
+function trustLifecycleHooks(testEnv, cwd, installedRoot) {
   const clientPath = path.join(PROJECT_ROOT, "scripts", "lib", "codex-app-server.mjs");
   const script = `
 import { callCodexAppServer } from ${JSON.stringify(clientPath)};
@@ -2309,6 +2309,11 @@ const listPluginHooks = async () => {
     .flatMap((entry) => entry.hooks ?? [])
     .filter((hook) => hook.pluginId === "cc@sendbird");
 };
+for (const hook of await listPluginHooks()) {
+  if (["postToolUse", "interrupt"].includes(hook.eventName) && hook.sourcePath !== ${JSON.stringify(fs.realpathSync.native(path.join(installedRoot, "hooks", "hooks.json")))}) {
+    throw new Error("Unexpected installed dispatcher hook source: " + hook.sourcePath);
+  }
+}
 const lifecycle = (await listPluginHooks()).filter((hook) =>
   ["sessionStart", "sessionEnd"].includes(hook.eventName)
 );
@@ -2410,7 +2415,7 @@ describe("Codex native hook dispatch E2E", () => {
     const workspaceDir = path.join(testEnv.rootDir, "session-end-workspace");
     fs.mkdirSync(workspaceDir, { recursive: true });
     setupGitWorkspace(workspaceDir);
-    installPlugin(testEnv);
+    const installedRoot = installPlugin(testEnv);
     const markerPath = currentSessionMarkerPath(testEnv, workspaceDir);
 
     const provider = startMarkerObservingProvider(markerPath);
@@ -2418,11 +2423,13 @@ describe("Codex native hook dispatch E2E", () => {
     writeConfigToml(testEnv, testEnv.providerPort);
 
     try {
-      assert.deepEqual(trustLifecycleHooks(testEnv, workspaceDir), {
+      assert.deepEqual(trustLifecycleHooks(testEnv, workspaceDir, installedRoot), {
         sessionStart: "trusted",
         sessionEnd: "trusted",
         stop: "untrusted",
         userPromptSubmit: "untrusted",
+        postToolUse: "untrusted",
+        interrupt: "untrusted",
       });
       assert.ok(!fs.existsSync(markerPath), "no session marker should exist before Codex starts");
 

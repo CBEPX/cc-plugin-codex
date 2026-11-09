@@ -36,6 +36,7 @@ const auditedAnnotationlessReadOnlyToolIds = new Set([
   "mcp__context7__resolve-library-id",
   "mcp__brave-search__brave_web_search",
   "mcp__brave-search__brave_llm_context",
+  "mcp__firecrawl__firecrawl_search",
 ]);
 export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = Object.freeze({
   /** @param {string} toolId */
@@ -46,6 +47,72 @@ export const AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS = Object.freeze({
     return auditedAnnotationlessReadOnlyToolIds.values();
   },
 });
+
+const SEARCH_TOOL_PROVIDERS = new Map([
+  ["web.run", "native"], ["web__run", "native"], ["WebSearch", "native"],
+  ["mcp__brave-search__brave_web_search", "brave"],
+  ["mcp__brave-search__brave_llm_context", "brave"],
+  ["mcp__brave_search__brave_web_search", "brave"],
+  ["mcp__brave_search__brave_llm_context", "brave"],
+  ["mcp__firecrawl__firecrawl_search", "firecrawl"],
+]);
+
+export function searchProviderForTool(toolId) {
+  return SEARCH_TOOL_PROVIDERS.get(toolId) ?? null;
+}
+
+export function normalizeSearchProvider(value = "all") {
+  if (!["all", "brave", "firecrawl", "native"].includes(value)) {
+    throw Object.assign(new Error("INVALID_SEARCH_PROVIDER: Use all, brave, firecrawl, or native."), {
+      code: "INVALID_SEARCH_PROVIDER",
+    });
+  }
+  return value;
+}
+
+/** Freeze only search tools actually exposed to each participant. Page readers are separate. */
+export function buildResearchSearchManifest(value, toolsByRole) {
+  const requested = normalizeSearchProvider(value);
+  const manifest = [];
+  for (const role of ["codex", "claude"]) {
+    const tools = [...new Set(toolsByRole[role] ?? [])];
+    const before = manifest.length;
+    for (const provider of ["native", "brave", "firecrawl"]) {
+      if (requested !== "all" && requested !== provider) continue;
+      const toolIds = tools.filter((tool) => searchProviderForTool(tool) === provider &&
+        (provider !== "native" || (role === "claude" ? tool === "WebSearch" : tool !== "WebSearch")));
+      if (toolIds.length) manifest.push({ role, provider, toolIds });
+    }
+    if (manifest.length === before) {
+      throw Object.assign(new Error(`SEARCH_PROVIDER_UNAVAILABLE: No selected ${requested} search is exposed to ${role}.`), {
+        code: "SEARCH_PROVIDER_UNAVAILABLE",
+      });
+    }
+  }
+  return manifest;
+}
+
+/** Result receipts retain no query, URL, page text, or credentials. */
+export function researchSearchCoverage(manifest, role, events = [], results = []) {
+  const resultById = new Map();
+  for (const result of results) {
+    if (typeof result?.toolUseId !== "string" || typeof result.isError !== "boolean") continue;
+    resultById.set(result.toolUseId, (resultById.get(result.toolUseId) ?? false) || result.isError);
+  }
+  return manifest.filter((route) => route.role === role).map((route) => {
+    const calls = events.filter((event) => route.toolIds.includes(event.tool) &&
+      (!["web.run", "web__run"].includes(event.tool) || event.operation === "search"));
+    const successfulResults = calls.filter((event) =>
+      typeof event.toolUseId === "string" && resultById.get(event.toolUseId) === false
+    ).length;
+    return {
+      provider: route.provider,
+      status: successfulResults ? "succeeded" : calls.length ? "failed" : "not_attempted",
+      attempts: calls.length,
+      successfulResults,
+    };
+  });
+}
 
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -207,6 +274,7 @@ function sanitizeProbeResult(result, secrets) {
       description: typeof tool.description === "string"
         ? redactSecrets(tool.description, secrets)
         : "",
+      ...(tool.name === "firecrawl_search" ? { searchSchemaSafe: isReadOnlySearchSchema(tool.inputSchema) } : {}),
       annotations: tool.annotations && typeof tool.annotations === "object"
         ? {
             readOnlyHint: tool.annotations.readOnlyHint === true,
@@ -216,6 +284,35 @@ function sanitizeProbeResult(result, secrets) {
     });
   }
   return { tools };
+}
+
+function isReadOnlySearchSchema(schema) {
+  if (schema?.properties?.query?.type !== "string") return false;
+  const pending = [schema];
+  const forbidden = new Set(["actions", "alexandria", "script", "javascript", "command", "workflow"]);
+  for (let visited = 0; pending.length && visited < 10_000; visited++) {
+    const value = pending.pop();
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        value.$ref != null || value.$dynamicRef != null || value.$recursiveRef != null || value.patternProperties != null) return false;
+    const types = Array.isArray(value.type) ? value.type : value.type ? [value.type] : [];
+    const combinations = [value.allOf, value.anyOf, value.oneOf].filter((item) => item != null);
+    if (combinations.some((items) => !Array.isArray(items) || !items.length)) return false;
+    if (types.some((type) => !["object", "array", "string", "number", "integer", "boolean", "null"].includes(type))) return false;
+    if (types.includes("object") || value.properties != null) {
+      if (value.additionalProperties !== false || !value.properties || typeof value.properties !== "object" || Array.isArray(value.properties) ||
+          Object.keys(value.properties).some((key) => forbidden.has(key.toLowerCase()))) return false;
+      pending.push(...Object.values(value.properties));
+    }
+    if (types.includes("array")) {
+      if (!value.items || Array.isArray(value.items)) return false;
+      pending.push(value.items);
+    }
+    if (!types.length && value.properties == null && !combinations.length &&
+        !(Array.isArray(value.enum) && value.enum.length && value.enum.every((item) => item == null || ["string", "number", "boolean"].includes(typeof item))) &&
+        !(Object.hasOwn(value, "const") && (value.const == null || ["string", "number", "boolean"].includes(typeof value.const)))) return false;
+    pending.push(...combinations.flat());
+  }
+  return pending.length === 0;
 }
 
 function hasToolsCapability(result) {
@@ -434,6 +531,9 @@ async function httpProbe(config, timeoutMs) {
 function safetyFor(toolId, tool, auditedTools) {
   if (tool.annotations?.destructiveHint === true) {
     return { eligible: false, decision: "blocked", reason: "destructive_annotation" };
+  }
+  if (toolId === "mcp__firecrawl__firecrawl_search" && tool.searchSchemaSafe !== true) {
+    return { eligible: false, decision: "blocked", reason: "unsafe_search_schema" };
   }
   if (tool.annotations?.readOnlyHint === true) {
     return { eligible: true, decision: "eligible", reason: "read_only_annotation" };
@@ -740,8 +840,9 @@ export function selectMcpCapabilities(probeResult, options = {}) {
         continue;
       }
       const capability = choice.capability || tool.capability || tool.toolId;
-      if (usedCapabilities.has(capability)) continue;
-      usedCapabilities.add(capability);
+      const capabilityKey = `${searchProviderForTool(tool.toolId) ?? "other"}:${capability}`;
+      if (usedCapabilities.has(capabilityKey)) continue;
+      usedCapabilities.add(capabilityKey);
       selected.push(manifestRecord(
         tool,
         capability,

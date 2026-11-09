@@ -339,6 +339,19 @@ describe("collectReviewContext", () => {
     assertWorkingTreeMcpFallback(context.content);
   });
 
+  it("fingerprints a repository without acquiring its index lock", () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "file.txt"), "staged change\n");
+    runGit(repo, ["add", "file.txt"]);
+    const expected = runGit(repo, ["write-tree"]);
+    const lock = path.join(repo, ".git", "index.lock");
+    fs.writeFileSync(lock, "EXISTING_LOCK_OWNER");
+    try {
+      assert.equal(getWorkingTreeFingerprint(repo).stagedDiffHash, expected);
+      assert.equal(fs.readFileSync(lock, "utf8"), "EXISTING_LOCK_OWNER");
+    } finally { fs.unlinkSync(lock); }
+  });
+
   it("computes a working-tree fingerprint without buffering the full diff text", () => {
     const repo = createRepo();
     const hugeText = `${"w".repeat(2048)}\n`.repeat(700);

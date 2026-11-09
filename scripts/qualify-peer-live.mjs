@@ -92,15 +92,18 @@ export function verifyPeerEvidence(workflow) {
   requireEvidence(Array.isArray(workflow.branchAttempts) && workflow.branchAttempts.every((entry) => ["running", "completed"].includes(entry.status)), "workflow contains failed attempt history");
   requireEvidence(!workflow.failureReason && !workflow.failureDetail && [...Object.values(workflow.branches ?? {}), ...Object.values(workflow.stages ?? {})].every((stage) => !stage.failureReason && !stage.failureDetail), "workflow contains failure evidence");
   const selected = (workflow.toolManifest ?? []).map(({ toolId }) => toolId);
-  requireEvidence(BRAVE.every((tool) => selected.includes(tool)), "both exact Brave tools must be in the frozen manifest");
+  if (!workflow.searchManifest) requireEvidence(BRAVE.every((tool) => selected.includes(tool)), "both exact Brave tools must be in the frozen manifest");
   const allowed = new Set([...PEER_CLAUDE_ALLOWED_BASE_TOOLS, ...selected, "ToolSearch", "StructuredOutput"]);
+  /** @type {Record<string, any>} */
+  const searchCoverage = {};
   for (const role of ["codex", "claude"]) {
     const branch = workflow.branches?.[role];
     requireEvidence(branch?.status === "completed", `${role} memo is incomplete`);
-    validatePeerMemo(workflow, branch.payload, { role });
+    const validated = validatePeerMemo(workflow, branch.payload, { role });
+    if (workflow.searchManifest) searchCoverage[role] = validated.searchCoverage;
   }
   const memo = workflow.branches.claude.payload;
-  requireEvidence(BRAVE.every((tool) => memo.toolEvents.some((event) => event.tool === tool)), "both exact Brave tool events are required");
+  if (!workflow.searchManifest) requireEvidence(BRAVE.every((tool) => memo.toolEvents.some((event) => event.tool === tool)), "both exact Brave tool events are required");
   const critique = workflow.stages?.critique;
   requireEvidence(critique?.status === "completed" && critique.payload?.content && Object.keys(critique.payload.content).length > 0, "critique is incomplete");
   const models = [];
@@ -122,7 +125,7 @@ export function verifyPeerEvidence(workflow) {
     }
     models.push({ requestedModel: model.requestedModel.slice(0, 160), finalModel: model.finalModel, contextWindow: model.contextWindow, fallbackCount: 0, ...(advisor ? { advisor } : {}) });
   }
-  return { id: workflow.id, mode: workflow.mode, epoch: workflow.epoch, revision: workflow.revision, attempts, memoModel: models[0], critiqueModel: models[1], braveTools: BRAVE, repoCitationCount: memo.repoCitations.length, webCitationCount: memo.webCitations.length, failure: null, nativeOutputEvidence: "accepted-by-pinned-peer-parser" };
+  return { id: workflow.id, mode: workflow.mode, epoch: workflow.epoch, revision: workflow.revision, attempts, memoModel: models[0], critiqueModel: models[1], ...(workflow.searchManifest ? { searchCoverage } : { braveTools: BRAVE }), repoCitationCount: memo.repoCitations.length, webCitationCount: memo.webCitations.length, failure: null, nativeOutputEvidence: "accepted-by-pinned-peer-parser" };
 }
 
 function outsideOutput(output, workspace) {
@@ -133,7 +136,9 @@ function outsideOutput(output, workspace) {
   return file;
 }
 function manifestHash(workflow) {
-  return hash(JSON.stringify([workflow.modelManifest, workflow.toolManifest]));
+  const manifests = [workflow.modelManifest, workflow.toolManifest];
+  if (workflow.searchManifest) manifests.push(workflow.searchProvider, workflow.searchManifest);
+  return hash(JSON.stringify(manifests));
 }
 function saveReport(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", { flag: "wx", mode: 0o600 });

@@ -1208,6 +1208,27 @@ describe("StreamParser", () => {
 });
 
 describe("classifyClaudeFailure", () => {
+  it("recognizes the native expired OAuth session failure without classifying quoted answers", () => {
+    const text = "Failed to authenticate: OAuth session expired and could not be refreshed";
+    const parser = new StreamParser();
+    parser.feed(JSON.stringify({
+      type: "assistant",
+      message: { model: "<synthetic>", content: [{ type: "text", text }] },
+    }) + "\n");
+    assert.equal(parser.state.hasTerminalAuthSignal, true);
+    assert.equal(classifyClaudeFailure({
+      finalMessage: text,
+      finalMessageHasAuthSignal: parser.state.hasTerminalAuthSignal,
+    })?.kind, "claude_auth");
+    assert.equal(classifyClaudeFailure({ finalMessage: text, exitCode: 0, receivedTerminalEvent: true }), null);
+    assert.equal(classifyClaudeFailure({
+      finalMessage: text,
+      terminalErrorText: text,
+      exitCode: 1,
+      receivedTerminalEvent: true,
+    })?.kind, "claude_auth");
+  });
+
   it("classifies Fable model-credit limits from terminal output", () => {
     const failure = classifyClaudeFailure({
       finalMessage: "You've reached your Fable 5 limit",
@@ -1700,7 +1721,7 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `if (process.argv[2] === "--version") { process.stdout.write("2.1.296 (Claude Code)\\n"); process.exit(0); }\nconst result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `if (process.argv[2] === "--version") { process.stdout.write("2.1.319 (Claude Code)\\n"); process.exit(0); }\nconst result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
       const optionValue = (args, name) => {
@@ -2998,9 +3019,45 @@ describe("protected review isolation", () => {
     args.flatMap((arg, index) => (arg === flag ? [args[index + 1]] : []));
   const launchedReview = (invocations) => invocations().some((args) => args[0] === "-p");
 
+  it("refuses excluded-settings-vulnerable CLI versions before starting a protected review",
+    withFakeReviewClaude("2.1.313 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      await assert.rejects(runClaudeReview(repo, "prompt", {}), { code: "CLAUDE_REVIEW_UNSUPPORTED" });
+      assert.equal(launchedReview(invocations), false);
+    })
+  );
+
+  for (const denyInsteadOfPrompting of [true, false]) {
+    it(`preserves restrictions with denyInsteadOfPrompting=${denyInsteadOfPrompting}`,
+      withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
+        const repo = path.join(tmpDir, "repo");
+        initRepo(repo);
+        writeSettings(repo, "settings.json", { permissions: {
+          denyInsteadOfPrompting, deny: ["Bash"], ask: ["WebSearch"],
+        } });
+        const result = await runClaudeReview(repo, "prompt", { permissionMode: "dontAsk" });
+        assert.equal(result.status, "completed");
+        const args = JSON.parse(result.result).args;
+        assert.deepEqual(optionValues(args, "--disallowedTools").sort(), ["Bash", "WebSearch"]);
+        assert.deepEqual(optionValues(args, "--permission-mode"), ["dontAsk"]);
+      })
+    );
+  }
+
+  it("rejects non-boolean denyInsteadOfPrompting before launching a protected review",
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      writeSettings(repo, "settings.json", { permissions: { denyInsteadOfPrompting: "true" } });
+      await assert.rejects(runClaudeReview(repo, "prompt", {}), { code: "PROJECT_SETTINGS_UNSUPPORTED" });
+      assert.equal(launchedReview(invocations), false);
+    })
+  );
+
   it(
     "loads only user setting sources on every review path",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       const reviewArgs = async (run) => JSON.parse((await run()).result).args;
@@ -3037,14 +3094,14 @@ describe("protected review isolation", () => {
         initRepo(repo);
         await assert.rejects(
           runClaudeReview(repo, "prompt", {}),
-          /Claude Code CLI 2\.1\.281 or later/
+          /Claude Code CLI 2\.1\.314 or later/
         );
         assert.equal(launchedReview(invocations), false);
       })
     );
   }
 
-  for (const version of ["2.1.281 (Claude Code)", "2.1.296 (Claude Code)", "3.0.0"]) {
+  for (const version of ["2.1.314 (Claude Code)", "2.1.319 (Claude Code)", "3.0.0"]) {
     it(
       `accepts a protected review on CLI ${version}`,
       withFakeReviewClaude(version, async ({ tmpDir, invocations }) => {
@@ -3059,7 +3116,7 @@ describe("protected review isolation", () => {
 
   it(
     "projects deny and ask rules from the original linked worktree, primary local settings and reviewed tree",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
       const primary = path.join(tmpDir, "primary");
       initRepo(primary);
       writeSettings(primary, "settings.json", {
@@ -3117,7 +3174,7 @@ describe("protected review isolation", () => {
 
   it(
     "keeps relative rules anchored at the review cwd when the review runs in the original checkout",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       writeSettings(repo, "settings.json", {
@@ -3151,7 +3208,7 @@ describe("protected review isolation", () => {
   ]) {
     it(
       `refuses a review before launch when project settings contain ${name}`,
-      withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+      withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
         const repo = path.join(tmpDir, "repo");
         initRepo(repo);
         writeSettings(repo, "settings.json", content);
@@ -3163,7 +3220,7 @@ describe("protected review isolation", () => {
 
   it(
     "refuses a review when malformed local settings sit in the primary checkout of a linked worktree",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
       const primary = path.join(tmpDir, "primary");
       initRepo(primary);
       writeSettings(primary, "settings.local.json", { permissions: { deny: ["Read(!x)"] } });
@@ -3191,7 +3248,7 @@ describe("protected review isolation", () => {
 
   it(
     "keeps a rule that exists only in the reviewed subdirectory settings",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
       const { sub, reviewed } = relocatedSubdirFixture(
         tmpDir,
         { permissions: { deny: ["Read(/reviewed-only.txt)"] } },
@@ -3222,7 +3279,7 @@ describe("protected review isolation", () => {
   ]) {
     it(
       `refuses a review before launch when only the reviewed subdirectory settings are ${name}`,
-      withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+      withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
         const { sub, reviewed } = relocatedSubdirFixture(tmpDir, committed, { permissions: {} });
         const reviewedSettings = path.join("reviewed", "sub", ".claude", "settings.json");
 
@@ -3248,7 +3305,7 @@ describe("protected review isolation", () => {
 
   it(
     "tells the caller not to edit project permission rules when protection cannot be preserved",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       writeSettings(repo, "settings.json", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } });
@@ -3265,7 +3322,7 @@ describe("protected review isolation", () => {
 
   it(
     "keeps subdirectory rules anchored at the matching reviewed subdirectory after relocation",
-    withFakeReviewClaude("2.1.296 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       const sub = path.join(repo, "sub");
@@ -3318,6 +3375,20 @@ function withFakeClaudeBinary(source, run) {
 describe("getClaudeAuthStatus classification", () => {
   const authStatusSource = (body) =>
     `const args = process.argv.slice(2);\nif (args[0] === "auth" && args[1] === "status") {\n${body}\n}\n`;
+
+  it("preserves valid native login expiry without exposing other account fields",
+    withFakeClaudeBinary(authStatusSource(`process.stdout.write(JSON.stringify({loggedIn:true,loginExpiresAt:"2026-11-30T04:15:19.122Z",email:"private@example.com"}));`), () => {
+      const status = getClaudeAuthStatus(process.cwd());
+      assert.equal(status.loginExpiresAt, "2026-11-30T04:15:19.122Z");
+      assert.equal(Object.hasOwn(status, "email"), false);
+    })
+  );
+
+  it("omits malformed native login expiry",
+    withFakeClaudeBinary(authStatusSource(`process.stdout.write(JSON.stringify({loggedIn:true,loginExpiresAt:"not-a-date"}));`), () => {
+      assert.equal(getClaudeAuthStatus(process.cwd()).loginExpiresAt, undefined);
+    })
+  );
 
   for (const scenario of [
     {
@@ -3422,6 +3493,18 @@ describe("getClaudeAuthStatus classification", () => {
     }
   });
 });
+
+it("maps a native terminal OAuth session failure to auth instead of a generic API error",
+  withFakeClaudeBinary(`process.stdin.resume(); process.stdin.on("end", () => {
+    process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:true,result:"Failed to authenticate: OAuth session expired and could not be refreshed",session_id:"expired-session"}) + "\\n");
+    process.exitCode = 1;
+  });`, async () => {
+    const result = await runClaudeTurn(process.cwd(), "test");
+    assert.equal(result.status, "failed");
+    assert.equal(result.failure.kind, "claude_auth");
+    assert.equal(result.failure.terminalCategory, "CLAUDE_API_ERROR");
+  })
+);
 
 describe("organization subscription refusal and unsupported CLI options", () => {
   const REFUSAL =
@@ -3751,7 +3834,7 @@ describe("advisor call telemetry in the stream parser", () => {
     ]);
     assert.equal(parser.state.finalModel, "claude-opus-5-5");
     assert.equal(parser.state.contextWindow, 200000);
-    assert.deepEqual(parser.state.toolUses, [{ tool: "Write", input: { file_path: "src/a.txt" } }]);
+    assert.deepEqual(parser.state.toolUses, [{ tool: "Write", input: { file_path: "src/a.txt" }, toolUseId: "toolu_w" }]);
     assert.deepEqual(parser.state.touchedFiles, ["src/a.txt"]);
     assert.equal(parser.state.finalMessage, "Answer text.");
     assert.deepEqual(parser.state.modelEvents, []);

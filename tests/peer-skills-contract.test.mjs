@@ -70,7 +70,6 @@ test("peer runtime keeps preflight live, initial children independent, and Claud
     "Never use shell backgrounding",
     "Never invoke `codex exec`",
     "Initial execution is always background",
-    "Continue is foreground",
   ], "peer runtime");
 
   assert.doesNotMatch(runtime, /fork_context/);

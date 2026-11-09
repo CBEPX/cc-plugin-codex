@@ -189,6 +189,15 @@ describe("renderSetupReport", () => {
     nextSteps: [],
   };
 
+  it("shows the native login expiry when setup includes it", () => {
+    const output = renderSetupReport({
+      ...baseReport,
+      auth: { detail: "authenticated", loginExpiresAt: "2026-11-30T04:15:19.122Z" },
+    });
+    assert.match(output, /login expires: 2026-11-30T04:15:19\.122Z/);
+    assert.doesNotMatch(renderSetupReport(baseReport), /login expires/);
+  });
+
   it("renders ready status", () => {
     const output = renderSetupReport(baseReport);
     assert.ok(output.includes("Status: ready"));

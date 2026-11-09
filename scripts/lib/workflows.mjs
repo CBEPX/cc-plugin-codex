@@ -15,6 +15,7 @@ import {
   writeAtomic,
 } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
+import { buildResearchSearchManifest, normalizeSearchProvider } from "./mcp-capabilities.mjs";
 
 export const WORKFLOW_VERSION = 1;
 export const MAX_TERMINAL_WORKFLOWS = 100;
@@ -202,6 +203,39 @@ function initialWorkItems(names) {
   );
 }
 
+function validateStoredContinuation(workflow) {
+  const continuation = workflow.continuation;
+  if (continuation == null) return;
+  const record = (value) => value != null && typeof value === "object" && !Array.isArray(value);
+  const id = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,160}$/u.test(value);
+  const time = (value) => typeof value === "string" && value.length <= 40 &&
+    /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$/u.test(value) && Number.isFinite(Date.parse(value));
+  const controls = (text) => [...text].some((char) => char.charCodeAt(0) < 32);
+  const invalid = () => { throw workflowError("INVALID_CONTINUATION", "Stored continuation record is invalid."); };
+  if (!record(continuation) || workflow.mode !== "research" || !["manual", "auto"].includes(continuation.policy)) invalid();
+  if (continuation.policy === "manual") return;
+  if (!["ready", "unavailable"].includes(continuation.state) || !record(continuation.events) ||
+      Object.keys(continuation.events).some((key) => !["checkpoint", "completed"].includes(key)) ||
+      (continuation.requestedParentThreadId != null && !id(continuation.requestedParentThreadId))) invalid();
+  if (continuation.reason != null && (typeof continuation.reason !== "string" || continuation.reason.length > 160 || controls(continuation.reason))) invalid();
+  if (continuation.endedAt != null && !time(continuation.endedAt)) invalid();
+  const binding = continuation.binding;
+  if (binding != null) {
+    if (!record(binding) || !id(binding.parentThreadId) || !id(binding.ownerSessionId) ||
+        typeof binding.socketPath !== "string" || binding.socketPath.length > 4096 || controls(binding.socketPath) || !path.isAbsolute(binding.socketPath) ||
+        !Number.isSafeInteger(binding.socketDev) || binding.socketDev < 0 || !Number.isSafeInteger(binding.socketIno) || binding.socketIno < 0) invalid();
+  } else if (continuation.state === "ready" || Object.keys(continuation.events).length) invalid();
+  for (const [milestone, event] of Object.entries(continuation.events)) {
+    if (!record(event) || !id(event.id) || event.milestone !== milestone ||
+        !Number.isSafeInteger(event.epoch) || event.epoch < 0 || event.epoch > workflow.epoch ||
+        event.parentThreadId !== binding.parentThreadId || event.ownerSessionId !== binding.ownerSessionId ||
+        !["pending", "sending", "queued", "unknown", "unavailable"].includes(event.delivery) ||
+        (event.queueId != null && !id(event.queueId)) || (event.delivery === "queued" && !id(event.queueId)) ||
+        !time(event.createdAt) || (event.consumedAt != null && !time(event.consumedAt)) ||
+        (event.sendingAt != null && !time(event.sendingAt))) invalid();
+  }
+}
+
 function validateStoredWorkflow(workflow, workspaceRoot, expectedMode = null) {
   if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) {
     throw workflowError("INVALID_WORKFLOW_RECORD", "Stored workflow is not an object.");
@@ -212,6 +246,7 @@ function validateStoredWorkflow(workflow, workspaceRoot, expectedMode = null) {
       `Unsupported workflow version: ${workflow.version}`
     );
   }
+  validateStoredContinuation(workflow);
   sanitizeId(workflow.id, "workflow ID");
   assertMode(workflow.mode);
   assertStatus(workflow.status);
@@ -338,6 +373,169 @@ function enterIncomplete(workflow) {
   };
 }
 
+function normalizeContinuation(value, mode, ownerSessionId) {
+  if (value == null) return null;
+  if (mode !== "research" || !["manual", "auto"].includes(value.policy)) {
+    throw workflowError("INVALID_CONTINUATION", "Continuation policy is valid only for research.");
+  }
+  if (value.policy === "manual") return { policy: "manual" };
+  if (!value.binding) return { policy: "auto", state: "unavailable", reason: value.reason ?? "shared_runtime_unavailable",
+    requestedParentThreadId: value.requestedParentThreadId ? sanitizeId(value.requestedParentThreadId, "parent thread ID") : null, binding: null, events: {} };
+  const binding = value.binding;
+  if (typeof binding.socketPath !== "string" || !path.isAbsolute(binding.socketPath) ||
+      !Number.isSafeInteger(binding.socketDev) || !Number.isSafeInteger(binding.socketIno)) {
+    throw workflowError("INVALID_CONTINUATION", "Shared endpoint identity is invalid.");
+  }
+  return { policy: "auto", state: "ready", reason: null, events: {}, binding: {
+    parentThreadId: sanitizeId(binding.parentThreadId, "parent thread ID"),
+    ownerSessionId,
+    socketPath: binding.socketPath, socketDev: binding.socketDev, socketIno: binding.socketIno,
+  } };
+}
+
+function continuationPauseFile(cwd, parentThreadId) {
+  return path.join(resolveStateDir(cwd), `research-pause-${sanitizeId(parentThreadId, "parent thread ID")}.json`);
+}
+
+export function recordWorkflowContinuationPause(cwd, parentThreadId, reason) {
+  if (!["user_interrupted", "session_ended"].includes(reason)) throw workflowError("INVALID_CONTINUATION", "Invalid pause reason.");
+  const file = continuationPauseFile(cwd, parentThreadId);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  writeAtomic(file, { at: nowIso(), reason });
+}
+
+export function workflowContinuationPauseReason(workflow) {
+  const parent = workflow?.continuation?.binding?.parentThreadId ?? workflow?.continuation?.requestedParentThreadId;
+  if (workflow?.continuation?.policy !== "auto" || !parent) return null;
+  try {
+    const file = continuationPauseFile(workflow.workspaceRoot, parent);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) return "pause_state_invalid";
+    const pause = JSON.parse(fs.readFileSync(file, "utf8"));
+    const at = Date.parse(pause?.at);
+    const created = Date.parse(workflow.createdAt);
+    if (!Number.isFinite(at) || !Number.isFinite(created) || !["user_interrupted", "session_ended"].includes(pause?.reason)) return "pause_state_invalid";
+    return created <= at ? pause.reason : null;
+  } catch (error) { return error.code === "ENOENT" ? null : "pause_state_invalid"; }
+}
+
+function reserveContinuationEvent(workflow, timestamp) {
+  const continuation = workflow.continuation;
+  if (continuation?.policy !== "auto") return;
+  const paused = workflowContinuationPauseReason(workflow);
+  if (paused) {
+    workflow.continuation = { ...continuation, state: "unavailable", reason: paused };
+    return;
+  }
+  if (workflow.cancellation) {
+    workflow.continuation = { ...continuation, state: "unavailable", reason: "cancel_requested" };
+    return;
+  }
+  if (continuation.state !== "ready") return;
+  if (continuation.binding.ownerSessionId !== workflow.currentOwnerSessionId) {
+    workflow.continuation = { ...continuation, state: "unavailable", reason: "owner_rebound" };
+    return;
+  }
+  const milestone = workflowNotificationEvent(workflow);
+  if (!["checkpoint", "completed"].includes(milestone)) return;
+  if (continuation.events[milestone]?.epoch === workflow.epoch) return;
+  workflow.continuation = { ...continuation, events: { ...continuation.events, [milestone]: {
+    id: `wake-${randomBytes(16).toString("hex")}`, milestone, epoch: workflow.epoch,
+    parentThreadId: continuation.binding.parentThreadId,
+    ownerSessionId: workflow.currentOwnerSessionId,
+    delivery: "pending", queueId: null, consumedAt: null, createdAt: timestamp,
+  } } };
+}
+
+export function sameContinuationBinding(left, right) {
+  return Boolean(left && right && ["parentThreadId", "ownerSessionId", "socketPath", "socketDev", "socketIno"].every((key) => left[key] === right[key]));
+}
+
+function mutateContinuation(cwd, workflowId, options, reducer) {
+  for (let attempt = 0; ; attempt += 1) {
+    const current = readWorkflow(cwd, workflowId);
+    if (!current) throw workflowError("WORKFLOW_NOT_FOUND", "Continuation workflow is missing.");
+    try {
+      return mutateWorkflow(cwd, workflowId, { revision: current.revision, epoch: options.epoch }, (workflow, timestamp) => {
+        const continuation = workflow.continuation;
+        const event = Object.values(continuation?.events ?? {}).find((event) => event.id === options.eventId);
+        if (workflowContinuationPauseReason(workflow) || continuation?.policy !== "auto" || continuation.state !== "ready" || !event || event.epoch !== workflow.epoch ||
+            !["awaiting_user", "running", "completed"].includes(workflow.status)) {
+          throw workflowError("CONTINUATION_NOT_READY", "Continuation is stale or unavailable.");
+        }
+        if (options.expectedBinding && !sameContinuationBinding(continuation.binding, options.expectedBinding)) {
+          throw workflowError("CONTINUATION_OWNER_MISMATCH", "Continuation binding changed after qualification.");
+        }
+        return reducer(workflow, event, timestamp);
+      });
+    } catch (error) {
+      // Retry only the local CAS, never a queue request with an unknown ACK.
+      if (error.code !== "STALE_REVISION" || attempt >= 7) throw error;
+    }
+  }
+}
+
+export function bindWorkflowContinuation(cwd, workflowId, options) {
+  return mutateWorkflow(cwd, workflowId, options, (workflow) => {
+    const continuation = workflow.continuation;
+    if (workflowContinuationPauseReason(workflow) || continuation?.policy !== "auto" || continuation.state !== "unavailable" ||
+        continuation.reason !== "dispatcher_unqualified" || workflow.currentOwnerSessionId !== workflow.originSessionId ||
+        !["queued", "running"].includes(workflow.status)) {
+      throw workflowError("CONTINUATION_NOT_READY", "Continuation cannot be bound.");
+    }
+    if (continuation?.requestedParentThreadId !== options.binding.parentThreadId) {
+      throw workflowError("CONTINUATION_OWNER_MISMATCH", "Dispatcher belongs to another parent.");
+    }
+    workflow.continuation = normalizeContinuation({ policy: "auto", binding: options.binding }, workflow.mode, workflow.currentOwnerSessionId);
+    return workflow;
+  });
+}
+
+export function endWorkflowContinuation(cwd, workflowId, options) {
+  return mutateWorkflow(cwd, workflowId, options, (workflow, timestamp) => {
+    const parent = workflow.continuation?.binding?.parentThreadId ?? workflow.continuation?.requestedParentThreadId;
+    if (workflow.currentOwnerSessionId !== options.ownerSessionId && (!options.parentThreadId || parent !== options.parentThreadId)) {
+      throw workflowError("CONTINUATION_OWNER_MISMATCH", "Continuation belongs to another parent.");
+    }
+    if (workflow.continuation?.policy === "auto") {
+      workflow.continuation = { ...workflow.continuation, state: "unavailable", reason: options.reason === "user_interrupted" ? "user_interrupted" : "session_ended", endedAt: timestamp };
+    }
+    return workflow;
+  });
+}
+
+export function claimWorkflowContinuation(cwd, workflowId, options) {
+  return mutateContinuation(cwd, workflowId, options, (workflow, event, timestamp) => {
+    if (event.delivery !== "pending" || event.consumedAt) throw workflowError("CONTINUATION_ALREADY_SENT", "Continuation was already claimed.");
+    event.delivery = "sending";
+    event.sendingAt = timestamp;
+    return workflow;
+  });
+}
+
+export function recordWorkflowContinuationDelivery(cwd, workflowId, options) {
+  if (!["queued", "unknown", "unavailable"].includes(options.delivery)) throw workflowError("INVALID_CONTINUATION", "Invalid delivery receipt.");
+  return mutateContinuation(cwd, workflowId, options, (workflow, event) => {
+    if (event.delivery !== "sending") throw workflowError("CONTINUATION_ALREADY_SENT", "Delivery receipt is already recorded.");
+    event.delivery = options.delivery;
+    event.queueId = options.queueId ? sanitizeId(options.queueId, "queue ID") : null;
+    event.failureReason = options.delivery === "queued" ? null : "NATIVE_DELIVERY_UNCONFIRMED";
+    return workflow;
+  });
+}
+
+export function consumeWorkflowContinuation(cwd, workflowId, options) {
+  return mutateContinuation(cwd, workflowId, options, (workflow, event, timestamp) => {
+    if (event.parentThreadId !== options.parentThreadId || event.ownerSessionId !== options.ownerSessionId ||
+        workflow.currentOwnerSessionId !== options.ownerSessionId) {
+      throw workflowError("CONTINUATION_OWNER_MISMATCH", "Continuation belongs to another parent.");
+    }
+    if (event.consumedAt) throw workflowError("CONTINUATION_ALREADY_CONSUMED", "Continuation was already consumed.");
+    event.consumedAt = timestamp;
+    return workflow;
+  });
+}
+
 function mutateWorkflow(cwd, workflowId, options, reducer) {
   const workspaceRoot = canonicalWorkspaceRoot(cwd);
   const filePath = resolveWorkflowFile(workspaceRoot, workflowId);
@@ -363,6 +561,7 @@ function mutateWorkflow(cwd, workflowId, options, reducer) {
       revision: workflow.revision + 1,
       updatedAt: timestamp,
     };
+    reserveContinuationEvent(next, timestamp);
     validateStoredWorkflow(next, workspaceRoot, workflow.mode);
     writeAtomic(filePath, next);
     enteredTerminal =
@@ -547,6 +746,7 @@ export function generateWorkflowId() {
   return `workflow-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 }
 
+/** @returns {Record<string, any>} Workflow records gain stage-specific fields under CAS. */
 export function reserveWorkflow(cwd, input) {
   const workspaceRoot = canonicalWorkspaceRoot(cwd);
   const id = sanitizeId(input?.id ?? generateWorkflowId(), "workflow ID");
@@ -570,6 +770,10 @@ export function reserveWorkflow(cwd, input) {
     "tool manifest",
     TOOL_MANIFEST_FIELDS
   );
+  const search = input.searchProvider == null ? {} : {
+    searchProvider: normalizeSearchProvider(input.searchProvider),
+    searchManifest: buildResearchSearchManifest(input.searchProvider, input.searchTools ?? {}),
+  };
   const stages = normalizedNames(input?.stages ?? [], "workflow stage");
   const branches = normalizedNames(input?.branches ?? [], "workflow branch ID");
   const fingerprint = getWorkingTreeFingerprint(workspaceRoot);
@@ -590,6 +794,8 @@ export function reserveWorkflow(cwd, input) {
     currentOwnerSessionId,
     modelManifest,
     toolManifest,
+    ...search,
+    ...(input.continuation != null ? { continuation: normalizeContinuation(input.continuation, mode, currentOwnerSessionId) } : {}),
     stages: initialWorkItems(stages),
     branches: initialWorkItems(branches),
     branchAttempts: [],

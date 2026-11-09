@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import fs from "node:fs";
+import os from "node:os";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
@@ -18,7 +19,6 @@ const HASH_OBJECT_BATCH_SIZE = 128;
 const FINGERPRINT_GIT_TIMEOUT_MS = 30_000;
 const FINGERPRINT_SMALL_MAX_BUFFER = 64 * 1024;
 const FINGERPRINT_PATH_LIST_MAX_BUFFER = 64 * 1024 * 1024;
-const FINGERPRINT_WRITE_TREE_RETRIES = 8;
 // Review runs have no Bash; omitted-context guidance names the bundled git MCP
 // tools instead. Keep in sync with REVIEW_MCP_SERVER_NAME in claude-cli.mjs.
 const REVIEW_MCP_TOOL_PREFIX = "mcp__gitReview__";
@@ -155,19 +155,22 @@ export function getWorkingTreeFingerprint(cwd, options = {}) {
 }
 
 function readIndexTree(repoRoot, gitOptions) {
-  for (let attempt = 0; attempt < FINGERPRINT_WRITE_TREE_RETRIES; attempt += 1) {
-    const result = git(repoRoot, ["write-tree"], gitOptions);
-    if (result.status === 0) return result.stdout.trim();
-    const indexBusy = /index\.lock[\s\S]*File exists/iu.test(result.stderr);
-    if (!indexBusy || attempt === FINGERPRINT_WRITE_TREE_RETRIES - 1) {
-      if (result.error) throw result.error;
-      throw new Error(formatCommandFailure(result));
-    }
-    const delay = 25 * (attempt + 1);
-    const shared = new SharedArrayBuffer(4);
-    Atomics.wait(new Int32Array(shared), 0, 0, delay);
-  }
-  throw new Error("git write-tree retry budget exhausted.");
+  const index = path.resolve(repoRoot, gitChecked(repoRoot, ["rev-parse", "--git-path", "index"], gitOptions).stdout.trim());
+  const objects = path.resolve(repoRoot, gitChecked(repoRoot, ["rev-parse", "--git-path", "objects"], gitOptions).stdout.trim());
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "cc-index-"));
+  try {
+    const temporaryIndex = path.join(temporary, "index");
+    try { fs.copyFileSync(index, temporaryIndex); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    const temporaryObjects = path.join(temporary, "objects");
+    fs.mkdirSync(temporaryObjects);
+    // write-tree caches index/tree data; keep both writes outside protected Git metadata.
+    const env = { ...gitOptions.env,
+      GIT_INDEX_FILE: temporaryIndex,
+      GIT_OBJECT_DIRECTORY: temporaryObjects,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: [JSON.stringify(objects), gitOptions.env.GIT_ALTERNATE_OBJECT_DIRECTORIES].filter(Boolean).join(path.delimiter),
+    };
+    return gitChecked(repoRoot, ["write-tree"], { ...gitOptions, env }).stdout.trim();
+  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 }
 
 function hashWorkingTreePaths(repoRoot, relativePaths, gitOptions) {

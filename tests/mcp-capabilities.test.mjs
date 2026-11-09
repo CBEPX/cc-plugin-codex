@@ -11,6 +11,94 @@ import path from "node:path";
 
 import * as mcp from "../scripts/lib/mcp-capabilities.mjs";
 
+describe("research search routes", () => {
+  const tools = ["WebSearch", "mcp__brave-search__brave_web_search", "mcp__firecrawl__firecrawl_search"];
+
+  it("keeps distinct search providers when the controller gives them the same capability", () => {
+    const probe = { catalog: tools.slice(1).map((toolId) => ({ toolId, capability: "web_search", safety: { eligible: true } })), diagnostics: [] };
+    const selected = mcp.selectMcpCapabilities(probe, { autoTools: tools.slice(1).map((toolId) => ({ toolId, capability: "web_search" })) });
+    assert.deepEqual(selected.selected.map(({ toolId }) => toolId), tools.slice(1));
+  });
+
+  it("selects all exposed search providers and keeps the two participants separate", () => {
+    assert.equal(typeof mcp.buildResearchSearchManifest, "function");
+    const manifest = mcp.buildResearchSearchManifest("all", {
+      codex: ["web.run", "mcp__firecrawl__firecrawl_search"], claude: tools,
+    });
+    assert.deepEqual(manifest.map(({ role, provider }) => [role, provider]), [
+      ["codex", "native"], ["codex", "firecrawl"],
+      ["claude", "native"], ["claude", "brave"], ["claude", "firecrawl"],
+    ]);
+    assert.throws(() => mcp.buildResearchSearchManifest("firecrawl", {
+      codex: ["web.run"], claude: tools,
+    }), { code: "SEARCH_PROVIDER_UNAVAILABLE" });
+    assert.throws(() => mcp.buildResearchSearchManifest("unknown", { codex: [], claude: [] }), { code: "INVALID_SEARCH_PROVIDER" });
+  });
+
+  it("does not count a read-only lookalike or page reader as a search provider", () => {
+    assert.equal(typeof mcp.buildResearchSearchManifest, "function");
+    assert.throws(() => mcp.buildResearchSearchManifest("all", {
+      codex: ["mcp__evil__firecrawl_search", "WebFetch"], claude: tools,
+    }), { code: "SEARCH_PROVIDER_UNAVAILABLE" });
+    const manifest = mcp.buildResearchSearchManifest("native", { codex: ["web.run"], claude: tools });
+    assert.deepEqual(manifest.map(({ provider }) => provider), ["native", "native"]);
+  });
+
+  it("distinguishes successful tool results from failed, missing, and unattempted searches", () => {
+    assert.equal(typeof mcp.researchSearchCoverage, "function");
+    const manifest = [
+      { role: "claude", provider: "native", toolIds: ["WebSearch"] },
+      { role: "claude", provider: "brave", toolIds: [tools[1]] },
+      { role: "claude", provider: "firecrawl", toolIds: [tools[2]] },
+    ];
+    const events = [{ tool: "WebSearch", toolUseId: "native-1" }, { tool: tools[1], toolUseId: "brave-1" }];
+    assert.deepEqual(mcp.researchSearchCoverage(manifest, "claude", events, [
+      { toolUseId: "native-1", isError: false }, { toolUseId: "brave-1", isError: true },
+    ]).map(({ provider, status }) => [provider, status]), [
+      ["native", "succeeded"], ["brave", "failed"], ["firecrawl", "not_attempted"],
+    ]);
+    assert.equal(mcp.researchSearchCoverage(manifest, "claude", events, [])[0].status, "failed");
+    assert.equal(mcp.researchSearchCoverage(manifest, "claude", [
+      { tool: "mcp__unselected__search", toolUseId: "forged" },
+    ], [{ toolUseId: "forged", isError: false }])[0].status, "not_attempted");
+  });
+});
+
+it("audits only a narrow Firecrawl search schema and refuses action-bearing variants", async () => {
+  for (const unsafe of [false, true]) await withTempHome(async ({ homeDir, cwd }) => {
+    const serverPath = writeStdioServer(homeDir, {
+      initialize: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "firecrawl", version: "1" } },
+      "tools/list": { tools: [{ name: "firecrawl_search", inputSchema: {
+        type: "object", additionalProperties: false, properties: { query: { type: "string" }, ...(unsafe ? { scrapeOptions: {
+          type: "object", properties: { actions: { type: "array" } },
+        } } : {}) },
+      } }] },
+    });
+    fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({ mcpServers: { firecrawl: { command: process.execPath, args: [serverPath] } } }));
+    const result = await mcp.probeMcpCapabilities(mcp.collectConfiguredMcpServers(cwd, { homeDir }));
+    assert.equal(result.catalog[0].safety.eligible, !unsafe);
+  });
+});
+
+it("refuses open Firecrawl containers and unresolved schema references", async () => {
+  for (const extra of [
+    { scrapeOptions: { type: "object", additionalProperties: true } },
+    { scrapeOptions: { type: "object", properties: {} } },
+    { scrapeOptions: { $ref: "#/$defs/UnknownOptions" } },
+    { sources: { type: "array", items: {} } },
+  ]) await withTempHome(async ({ homeDir, cwd }) => {
+    const serverPath = writeStdioServer(homeDir, {
+      initialize: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "firecrawl", version: "1" } },
+      "tools/list": { tools: [{ name: "firecrawl_search", inputSchema: {
+        type: "object", additionalProperties: false, properties: { query: { type: "string" }, ...extra },
+      } }] },
+    });
+    fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({ mcpServers: { firecrawl: { command: process.execPath, args: [serverPath] } } }));
+    const result = await mcp.probeMcpCapabilities(mcp.collectConfiguredMcpServers(cwd, { homeDir }));
+    assert.equal(result.catalog[0].safety.eligible, false, JSON.stringify(extra));
+  });
+});
+
 function withTempHome(run) {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-mcp-capabilities-"));
   const cwd = path.join(homeDir, "workspace");
@@ -391,6 +479,7 @@ describe("MCP capability discovery", () => {
       "mcp__context7__resolve-library-id",
       "mcp__brave-search__brave_web_search",
       "mcp__brave-search__brave_llm_context",
+      "mcp__firecrawl__firecrawl_search",
     ]);
     const mutable = /** @type {{add(value: string): unknown, delete(value: string): unknown, clear(): unknown}} */ (
       /** @type {unknown} */ (mcp.AUDITED_ANNOTATIONLESS_READ_ONLY_TOOLS)

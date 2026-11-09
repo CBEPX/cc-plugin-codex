@@ -44,6 +44,8 @@ import { TRANSCRIPT_PATH_ENV } from "../scripts/lib/claude-session-transfer.mjs"
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 import {
   completeWorkflowSessionEnd,
+  endWorkflowContinuation,
+  recordWorkflowContinuationPause,
   listWorkflows,
   readWorkflow,
   reserveWorkflowCancellation,
@@ -328,9 +330,20 @@ function reserveSessionWorkflows(
 ) {
   const workflowsDir = resolveWorkflowsDir(workspaceRoot);
   if (!fs.existsSync(workflowsDir)) return [];
+  recordWorkflowContinuationPause(workspaceRoot, sessionId, "session_ended");
   const reservations = [];
-  for (const listed of listWorkflows(workspaceRoot)) {
-    if (listed.currentOwnerSessionId !== sessionId) continue;
+  for (let listed of listWorkflows(workspaceRoot)) {
+    const ownsJobs = listed.currentOwnerSessionId === sessionId;
+    const ownsParent = listed.continuation?.binding?.parentThreadId === sessionId || listed.continuation?.requestedParentThreadId === sessionId;
+    if ((ownsJobs || ownsParent) && listed.continuation?.policy === "auto" && listed.continuation.reason !== "session_ended" && remainingCleanupMs(cleanupDeadlineAt) > 0) {
+      try {
+        listed = endWorkflowContinuation(workspaceRoot, listed.id, {
+          revision: listed.revision, epoch: listed.epoch, mode: listed.mode, ownerSessionId: sessionId, parentThreadId: sessionId,
+          deadlineAt: cleanupDeadlineAt, skipLockOwnerIdentity: process.platform === "win32",
+        });
+      } catch (error) { reportLifecycleFailure("SessionEnd continuation", error); }
+    }
+    if (!ownsJobs) continue;
     if (TERMINAL_WORKFLOW_STATUSES.has(listed.status)) continue;
     const hasUnfinishedWorkflowAttempt = [
       ...Object.entries(listed.branches ?? {}).flatMap(([branchId, branch]) =>
