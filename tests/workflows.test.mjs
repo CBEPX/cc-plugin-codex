@@ -93,6 +93,26 @@ function createWorkflow(repo, overrides = {}) {
   });
 }
 
+it("freezes only normalized per-role search routes and preserves legacy workflow records", () => {
+  const repo = createRepo();
+  const created = reserveWorkflow(repo, {
+    id: "research-search", mode: "research", brief: "Inspect public sources", originSessionId: "owner",
+    searchProvider: "all", searchTools: { codex: ["web.run"], claude: ["WebSearch", "mcp__firecrawl__firecrawl_search"] },
+  });
+  assert.deepEqual(readWorkflow(repo, created.id).searchManifest, [
+    { role: "codex", provider: "native", toolIds: ["web.run"] },
+    { role: "claude", provider: "native", toolIds: ["WebSearch"] },
+    { role: "claude", provider: "firecrawl", toolIds: ["mcp__firecrawl__firecrawl_search"] },
+  ]);
+  assert.equal(readWorkflow(repo, created.id).searchProvider, "all");
+  assert.equal(createWorkflow(repo).searchManifest, undefined);
+  assert.throws(() => reserveWorkflow(repo, {
+    id: "unavailable-search", mode: "research", brief: "Inspect", originSessionId: "owner",
+    searchProvider: "all", searchTools: { codex: [], claude: ["WebSearch"] },
+  }), { code: "SEARCH_PROVIDER_UNAVAILABLE" });
+  assert.equal(readWorkflow(repo, "unavailable-search"), null);
+});
+
 function errorCode(fn) {
   try {
     fn();

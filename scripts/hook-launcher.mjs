@@ -12,6 +12,7 @@ const HOOK_FILES = Object.freeze({
   "session-lifecycle": "session-lifecycle-hook.mjs",
   "stop-review-gate": "stop-review-gate-hook.mjs",
   "unread-result": "unread-result-hook.mjs",
+  "research-continuation": "research-continuation-hook.mjs",
 });
 
 function resolveHook(root, hookFile) {

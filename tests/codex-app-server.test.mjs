@@ -74,6 +74,12 @@ afterEach(() => {
 });
 
 describe("callCodexAppServer", () => {
+  it("rejects a relative shared socket before connecting", async () => {
+    await assert.rejects(() => callCodexAppServer({
+      cwd: createTempDir(), method: "thread/read", params: {}, serverSocket: "relative.sock",
+    }), /absolute/);
+  });
+
   it("lets CC_PLUGIN_CODEX_APP_SERVER_TIMEOUT_MS=0 disable per-call timeouts", async () => {
     const dir = createTempDir();
     const serverPath = createFakeAppServer(
@@ -209,4 +215,10 @@ describe("callCodexAppServer", () => {
       /exited before externalAgentConfig\/import emitted externalAgentConfig\/import\/completed/
     );
   });
+});
+
+
+it("shared transport refuses expired hook delivery budgets before opening a bridge", async () => {
+  const { connectCodexSharedServer } = await import("../scripts/lib/codex-shared-server.mjs");
+  await assert.rejects(connectCodexSharedServer({ serverSocket: "/tmp/expired-server.sock", deadlineMs: Date.now() - 1 }), /deadline/i);
 });

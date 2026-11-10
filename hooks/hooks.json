@@ -49,6 +49,31 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" research-continuation",
+            "timeout": 8,
+            "statusMessage": "Delivering research continuation"
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_DATA}/runtime/hook-launcher.mjs\" research-continuation",
+            "timeout": 3,
+            "statusMessage": "Pausing research continuation"
+          }
+        ]
+      }
     ]
   }
 }

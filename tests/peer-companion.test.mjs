@@ -48,7 +48,7 @@ function runGit(cwd, args) {
 /**
  * @param {string} root
  * @param {string} [name]
- * @param {Array<{name: string, description: string, annotations?: {readOnlyHint?: boolean, destructiveHint?: boolean}}>} [tools]
+ * @param {Array<{name: string, description: string, inputSchema?: object, annotations?: {readOnlyHint?: boolean, destructiveHint?: boolean}}>} [tools]
  */
 function writeFakeMcp(root, name = "docs", tools = [{
   name: "search",
@@ -140,13 +140,20 @@ async function main() {
     fs.mkdirSync(projectDir, { recursive: true });
     fs.writeFileSync(path.join(projectDir, sessionId + ".jsonl"), prompt, "utf8");
   }
-  const tool = (name, input) => process.stdout.write(JSON.stringify({
+  let toolSequence = 0;
+  const tool = (name, input) => {
+    const id = process.env.FAKE_SEARCH_RECEIPTS === "1" ? "search-" + (++toolSequence) : null;
+    process.stdout.write(JSON.stringify({
     type: "stream_event",
     session_id: sessionId,
-    event: { type: "content_block_start", content_block: { type: "tool_use", name, input } },
-  }) + "\\n");
+    event: { type: "content_block_start", content_block: { type: "tool_use", name, input, ...(id ? { id } : {}) } },
+    }) + "\\n");
+    if (id) process.stdout.write(JSON.stringify({ type: "user", message: { content: [{
+      type: "tool_result", tool_use_id: id, is_error: name === process.env.FAKE_CLAUDE_FAILED_TOOL, content: "public source result",
+    }] } }) + "\\n");
+  };
   tool("Read", { file_path: process.env.FAKE_REPO_FILE });
-  if (!sparse) tool("WebSearch", { query: "primary documentation" });
+  if (!sparse) tool(process.env.FAKE_CLAUDE_SEARCH_TOOL || "WebSearch", { query: "primary documentation" });
   for (const name of JSON.parse(process.env.FAKE_CLAUDE_EXTRA_TOOLS || "[]")) tool(name, {});
   if (process.env.FAKE_CLAUDE_DELTA_MARKER) {
     process.stdout.write(JSON.stringify({
@@ -450,9 +457,11 @@ function writePeerJob(testEnv, job) {
 }
 
 function createPeer(testEnv, extra = [], mode = "design") {
+  if (mode === "research") testEnv.env.FAKE_SEARCH_RECEIPTS = "1";
   return runJson(testEnv, [
     "peer-create", "--mode", mode, "--cwd", testEnv.workspaceDir,
     "--owner-session-id", "owner-a", "--user-mcp-tool", "mcp__docs__search",
+    ...(mode === "research" ? ["--codex-search-tool", "web.run"] : []),
     ...extra,
     "--json", "Compare", "the", "runtime", "design.",
   ]);
@@ -469,7 +478,14 @@ function submitCodexMemo(testEnv, created) {
     content: { findings: ["Independent Codex result."] },
     repoCitations: [{ path: testEnv.repoFile, line: 1 }],
     webCitations: ["https://example.test/codex"],
-    toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }],
+    ...(created.workflow.mode === "research" ? {
+      toolEvents: [{ tool: "repo-read" }, {
+        tool: readWorkflow(testEnv, created.workflow.id).searchProvider === "firecrawl" ? "mcp__firecrawl__firecrawl_search"
+          : readWorkflow(testEnv, created.workflow.id).searchProvider === "brave" ? "mcp__brave-search__brave_web_search" : "web.run",
+        toolUseId: "codex-search-1", operation: "search",
+      }],
+      toolResults: [{ toolUseId: "codex-search-1", operation: "search", isError: false }],
+    } : { toolEvents: [{ tool: "repo-read" }, { tool: "web-search" }] }),
   }) });
 }
 
@@ -528,6 +544,114 @@ afterEach(() => {
 });
 
 describe("peer companion with fake Claude", () => {
+  it("records auto-unavailable research and permits explicit manual continuation", () => {
+    const testEnv = createEnvironment();
+    const auto = createPeer(testEnv, [], "research");
+    const stored = readWorkflow(testEnv, auto.workflow.id);
+    assert.equal(stored.continuation?.policy, "auto");
+    assert.equal(stored.continuation.state, "unavailable");
+    const manual = createPeer(testEnv, ["--manual-continue"], "research");
+    assert.equal(readWorkflow(testEnv, manual.workflow.id).continuation.policy, "manual");
+  });
+
+  it("consumes an exact parent wake once without rebinding or duplicate reservations", () => {
+    const testEnv = createEnvironment();
+    const created = createPeer(testEnv, [], "research");
+    submitCodexMemo(testEnv, created);
+    runJson(testEnv, ["peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash, "--epoch", "0", "--json"],
+    { input: attemptInput(planLease(created, "_claude_")) });
+    const checkpointLease = planLease(created, "_codex_", "checkpoint");
+    activate(testEnv, created, "checkpoint", null, checkpointLease);
+    runJson(testEnv, ["peer-checkpoint", created.workflow.id, "--cwd", testEnv.workspaceDir,
+      "--brief-hash", created.workflow.briefHash, "--epoch", "0", "--json"],
+    { input: attemptInput(checkpointLease, { agreements: ["checked"], disagreements: [], decisionsNeeded: [] }) });
+    const stored = readWorkflow(testEnv, created.workflow.id);
+    stored.continuation = { policy: "auto", state: "ready", reason: null,
+      binding: { parentThreadId: "parent-thread", ownerSessionId: "owner-a", socketPath: "/tmp/unavailable-test.sock", socketDev: 1, socketIno: 2 },
+      events: { checkpoint: { id: "wake-test", milestone: "checkpoint", epoch: 0, parentThreadId: "parent-thread", ownerSessionId: "owner-a", delivery: "queued", queueId: "queue-test", consumedAt: null, createdAt: new Date().toISOString() } } };
+    writeWorkflow(testEnv, stored);
+    const args = ["peer-resume-plan", stored.id, "--cwd", testEnv.workspaceDir, "--mode", "research", "--continue",
+      "--wake-event", "wake-test", "--wake-epoch", "0", "--owner-session-id", "owner-a", "--json"];
+    const wrong = runJson(testEnv, args, { env: { CODEX_THREAD_ID: "other-thread" } });
+    assert.deepEqual(wrong.spawnPlan, []);
+    assert.equal(wrong.continuation.accepted, false);
+    assert.equal(readWorkflow(testEnv, stored.id).currentOwnerSessionId, "owner-a");
+    const accepted = runJson(testEnv, args, { env: { CODEX_THREAD_ID: "parent-thread" } });
+    assert.equal(accepted.spawnPlan.length, 2);
+    assert.equal(accepted.continuation.accepted, true);
+    const beforeDuplicate = readWorkflow(testEnv, stored.id);
+    assert.ok(beforeDuplicate.continuation.events.checkpoint.consumedAt);
+    const duplicate = runJson(testEnv, args, { env: { CODEX_THREAD_ID: "parent-thread" } });
+    assert.deepEqual(duplicate.spawnPlan, []);
+    assert.equal(duplicate.continuation.accepted, false);
+    assert.deepEqual(readWorkflow(testEnv, stored.id), beforeDuplicate);
+    const finished = readWorkflow(testEnv, stored.id);
+    finished.status = "completed";
+    finished.phase = "done";
+    finished.finalResult = { findings: ["full final result"], gaps: [] };
+    finished.continuation.events.completed = { ...finished.continuation.events.checkpoint, id: "wake-final", milestone: "completed", consumedAt: null };
+    writeWorkflow(testEnv, finished);
+    const finalArgs = args.map((value) => value === "wake-test" ? "wake-final" : value);
+    const final = runJson(testEnv, finalArgs, { env: { CODEX_THREAD_ID: "parent-thread" } });
+    assert.equal(final.completed, true);
+    assert.ok(Array.isArray(final.readPlan), "completed consumer must supply executable full-read recipes");
+    const exported = spawnSync("sh", ["-c", final.readPlan[2]], { cwd: testEnv.workspaceDir, env: testEnv.env, encoding: "utf8" });
+    assert.equal(exported.status, 0, exported.stderr);
+    const file = JSON.parse(exported.stdout).outputFile;
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).finalResult, finished.finalResult);
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+
+  });
+
+  for (const provider of ["native", "brave", "firecrawl", "all"]) {
+    it(`completes research memo evidence with ${provider} search and reports partial failures`, () => {
+      const testEnv = createEnvironment();
+      const firecrawl = "mcp__firecrawl__firecrawl_search";
+      const brave = "mcp__brave-search__brave_web_search";
+      const extra = ["--search-provider", provider];
+      if (provider === "firecrawl" || provider === "all") {
+        const server = writeFakeMcp(testEnv.rootDir, "firecrawl", [{
+          name: "firecrawl_search", description: "Search public web pages", inputSchema: { type: "object", additionalProperties: false, properties: { query: { type: "string" } } },
+        }]);
+        const configPath = path.join(testEnv.rootDir, "home", ".claude.json");
+        const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+        config.mcpServers.firecrawl = { command: process.execPath, args: [server] };
+        fs.writeFileSync(configPath, JSON.stringify(config));
+        extra.push("--user-mcp-tool", firecrawl);
+      }
+      if (provider === "brave" || provider === "all") {
+        const server = writeFakeMcp(testEnv.rootDir, "brave-search", [{
+          name: "brave_web_search", description: "Search public web pages",
+        }]);
+        const configPath = path.join(testEnv.rootDir, "home", ".claude.json");
+        const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+        config.mcpServers["brave-search"] = { command: process.execPath, args: [server] };
+        fs.writeFileSync(configPath, JSON.stringify(config));
+        extra.push("--user-mcp-tool", brave);
+      }
+      if (provider === "brave") {
+        extra.push("--codex-search-tool", brave);
+        Object.assign(testEnv.env, { FAKE_CLAUDE_SEARCH_TOOL: brave });
+      } else if (provider === "firecrawl") {
+        extra.push("--codex-search-tool", firecrawl);
+        Object.assign(testEnv.env, { FAKE_CLAUDE_SEARCH_TOOL: firecrawl });
+      } else if (provider === "all") {
+        Object.assign(testEnv.env, { FAKE_CLAUDE_EXTRA_TOOLS: JSON.stringify([brave, firecrawl]), FAKE_CLAUDE_FAILED_TOOL: firecrawl });
+      }
+      const created = createPeer(testEnv, extra, "research");
+      submitCodexMemo(testEnv, created);
+      const result = run(testEnv, ["peer-claude-turn", created.workflow.id, "--cwd", testEnv.workspaceDir,
+        "--brief-hash", created.workflow.briefHash, "--epoch", String(created.workflow.epoch), "--json"],
+      { input: attemptInput(planLease(created, "_claude_")) });
+      assert.equal(result.status, 0, result.stderr);
+      const memo = readWorkflow(testEnv, created.workflow.id).branches.claude.payload;
+      assert.deepEqual(memo.searchCoverage.map(({ provider: name, status }) => [name, status]),
+        provider === "all" ? [["native", "succeeded"], ["brave", "succeeded"], ["firecrawl", "failed"]] : [[provider, "succeeded"]]);
+      assert.equal(memo.searchEvidenceSource, "native_stream");
+    });
+  }
+
   for (const stage of ["memo", "critique"]) {
     for (const tools of [["Bash"], ["Bash", ...Array(255).fill("Read"), "WebSearch"], ["Agent"], ["Write"], ["mcp__docs__other"], ["mcp__docs__search_extra"], ["ToolSearchExtra"], ["mcp__docs__search", "ToolSearch", "StructuredOutput"]]) {
       it(`${stage} enforces actual tool boundary for ${tools.length > 3 ? "Bash before bounded tail" : tools.join(", ")}`, () => {

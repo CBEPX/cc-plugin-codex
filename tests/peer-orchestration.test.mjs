@@ -85,6 +85,13 @@ function waitForExit(child) {
 }
 
 describe("peer skill argument routing", () => {
+  it("defaults research to every available search and rejects changing its frozen provider", () => {
+    assert.equal(parsePeerArguments("research", ["inspect"]).searchProvider, "all");
+    assert.equal(parsePeerArguments("research", ["--search-provider", "firecrawl", "inspect"]).searchProvider, "firecrawl");
+    assert.throws(() => parsePeerArguments("research", ["--search-provider", "unknown", "inspect"]), /INVALID_SEARCH_PROVIDER/);
+    assert.throws(() => parsePeerArguments("research", ["--continue", "workflow-1", "--search-provider", "native"]), /CONFLICTING_PEER_ACTION/);
+    assert.throws(() => parsePeerArguments("design", ["--search-provider", "native", "inspect"]), /research/i);
+  });
   it("normalizes a new run with Fable, Opus fallback, and inherited xhigh Codex defaults", () => {
     const route = parsePeerArguments("design", [
       "--user-mcp-tool", "mcp__docs__search",
@@ -657,6 +664,45 @@ fs.appendFileSync(process.env.CC_PEER_CAPTURE, JSON.stringify(input) + "\\n");
 });
 
 describe("peer evidence validation", () => {
+  it("rejects a native page open as search evidence and keeps only the operation", () => {
+    const workspaceRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-native-operation-")));
+    try {
+      fs.writeFileSync(path.join(workspaceRoot, "source.mjs"), "export const value = 1;\n");
+      const workflow = { workspaceRoot, mode: "research", searchManifest: [
+        { role: "codex", provider: "native", toolIds: ["web.run"] },
+      ] };
+      const memo = { content: { findings: ["checked"] }, repoCitations: [{ path: "source.mjs", line: 1 }],
+        webCitations: ["https://example.test/reference"], toolResults: [{ toolUseId: "n1", isError: false }],
+        toolEvents: [{ tool: "web.run", toolUseId: "n1", input: { open: [{ ref_id: "https://example.test/" }] } }] };
+      assert.throws(() => validatePeerMemo(workflow, memo), /EVIDENCE_INCOMPLETE/);
+      Object.assign(memo.toolEvents[0], { input: { search_query: [{ q: "private research terms" }] } });
+      const accepted = validatePeerMemo(workflow, memo);
+      assert.deepEqual(accepted.toolEvents, [{ tool: "web.run", toolUseId: "n1", operation: "search" }]);
+      assert.doesNotMatch(JSON.stringify(accepted), /private research terms/);
+    } finally { fs.rmSync(workspaceRoot, { recursive: true, force: true }); }
+  });
+
+  it("requires actual results for each new research provider and accepts partial provider failures", () => {
+    const workspaceRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-search-results-")));
+    try {
+      fs.writeFileSync(path.join(workspaceRoot, "source.mjs"), "export const value = 1;\n");
+      const native = "WebSearch";
+      const firecrawl = "mcp__firecrawl__firecrawl_search";
+      const workflow = { workspaceRoot, mode: "research", toolManifest: [{ toolId: firecrawl }], searchManifest: [
+        { role: "claude", provider: "native", toolIds: [native] },
+        { role: "claude", provider: "firecrawl", toolIds: [firecrawl] },
+      ] };
+      const memo = { content: { findings: ["checked"] }, repoCitations: [{ path: "source.mjs", line: 1 }], webCitations: ["https://example.test/reference"] };
+      const toolEvents = [{ tool: "Read" }, { tool: native, toolUseId: "n1" }, { tool: firecrawl, toolUseId: "f1" }];
+      assert.throws(() => validatePeerMemo(workflow, memo, { role: "claude", toolEvents }), /EVIDENCE_INCOMPLETE/);
+      const accepted = validatePeerMemo(workflow, memo, { role: "claude", toolEvents, toolResults: [
+        { toolUseId: "n1", isError: false }, { toolUseId: "f1", isError: true },
+      ] });
+      assert.deepEqual(accepted.searchCoverage.map(({ status }) => status), ["succeeded", "failed"]);
+      assert.throws(() => validatePeerMemo(workflow, memo, { role: "claude", toolEvents: toolEvents.slice(0, 2), toolResults: [{ toolUseId: "n1", isError: false }] }), /EVIDENCE_INCOMPLETE/);
+    } finally { fs.rmSync(workspaceRoot, { recursive: true, force: true }); }
+  });
+
   it("accepts built-ins and only selected audited Brave web tool events", () => {
     const workspaceRoot = fs.realpathSync.native(
       fs.mkdtempSync(path.join(os.tmpdir(), "cc-peer-brave-evidence-"))
@@ -901,5 +947,21 @@ describe("peer wait view", () => {
 
     const staleWorkspace = workflow({ failureReason: "STALE_WORKSPACE" });
     assert.equal(buildPeerWaitView(staleWorkspace).terminalIncomplete, true);
+  });
+});
+
+describe("research continuation arguments", () => {
+  it("defaults new research to auto and permits an explicit manual checkpoint", () => {
+    assert.equal(parsePeerArguments("research", ["inspect queue"]).manualContinue, false);
+    assert.equal(parsePeerArguments("research", ["--manual-continue", "inspect queue"]).manualContinue, true);
+    assert.throws(() => parsePeerArguments("design", ["--manual-continue", "inspect queue"]), /INVALID_CONTINUATION/);
+    assert.throws(() => parsePeerArguments("research", ["--continue", "workflow-old", "--manual-continue"]), /CONFLICTING_PEER_ACTION/);
+  });
+  it("routes a fenced wake only through research continuation", () => {
+    const route = parsePeerArguments("research", ["--continue", "workflow-r", "--wake-event", "wake-1", "--wake-epoch", "2"]);
+    assert.equal(route.wakeEventId, "wake-1");
+    assert.equal(route.wakeEpoch, 2);
+    assert.throws(() => parsePeerArguments("research", ["--retry", "workflow-r", "--wake-event", "wake-1", "--wake-epoch", "2"]), /INVALID_CONTINUATION/);
+    assert.throws(() => parsePeerArguments("research", ["--continue", "workflow-r", "--wake-event", "wake-1"]), /INVALID_CONTINUATION/);
   });
 });

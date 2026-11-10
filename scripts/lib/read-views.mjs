@@ -17,10 +17,20 @@ export function publicReadPayload(value, lookupWorkflow = () => null) {
   if (Array.isArray(value)) return value.map((item) => publicReadPayload(item, lookupWorkflow));
   if (!value || typeof value !== "object") return value;
   if (value.id && !value.workflowId && isPeerWorkflow(value)) {
+    const continuation = value.continuation ? {
+      policy: value.continuation.policy,
+      state: value.continuation.state ?? "manual",
+      reason: value.continuation.reason ?? null,
+      manualCommand: `$cc:${value.mode} --continue ${value.id}`,
+      events: Object.fromEntries(Object.entries(value.continuation.events ?? {}).map(([milestone, event]) => [milestone, {
+        id: event.id, epoch: event.epoch, milestone, delivery: event.delivery, queueId: event.queueId, consumedAt: event.consumedAt,
+      }])),
+    } : null;
     const wait = buildPeerWaitView(value);
     value = value.branches.codex.status !== "completed"
       ? { id: value.id, ...wait }
       : { ...value, readyForCheckpoint: wait.readyForCheckpoint, terminalIncomplete: wait.terminalIncomplete };
+    if (continuation) value = { ...value, continuation };
   } else if (value.workflowId && value.id) {
     let workflow = null;
     try { workflow = lookupWorkflow(value.workflowId, value.workspaceRoot); } catch {}
@@ -56,6 +66,7 @@ function project(value, omissions, limits, summary, location = "", depth = 0) {
     value = { ...value,
       evidenceCounts: { repo: payload.repoCitations?.length ?? 0, web: payload.webCitations?.length ?? 0, tools: payload.toolEvents?.length ?? 0 },
       ...(payload.model ? { model: payload.model } : {}),
+      ...(payload.searchCoverage ? { searchCoverage: payload.searchCoverage, searchEvidenceSource: payload.searchEvidenceSource } : {}),
     };
   }
   const entries = Object.entries(value);

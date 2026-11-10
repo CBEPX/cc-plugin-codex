@@ -331,7 +331,7 @@ const CLAUDE_FINAL_MESSAGE_LIMIT_RE =
 const CLAUDE_ERROR_LIMIT_RE =
   /(?:you(?:'|’)?ve|you have)\s+(?:hit|reached)\s+your\s+.*limit|\b(?:session|usage)\s+limit\b|rate[_ -]?limit|\b429\b/i;
 const CLAUDE_AUTH_ERROR_RE =
-  /\bnot (?:logged|signed) in\b|\bnot authenticated\b|\bauthentication required\b|\binvalid api key\b|\b(?:oauth|access) token\b.{0,80}\bexpired\b|\bclaude auth login\b/i;
+  /\bnot (?:logged|signed) in\b|\bnot authenticated\b|\bauthentication required\b|\binvalid api key\b|\b(?:oauth|access) (?:token|session)\b.{0,80}\bexpired\b|\bclaude auth login\b/i;
 // Exact refusal observed from Claude Code when an organization disables subscription access.
 const CLAUDE_SUBSCRIPTION_REFUSAL_RE =
   /\borganization has disabled Claude subscription access\b/i;
@@ -383,7 +383,8 @@ function extractClaudeLimitResetTextFromError(text) {
 export function classifyClaudeFailure(value = {}) {
   const finalMessage = typeof value.finalMessage === "string" ? value.finalMessage.trim() : "";
   const stderr = typeof value.stderr === "string" ? value.stderr.trim() : "";
-  const message = [finalMessage, stderr].filter(Boolean).join("\n").trim();
+  const terminalErrorText = typeof value.terminalErrorText === "string" ? value.terminalErrorText.trim() : "";
+  const message = [finalMessage, stderr].filter(Boolean).join("\n").trim() || terminalErrorText;
   if (!message) {
     return null;
   }
@@ -420,7 +421,7 @@ export function classifyClaudeFailure(value = {}) {
       value.receivedTerminalEvent === false &&
       CLAUDE_AUTH_ERROR_RE.test(stderr)
   );
-  if (finalMessageAuth || stderrAuth) {
+  if (finalMessageAuth || stderrAuth || (terminalErrorText && CLAUDE_AUTH_ERROR_RE.test(terminalErrorText))) {
     return {
       kind: "claude_auth",
       message,
@@ -611,9 +612,10 @@ export function getClaudeAvailability(cwd) {
 }
 
 // Oldest Claude Code CLI supported for protected (project-isolated) reviews.
-// 2.1.281 forwards --setting-sources to spawned sessions (official changelog);
+// 2.1.321 adds sandbox/permission and MCP OAuth redirect fixes to the earlier
+// excluded-settings and resumed-worktree protections;
 // a documented conservative floor, not a tested matrix of later releases.
-export const MIN_PROTECTED_REVIEW_CLAUDE_VERSION = "2.1.281";
+export const MIN_PROTECTED_REVIEW_CLAUDE_VERSION = "2.1.321";
 
 // Stable releases only: "2.1.296" or "2.1.296 (Claude Code)". Prereleases and
 // unknown suffixes are not trusted to carry a capability.
@@ -712,6 +714,7 @@ export function assertAdvisorSupport(cwd, policy) {
  * ("unauthenticated") from probe failures that prove nothing about the login:
  * "timeout", "spawn_failed" and "probe_failed". `loggedIn` is true only for
  * "authenticated" and "api_key".
+ * @returns {{available: boolean, loggedIn: boolean, state: string, detail: string, loginExpiresAt?: string}}
  */
 export function getClaudeAuthStatus(cwd) {
   if (process.env.ANTHROPIC_API_KEY) {
@@ -761,7 +764,14 @@ export function getClaudeAuthStatus(cwd) {
     };
   }
   if (result.status === 0) {
-    return { available: true, loggedIn: true, state: "authenticated", detail: "authenticated" };
+    const loginExpiresAt = typeof reported?.loginExpiresAt === "string" &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(reported.loginExpiresAt) &&
+      Number.isFinite(Date.parse(reported.loginExpiresAt))
+      ? reported.loginExpiresAt : null;
+    return {
+      available: true, loggedIn: true, state: "authenticated", detail: "authenticated",
+      ...(loginExpiresAt ? { loginExpiresAt } : {}),
+    };
   }
   return {
     available: true,
@@ -845,6 +855,7 @@ export class StreamParser {
       unresolvedParseErrors: 0,
       streamDiagnostics: [],
       toolUses: [],
+      toolResults: [],
       touchedFiles: [],
       advisor: { callIds: [], diagnostics: [] },
       modelEvents: [],
@@ -931,6 +942,27 @@ export class StreamParser {
       // Full records only feed advisor accounting; tools and text come from stream events.
       if (event.type === "assistant") this._recordAdvisorCalls(event.message?.content);
       switch (event.type) {
+        case "user":
+          for (const block of Array.isArray(event.message?.content) ? event.message.content : []) {
+            if (block?.type !== "tool_result") continue;
+            const use = this.state.toolUses.find((entry) => entry.toolUseId === block.tool_use_id);
+            if (!use) continue;
+            let isError = block.is_error === true;
+            if (use.tool === "mcp__firecrawl__firecrawl_search") {
+              for (const part of Array.isArray(block.content) ? block.content : [{ text: block.content }]) {
+                if (typeof part?.text !== "string") continue;
+                try {
+                  const payload = JSON.parse(part.text);
+                  if (payload?.success === false || payload?.isError === true) isError = true;
+                } catch {}
+              }
+            }
+            pushBoundedTail(this.state.toolResults, {
+              toolUseId: block.tool_use_id,
+              isError,
+            }, MAX_STREAM_PARSER_TOOL_USES);
+          }
+          return null;
         case "stream_event":
           return this._handleStreamEvent(event);
         case "system":
@@ -1071,7 +1103,9 @@ export class StreamParser {
       if (cb?.type === "tool_use") {
         pushBoundedTail(
           this.state.toolUses,
-          { tool: cb.name, input: cb.input },
+          { tool: cb.name, input: cb.input,
+            ...(typeof cb.id === "string" && /^[A-Za-z0-9_:-]{1,160}$/.test(cb.id) ? { toolUseId: cb.id } : {}),
+          },
           MAX_STREAM_PARSER_TOOL_USES
         );
         if (cb.name === "Write" || cb.name === "Edit") {
@@ -1998,7 +2032,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         : detectedFailure ?? validation.failure ?? null;
       // A proven refusal is more specific than the generic terminal API error;
       // keep the terminal category so job metadata stays complete.
-      if (detectedFailure?.kind === "claude_subscription_refused" && validation.failure) {
+      if (["claude_subscription_refused", "claude_auth"].includes(detectedFailure?.kind) && validation.failure) {
         failure = { ...validation.failure, ...detectedFailure };
       }
       if (
@@ -2031,6 +2065,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         terminalReason: parser.state.terminalReason,
         terminalIsError: parser.state.terminalIsError,
         toolUses: parser.state.toolUses,
+        toolResults: parser.state.toolResults,
         touchedFiles: parser.state.touchedFiles,
         requestedModel,
         requestedEffort,

@@ -36,6 +36,8 @@ import {
   collectConfiguredMcpServers,
   buildSelectedMcpServers,
   BRAVE_WEB_EVIDENCE_TOOLS,
+  buildResearchSearchManifest,
+  searchProviderForTool,
   parseMcpToolId,
   probeMcpCapabilities,
   selectMcpCapabilities,
@@ -71,6 +73,7 @@ import {
 import {
   buildInitialAgentPlan,
   buildContinuationAgentPlan,
+  frozenReadInstructions,
   buildRetryAgentPlan,
   buildPeerCheckpoint,
   buildPeerWaitView,
@@ -160,6 +163,7 @@ import {
   activateWorkflowAttempt,
   commitWorkflowStage,
   completeWorkflowCancellation,
+  consumeWorkflowContinuation,
   getWorkflowRetryContext,
   listWorkflows,
   markWorkflowNotification,
@@ -3625,7 +3629,11 @@ function initialClaudePrompt(workflow) {
     `Frozen brief SHA-256: ${workflow.briefHash}`,
     emphasis,
     "Use at least one repository tool and one web tool.",
-    ...(braveWebTools.length > 0
+    ...(workflow.searchManifest ? [
+      `Frozen search routes: ${JSON.stringify(workflow.searchManifest.filter(({ role }) => role === "claude"))}.`,
+      "Attempt every frozen search provider. Keep partial failures explicit. A tool call without a successful result is not successful search evidence.",
+      "Read public sources with the permitted page readers. Search providers and page readers are separate.",
+    ] : braveWebTools.length > 0
       ? [`When relevant, prefer the selected Brave web tool: ${braveWebTools.join(", ")}.`]
       : []),
     "Return {content, repoCitations:[{path,line}], webCitations:[\"https://source.example/path\"]}.",
@@ -3682,8 +3690,11 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       workspaceRoot: workflow.workspaceRoot,
     });
     mcpConfigFile = createStrictMcpConfig(servers);
+    const baseTools = PEER_CLAUDE_ALLOWED_BASE_TOOLS.filter((tool) =>
+      tool !== "WebSearch" || !workflow.searchManifest ||
+      workflow.searchManifest.some(({ role, provider }) => role === "claude" && provider === "native"));
     const permittedTools = new Set([
-      ...PEER_CLAUDE_ALLOWED_BASE_TOOLS,
+      ...baseTools,
       ...workflow.toolManifest.map(({ toolId }) => toolId),
       "ToolSearch",
       "StructuredOutput",
@@ -3699,10 +3710,10 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
         // Frozen at creation. A workflow written before the field existed inherits.
         advisor: peerModelValue(workflow, "claude-advisor") ?? undefined,
         noSessionPersistence: true,
-        tools: [...PEER_CLAUDE_ALLOWED_BASE_TOOLS, "ToolSearch"],
+        tools: [...baseTools, "ToolSearch"],
         disallowedTools,
         allowedTools: [
-          ...PEER_CLAUDE_ALLOWED_BASE_TOOLS,
+          ...baseTools,
           ...selection.selected.map(({ toolId }) => toolId),
         ],
         permissionMode: "dontAsk",
@@ -3795,6 +3806,7 @@ async function executePeerClaudeTurn(cwd, workflowId, options = {}) {
       : validatePeerMemo(workflow, parsed, {
           role: "claude",
           toolEvents: result.toolUses,
+          toolResults: result.toolResults ?? [],
           model,
         });
     let submitted;
@@ -3850,9 +3862,10 @@ async function handlePeerCreate(argv) {
     valueOptions: [
       "cwd", "mode", "owner-session-id", "model", "fallback-model", "effort", "advisor",
       "codex-model", "codex-effort", "user-mcp-tool", "auto-mcp-tool", "brief-file",
+      "search-provider", "codex-search-tool",
     ],
-    repeatableOptions: ["user-mcp-tool", "auto-mcp-tool"],
-    booleanOptions: ["json", "allow-project-mcp-servers", "no-auto-tools"],
+    repeatableOptions: ["user-mcp-tool", "auto-mcp-tool", "codex-search-tool"],
+    booleanOptions: ["json", "allow-project-mcp-servers", "no-auto-tools", "manual-continue"],
   });
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveWorkspaceRoot(cwd);
@@ -3868,9 +3881,15 @@ async function handlePeerCreate(argv) {
   const discovery = collectConfiguredMcpServers(cwd, {
     allowProjectMcpServers: route.allowProjectMcpServers,
   });
-  const autoTools = Array.isArray(options["auto-mcp-tool"])
+  let autoTools = Array.isArray(options["auto-mcp-tool"])
     ? options["auto-mcp-tool"]
     : options["auto-mcp-tool"] ? [options["auto-mcp-tool"]] : [];
+  if (route.searchProvider && route.searchProvider !== "all") {
+    if (route.userMcpTools.some((tool) => searchProviderForTool(tool) && searchProviderForTool(tool) !== route.searchProvider)) {
+      throw new Error("SEARCH_PROVIDER_CONFLICT: An explicit search tool belongs to another provider.");
+    }
+    autoTools = autoTools.filter((tool) => !searchProviderForTool(tool) || searchProviderForTool(tool) === route.searchProvider);
+  }
   const expectedTools = route.userMcpTools.length > 0
     ? route.userMcpTools
     : route.noAutoTools ? [] : [...new Set(autoTools)];
@@ -3885,6 +3904,17 @@ async function handlePeerCreate(argv) {
   const missing = expectedTools.filter((toolId) => !selectedIds.has(toolId));
   if (missing.length > 0) {
     throw new Error(`MCP_SELECTION_INVALID: unavailable or unsafe tools: ${missing.join(", ")}`);
+  }
+  const searchTools = {
+    codex: Array.isArray(options["codex-search-tool"]) ? options["codex-search-tool"]
+      : options["codex-search-tool"] ? [options["codex-search-tool"]] : [],
+    claude: ["WebSearch", ...selection.selected.map(({ toolId }) => toolId)],
+  };
+  if (route.mode === "research") buildResearchSearchManifest(route.searchProvider, searchTools);
+  let continuation = null;
+  if (route.mode === "research") {
+    continuation = route.manualContinue ? { policy: "manual" } : { policy: "auto",
+      requestedParentThreadId: resolveParentThreadId(), reason: "dispatcher_unqualified" };
   }
   const created = reserveWorkflow(workspaceRoot, {
     mode: route.mode,
@@ -3903,6 +3933,8 @@ async function handlePeerCreate(argv) {
       { role: "codex-effort", requestedModel: route.codexEffort, resolvedModel: null },
     ],
     toolManifest: selection.selected,
+    ...(route.mode === "research" ? { searchProvider: route.searchProvider, searchTools } : {}),
+    ...(continuation ? { continuation } : {}),
     stages: ["feedback", "checkpoint", "critique", "synthesis"],
     branches: ["codex", "claude"],
   });
@@ -3924,6 +3956,7 @@ async function handlePeerCreate(argv) {
       leases: reservation.leases,
     }),
     diagnostics: selection.diagnostics,
+    ...(continuation ? { continuation: { policy: continuation.policy, state: created.continuation.state ?? "manual", reason: created.continuation.reason ?? null } } : {}),
   }, options.json);
 }
 
@@ -4072,7 +4105,9 @@ async function handlePeerCheckpoint(argv) {
       phase: "checkpoint",
       ...fence,
     });
-    outputResult(peerReceipt(submitted, "checkpoint", null, true), options.json);
+    const delivery = { delivery: submitted.continuation?.state === "ready" ? "pending" : "unavailable" };
+    outputResult({ ...peerReceipt(readWorkflow(cwd, workflowId) ?? submitted, "checkpoint", null, true),
+      ...(submitted.continuation ? { continuation: delivery } : {}) }, options.json);
   } catch (error) {
     failPeerAttempt(cwd, workflowId, { stage: "checkpoint" }, fence, error);
     throw error;
@@ -4081,7 +4116,7 @@ async function handlePeerCheckpoint(argv) {
 
 async function handlePeerResumePlan(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "mode", "owner-session-id", "advisor"],
+    valueOptions: ["cwd", "mode", "owner-session-id", "advisor", "wake-event", "wake-epoch"],
     booleanOptions: ["json", "continue", "retry"],
   });
   if (options.advisor != null) {
@@ -4093,14 +4128,34 @@ async function handlePeerResumePlan(argv) {
   const cwd = resolveCommandCwd(options);
   const workflowId = requireWorkflowId(positionals);
   let workflow = readPeerWorkflow(cwd, workflowId, options.mode);
-  const ownerSessionId = resolveCommandOwnerSessionId(
+  const wake = options["wake-event"] != null;
+  if ((wake || options["wake-epoch"] != null) && (!wake || options["wake-epoch"] == null || !options.continue || workflow.mode !== "research")) {
+    throw new Error("INVALID_CONTINUATION: A wake event and epoch require research --continue.");
+  }
+  const ownerSessionId = wake && !options["owner-session-id"] ? workflow.currentOwnerSessionId : resolveCommandOwnerSessionId(
     options["owner-session-id"],
     workflow.workspaceRoot
   );
   if (!ownerSessionId) throw new Error("PEER_OWNER_REQUIRED: An owner session is required.");
-  const feedback = options.continue
-    ? await readJsonStdin("Continuation feedback", true)
-    : null;
+  if (wake) {
+    try {
+      workflow = consumeWorkflowContinuation(cwd, workflowId, {
+        eventId: options["wake-event"], epoch: parseWorkflowCounter(options["wake-epoch"], "Wake epoch"),
+        parentThreadId: resolveParentThreadId(), ownerSessionId,
+      });
+    } catch (error) {
+      if (!["CONTINUATION_NOT_READY", "CONTINUATION_OWNER_MISMATCH", "CONTINUATION_ALREADY_CONSUMED", "STALE_EPOCH"].includes(error.code)) throw error;
+      outputResult({ workflow: peerWorkflowHeader(workflow), work: [], spawnPlan: [], continuation: { accepted: false, reason: error.code } }, options.json);
+      return;
+    }
+    if (workflow.status !== "awaiting_user") {
+      outputResult({ workflow: peerWorkflowHeader(workflow), work: [], spawnPlan: [], completed: workflow.status === "completed",
+        ...(workflow.status === "completed" ? { readPlan: frozenReadInstructions(workflow, path.join(ROOT_DIR, "scripts", "claude-companion.mjs")) } : {}),
+        continuation: { accepted: true } }, options.json);
+      return;
+    }
+  }
+  const feedback = wake ? {} : options.continue ? await readJsonStdin("Continuation feedback", true) : null;
   if (workflow.currentOwnerSessionId !== ownerSessionId) {
     workflow = rebindWorkflowOwner(cwd, workflowId, {
       revision: workflow.revision,
@@ -4163,6 +4218,7 @@ async function handlePeerResumePlan(argv) {
   }, [{ stage: "critique" }, { stage: "synthesis" }]);
   outputResult({
     workflow: peerWorkflowHeader(reservation.workflow),
+    ...(wake ? { continuation: { accepted: true } } : {}),
     work: [{ kind: "stage", id: "critique" }, { kind: "stage", id: "synthesis" }],
     spawnPlan: buildContinuationAgentPlan(reservation.workflow, {
       companionPath: path.join(ROOT_DIR, "scripts", "claude-companion.mjs"),
@@ -4201,7 +4257,9 @@ async function handlePeerFinal(argv) {
       phase: "done",
       ...fence,
     });
-    outputResult(peerReceipt(submitted, "synthesis", null, true), options.json);
+    const delivery = { delivery: submitted.continuation?.state === "ready" ? "pending" : "unavailable" };
+    outputResult({ ...peerReceipt(readWorkflow(cwd, workflowId) ?? submitted, "synthesis", null, true),
+      ...(submitted.continuation ? { continuation: delivery } : {}) }, options.json);
   } catch (error) {
     failPeerAttempt(cwd, workflowId, { stage: "synthesis" }, fence, error);
     throw error;

@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, it, mock } from "node:test";
-import { exportReadPayload } from "../scripts/lib/read-views.mjs";
+import { exportReadPayload, publicReadPayload } from "../scripts/lib/read-views.mjs";
 import { writeJobFile, readJobFile, resolveStateDir, setCurrentSession } from "../scripts/lib/state.mjs";
 import { buildInitialAgentPlan, buildRetryAgentPlan, buildContinuationAgentPlan } from "../scripts/lib/peer-orchestration.mjs";
 import { reserveWorkflow, resolveWorkflowsDir } from "../scripts/lib/workflows.mjs";
@@ -382,4 +382,16 @@ it("keeps a replacement file when the write fails after the path changed", () =>
     mock.restoreAll();
   }
   assert.equal(fs.readFileSync(output, "utf8"), "someone else's data");
+});
+
+it("reports continuation recovery without exposing the native endpoint", () => {
+  const { workflow } = fixture();
+  workflow.mode = "research";
+  workflow.continuation = { policy: "auto", state: "unavailable", reason: "shared_runtime_unavailable",
+    binding: { socketPath: "/private/native-socket", parentThreadId: "parent-thread", socketIno: 42 },
+    events: { checkpoint: { id: "wake-1", epoch: 0, milestone: "checkpoint", delivery: "unknown", queueId: null, consumedAt: null } } };
+  const view = publicReadPayload(workflow);
+  assert.equal(view.continuation.manualCommand, "$cc:research --continue large-workflow");
+  assert.equal(view.continuation.events.checkpoint.delivery, "unknown");
+  assert.doesNotMatch(JSON.stringify(view.continuation), /native-socket|socketIno|binding/);
 });

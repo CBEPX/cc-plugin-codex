@@ -260,6 +260,13 @@ function readRestrictionRules(file) {
 
   const rules = [];
   for (const [key, value] of Object.entries(settings.permissions)) {
+    if (key === "denyInsteadOfPrompting") {
+      if (typeof value !== "boolean") {
+        throw projectSettingsUnsupported(file, "permissions.denyInsteadOfPrompting is not a boolean");
+      }
+      // Reviews force dontAsk, which already denies every unapproved prompt.
+      continue;
+    }
     if (IGNORED_PERMISSION_KEYS.has(key)) continue;
     if (key !== "deny" && key !== "ask") {
       throw projectSettingsUnsupported(file, `permissions.${key} is not supported`);

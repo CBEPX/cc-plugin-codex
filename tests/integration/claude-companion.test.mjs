@@ -92,7 +92,7 @@ async function main() {
   }
 
   if (args[0] === "--version") {
-    process.stdout.write((process.env.CLAUDE_FAKE_VERSION || "2.1.296 (Claude Code)") + "\\n");
+    process.stdout.write((process.env.CLAUDE_FAKE_VERSION || "2.1.321 (Claude Code)") + "\\n");
     return;
   }
 
@@ -2976,7 +2976,7 @@ describe("claude-companion integration", () => {
       {
         name: "unsupported CLI",
         env: { CLAUDE_FAKE_VERSION: "2.1.200 (Claude Code)" },
-        error: /Claude Code CLI 2\.1\.281 or later/,
+        error: /Claude Code CLI 2\.1\.321 or later/,
       },
       {
         name: "negated project rule",

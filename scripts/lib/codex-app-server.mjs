@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import process from "node:process";
+import { connectCodexSharedServer } from "./codex-shared-server.mjs";
 
 const CLIENT_INFO = {
   name: "cc-plugin-codex-installer",
@@ -41,6 +42,7 @@ function resolveAppServerCommand() {
   return { executable, args };
 }
 
+/** @returns {Promise<any>} The method defines the JSON-RPC result shape. */
 export async function callCodexAppServer({
   cwd,
   method,
@@ -49,8 +51,8 @@ export async function callCodexAppServer({
   timeoutMs: requestedTimeoutMs = null,
   responseCompletesWait = null,
   onNotification = null,
+  serverSocket = null,
 }) {
-  const { executable, args } = resolveAppServerCommand();
   const hasConfiguredTimeout =
     process.env.CC_PLUGIN_CODEX_APP_SERVER_TIMEOUT_MS != null;
   const configuredTimeoutMs = Number.parseInt(
@@ -64,6 +66,13 @@ export async function callCodexAppServer({
     ? envTimeoutMs
     : Math.max(Number(requestedTimeoutMs) || 0, envTimeoutMs);
 
+  if (serverSocket !== null) {
+    if (waitForNotificationMethod) throw new Error("Shared calls require explicit notification handling.");
+    const client = await connectCodexSharedServer({ serverSocket, timeoutMs: timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS, onNotification });
+    try { return await client.request(method, params); } finally { client.close(); }
+  }
+
+  const { executable, args } = resolveAppServerCommand();
   return await new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(executable, args, {
       cwd,

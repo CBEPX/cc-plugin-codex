@@ -10,6 +10,17 @@ Public forms are:
 - Continue: `--continue <workflow-id> [feedback]`
 - Retry: `--retry <workflow-id>`
 
+Research also accepts `--search-provider all|brave|firecrawl|native` and `--manual-continue`. It defaults to `all` for new research.
+The provider cannot change on continuation or retry. Design retains its existing behavior.
+Discover Codex and Claude search routes separately. Pass the Codex turn's exact exposed search tool IDs as repeated internal `--codex-search-tool` values.
+Select every eligible available search provider within the research policy and explicit MCP scope. Preserve `--no-auto-tools` and exact user pins.
+The workflow freezes a per-role `searchManifest`. New research validates actual call/result receipts and records `succeeded`, `failed`, or `not_attempted` coverage.
+Attempt every selected provider. Partial failures remain gaps. No successful provider, or an unattempted selected provider, makes the memo incomplete.
+Search and page reading are separate capabilities. WebFetch alone does not prove a successful search in new research.
+The Firecrawl route permits only the reviewed `firecrawl_search` surface. Reject schemas with action or workflow parameters.
+Do not add Firecrawl Agent, Crawl, Interact, monitor, or Alexandria operations to peer selection.
+Codex receipt provenance remains worker-reported. Claude receipts come from the observed native stream. Neither claim completes issue #38 citation provenance.
+
 Reject mixed forms. New defaults are Claude `fable`, fallback `opus`, inherited Codex model, Codex effort `xhigh`, and advisor `inherit`.
 
 `--advisor` is valid only for a new run. `peer-create` freezes it in the model manifest as the `claude-advisor` entry. `peer-create` stores `inherit` as a null value. The memo turn, the critique turn, and every retry read that frozen value. `--continue` and `--retry` reject `--advisor`. A workflow created before this entry existed uses `inherit`. An alias or a model ID needs Claude Code 2.1.293 or later. If the CLI no longer supports a frozen model, the Claude turn fails closed with `CLAUDE_ADVISOR_UNSUPPORTED`. Do not retry without the advisor.
@@ -28,7 +39,7 @@ In short: rerun preflight after installation or restart.
 ## New workflow
 
 1. Resolve routing with `session-routing-context --json`.
-2. Run `mcp-diagnose --json` with the user's exact MCP flags. This actively starts/probes the configured servers in scope that those flags select (only pinned servers with `--user-mcp-tool`, none with `--no-auto-tools` and no pins, every server otherwise) and can therefore have server-defined side effects. The active Codex controller chooses the smallest relevant subset of eligible exact IDs from their descriptions. Pass those choices as repeated internal `--auto-mcp-tool` values to `peer-create`; Node validates exact IDs and safety only. Eligibility trusts a server's `readOnlyHint` declaration or an immutable four-ID audited registry — Context7 `mcp__context7__query-docs` and `mcp__context7__resolve-library-id`, plus Brave `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`. It is not an OS sandbox and always vetoes `destructiveHint`. Only the two Brave IDs are Brave web-evidence tools; no other Brave ID is eligible through the registry. With `--no-auto-tools`, choose none automatically. Exact user pins remain exact and still must be eligible.
+2. Run `mcp-diagnose --json` with the user's exact MCP flags. This actively starts/probes the configured servers in scope that those flags select (only pinned servers with `--user-mcp-tool`, none with `--no-auto-tools` and no pins, every server otherwise) and can therefore have server-defined side effects. The active Codex controller chooses the smallest relevant subset of eligible exact IDs from their descriptions. Pass those choices as repeated internal `--auto-mcp-tool` values to `peer-create`; Node validates exact IDs and safety only. Eligibility trusts a server's `readOnlyHint` declaration or an immutable audited registry — Context7 `mcp__context7__query-docs` and `mcp__context7__resolve-library-id`, plus Brave `mcp__brave-search__brave_web_search` and `mcp__brave-search__brave_llm_context`, and schema-checked Firecrawl `mcp__firecrawl__firecrawl_search`. It is not an OS sandbox and always vetoes `destructiveHint`. Only the two Brave IDs are Brave web-evidence tools; no other Brave ID is eligible through the registry. With `--no-auto-tools`, choose none automatically. Exact user pins remain exact and still must be eligible.
 3. Keep a shell-hostile or multiline brief out of argv: normalize it once, write it to an OS temporary file outside the workspace, and use the internal `--brief-file`. Delete that temporary file after `peer-create` returns.
 4. Run `peer-create --mode <mode> --cwd <workspaceRoot> --owner-session-id <ownerSessionId> ... --json`. Preserve public model, advisor, and MCP flags and controller-selected internal IDs.
 5. `peer-create` has already reserved the Codex memo, Claude memo, and checkpoint attempts atomically. Use its returned `spawnPlan` with built-in `spawn_agent`: spawn exactly two children. For both, pass `fork_turns: "none"` and the returned self-contained message. Do not add parent history.
@@ -49,7 +60,7 @@ Each worker receives only its own raw lease in its spawn message. A raw lease is
 
 The pure Claude forwarder must run exactly one companion command, in the foreground, and return its bounded receipt stdout unchanged. It does no repository inspection or reasoning itself. Never use shell backgrounding (`nohup`, detached spawn, or an ampersand operator). Never invoke `codex exec`. If the shell yields a session, poll that same session until exit.
 
-Initial and critique peer turns explicitly select Read, Glob, Grep, WebSearch, WebFetch, and ToolSearch with `--tools`, preserving exact selected MCP permission grants. The companion enforces `permission-mode=dontAsk`, a strict MCP config, and exact `--disallowedTools` rules for every discovered unselected MCP ID; peer turns have no Bash, no Agent, and no write builtins. ToolSearch and schema-injected StructuredOutput are narrow protocol exceptions, not repository or web evidence. Before accepting either memo or critique, the companion rejects actual tool events outside the base tools, frozen exact MCP selection, and those two protocol exceptions with `EVIDENCE_INCOMPLETE` / `TOOL_EVENT_NOT_ALLOWED`. This acceptance guard cannot undo a tool call already executed. Peer-only CLI settings set `disableAllHooks: true` to suppress ordinary user, project, local, and plugin hooks; managed administrator hooks remain a managed-policy trust boundary. It also requires a fail-closed filesystem sandbox: native Windows is unsupported, unsandboxed commands are disabled, the canonical workspace is the only explicit read allowance, and canonical `CODEX_HOME` plus `~/.claude/projects` are denied by both the sandbox and Read permission rules. If the required filesystem sandbox is unavailable or the workspace overlaps protected state, fail closed with `PEER_ISOLATION_UNAVAILABLE` before research can proceed. Selected external MCP servers remain trusted declarations rather than an OS sandbox; the rendered manifest preserves the exact trust basis. Revalidation starts/probes only the servers represented in the frozen selection. It records requested/final/fallback model telemetry and actual public tool-event names. A Brave event is web evidence only if its exact ID is one of the two audited IDs and is present in that frozen manifest; an unselected or lookalike Brave ID does not count.
+Initial and critique peer turns explicitly select Read, Glob, Grep, WebSearch, WebFetch, and ToolSearch with `--tools`, preserving exact selected MCP permission grants. The companion enforces `permission-mode=dontAsk`, a strict MCP config, and exact `--disallowedTools` rules for every discovered unselected MCP ID; peer turns have no Bash, no Agent, and no write builtins. ToolSearch and schema-injected StructuredOutput are narrow protocol exceptions, not repository or web evidence. Before accepting either memo or critique, the companion rejects actual tool events outside the base tools, frozen exact MCP selection, and those two protocol exceptions with `EVIDENCE_INCOMPLETE` / `TOOL_EVENT_NOT_ALLOWED`. This acceptance guard cannot undo a tool call already executed. Peer-only CLI settings set `disableAllHooks: true` to suppress ordinary user, project, local, and plugin hooks; managed administrator hooks remain a managed-policy trust boundary. It also requires a fail-closed filesystem sandbox: native Windows is unsupported, unsandboxed commands are disabled, the canonical workspace is the only explicit read allowance, and canonical `CODEX_HOME` plus `~/.claude/projects` are denied by both the sandbox and Read permission rules. If the required filesystem sandbox is unavailable or the workspace overlaps protected state, fail closed with `PEER_ISOLATION_UNAVAILABLE` before research can proceed. Selected external MCP servers remain trusted declarations rather than an OS sandbox; the rendered manifest preserves the exact trust basis. Revalidation starts/probes only the servers represented in the frozen selection. It records requested/final/fallback model telemetry and actual public tool-event names. For legacy workflows, a Brave event is web evidence only if its exact ID is one of the two audited IDs and is present in that frozen manifest; an unselected or lookalike Brave ID does not count.
 
 The frozen manifest binds selected tool IDs and their audited eligibility, not a remote provider implementation. An `@latest` Brave server can change behavior behind an unchanged ID, so pin the server when that residual drift is unacceptable. Brave query and LLM-context input are disclosed to the selected external provider; do not send secrets or sensitive brief/context material. Redacting raw MCP configuration and credentials from workflow state does not remove that disclosure risk.
 
@@ -61,9 +72,36 @@ Every initial memo needs non-empty structured content, a canonical in-workspace 
 
 `peer-checkpoint` preserves separate frozen memos and adds agreements, disagreements, source/tool manifests, and decisions needed. Its final `commands` entries are the exact `$cc:<mode> --continue <workflow-id>` and `$cc:<mode> --retry <workflow-id>` commands.
 
+## Automatic research events
+
+New research defaults to automatic continuation. `--manual-continue` selects the checkpoint stop for a new research workflow. Forward that flag to `peer-create`. Old workflows without a continuation policy and design workflows retain manual continuation.
+
+A new automatic workflow reports `dispatcher_unqualified` until the trusted `PostToolUse` hook qualifies its exact parent. The hook adds `Research continuation dispatcher receipts` as developer context. A receipt with the same workflow ID and `state: "ready"` confirms qualification and supersedes the creation response. Do not fabricate a hook receipt or treat a receipt for another workflow as qualification.
+
+Inspect both the `peer-create.continuation` result and this hook receipt before reporting availability. If no matching qualification exists, report the reason and exact `$cc:research --continue <id>` command. Return the initial background launch receipt. Do not start or migrate a shared server, change permissions, approve hooks, or restart another session to remove this blocker.
+
+A native queued event carries `$cc:research --continue <id> --wake-event <event-id> --wake-epoch <epoch>`. Keep both wake fields. From the current workspace, run:
+
+```text
+node <plugin-root>/scripts/claude-companion.mjs peer-resume-plan <id> --mode research --continue --wake-event <event-id> --wake-epoch <epoch> --json
+```
+
+Use closed stdin. The automatic handler derives the frozen owner only for the exact parent thread. Do not use an ordinary continuation command for a wake event. Ordinary continuation can rebind ownership.
+
+- If `continuation.accepted` is false, return its reason. Spawn no workers and do not retry the event.
+- If accepted and `spawnPlan` has workers, spawn exactly those two plans with their returned messages and settings. Both use `fork_turns: "none"`. The synthesis worker waits for critique itself. Return from this parent turn without waiting. The final event starts the next parent turn.
+- If accepted and `completed` is true, execute the returned `readPlan` export and section recipes. The `workflow-read` export is the workflow itself, so `finalResult` is at its root. Read finalResult, memos, checkpoint, feedback, critique and manifests completely in sections. Remove only that export. Use these results to continue the parent's pending analysis and produce the next plan. Start no implementation.
+- If accepted with empty work and `completed` is false, work already started. Return its current status. Do not start another critique or synthesis.
+
+Honor newer user steering, pause and cancellation before processing the event. Cancel superseded research through the existing workflow cancellation path. Preserve the current collaboration mode and permissions. Leave unresolved user decisions as questions or explicit planning gaps.
+
+Queue acceptance, a new native turn, and event consumption are separate facts. The stored delivery and consumedAt fields report them separately. Unknown ACK or a sending event is not permission to send it again. Use the exact manual continuation/retry command for recovery. The trusted hook delivers a durably pending unsent event. Workers only persist the event; they do not access the privileged control socket.
+
+Automatic delivery requires enabled, trusted research `PostToolUse` and `Interrupt` hooks and an existing compatible shared server that already owns the parent. The hook derives its endpoint locally and checks the native caller ancestry, workspace, endpoint identity and frozen workflow fences. It does not execute tool output. A native interruption persists a parent pause fence before queue cleanup; old events cannot be consumed. Only matching research queue entries are removed. It uses the current native thread context without resume or context overrides. Native WebSocket support is required (standard in Node 22 and later). An unavailable runtime keeps manual recovery available.
+
 ## Continue
 
-Continue is foreground.
+Manual continuation is foreground. For a fenced research event, use the automatic event contract above.
 
 1. Read the explicit workflow in the current canonical workspace. Run `peer-resume-plan <id> --continue --owner-session-id <current-id> --json`. Empty or closed stdin means no optional feedback; non-empty feedback must be a JSON object on stdin. This explicitly rebinds a cross-session owner and reserves critique plus synthesis before dispatch; never use generic rescue `--resume-last`.
 2. Execute the returned plans sequentially. Spawn the pure Claude forwarder with `fork_turns: "none"`, inherited model, and medium effort. Its heredoc supplies the reserved critique lease to the one foreground `peer-claude-critique` command. Wait for it.
@@ -89,3 +127,12 @@ SessionEnd owns shutdown: active linked companion work is stopped first; only ta
 `status`, `result`, `workflow-read`, `workflow-list` and `peer-wait` default to at most 8192 UTF-8 bytes in either format. JSON stays parseable and includes `truncated` plus explicit omissions. `workflow-list --json` returns `{workflows,total,truncated,omissions}`. Status/list/poll omit result bodies and attempt history. Short one-shot polling never consumes terminal notifications; do not treat readiness as memo delivery.
 
 All five accept `--output <new-path>` to export their full authorized JSON shape without the preview cap (workflow-list exports its original array). The receipt contains `outputFile`, `bytes` and `sha256`; existing files and symlinks are refused. Export failures leave notifications unread. `peer-wait --output` also leaves aggregate notifications unread because its exported memos do not deliver checkpoint/final output; pre-seal redacted exports never acknowledge a withheld aggregate. Public exports never reveal raw leases or sibling data before Codex seals its memo. Use the generated export and section commands for workers, retain their captured epoch, and never synthesize silently from a preview.
+
+For new research, the Codex memo includes `toolEvents:[{tool,toolUseId,operation}]` and `toolResults:[{toolUseId,isError}]` alongside content and citations.
+Before each selected search call, assign a unique local receipt ID, such as `codex-search-1`.
+Use that ID as `toolUseId` for the call and its completed result. Native call IDs are not required or guessed.
+These labels correlate worker-observed calls and results. They do not prove native provenance.
+Use the exact frozen tool ID. Record failures, approval denials and provider `success:false` responses with `isError:true`.
+Record `isError:false` only after observing a successful search response.
+
+For `web.run` and `web__run` receipts, set `operation: "search"` only for a non-empty `search_query` call. Use `operation: "read"` for page reads. A page open does not satisfy the search requirement. Do not store query terms or page content in receipts.
