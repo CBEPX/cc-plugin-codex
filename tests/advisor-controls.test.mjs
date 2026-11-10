@@ -35,7 +35,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (process.env.FAKE_INVOKE_LOG) fs.appendFileSync(process.env.FAKE_INVOKE_LOG, JSON.stringify(args) + "\\n");
 async function main() {
-  if (args[0] === "--version") return void process.stdout.write((process.env.FAKE_VERSION ?? "2.1.319 (Claude Code)") + "\\n");
+  if (args[0] === "--version") return void process.stdout.write((process.env.FAKE_VERSION ?? "2.1.321 (Claude Code)") + "\\n");
   if (args[0] === "auth") return void process.stdout.write('{"loggedIn":true}\\n');
   let prompt = "";
   process.stdin.setEncoding("utf8");
@@ -598,7 +598,7 @@ describe("stop-review gate advisor policy", () => {
 
   /** @type {Array<[string, Record<string, string>, Record<string, string>, string, RegExp]>} */
   const refusals = [
-    ["an unsupported CLI", { stopReviewAdvisor: "fable" }, { FAKE_VERSION: "2.1.292 (Claude Code)" }, "CLAUDE_REVIEW_UNSUPPORTED", /2\.1\.314/],
+    ["an unsupported CLI", { stopReviewAdvisor: "fable" }, { FAKE_VERSION: "2.1.292 (Claude Code)" }, "CLAUDE_REVIEW_UNSUPPORTED", /2\.1\.321/],
     ["a corrupt configured value", { stopReviewAdvisor: "bad value!" }, {}, "CLAUDE_ADVISOR_INVALID", /advisor/i],
   ];
   for (const [name, config, env, code, pattern] of refusals) {

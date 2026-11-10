@@ -179,7 +179,7 @@ if (process.env.CLAUDE_MCP_CONFIG_FILE) {
 if (args[0] === "--version") {
   // The 2nd probe is the protected-review guard; the 1st is the setup check.
   barrier("CLAUDE_VERSION_BARRIER", 2);
-  process.stdout.write((process.env.CLAUDE_FAKE_VERSION ?? "2.1.319 (Claude Code)") + "\\n");
+  process.stdout.write((process.env.CLAUDE_FAKE_VERSION ?? "2.1.321 (Claude Code)") + "\\n");
   process.exit(0);
 }
 
@@ -642,13 +642,13 @@ describe("hooks", () => {
       {
         name: "old CLI",
         env: { CLAUDE_FAKE_VERSION: "2.1.220 (Claude Code)" },
-        reason: /Claude Code CLI 2\.1\.314 or later/,
+        reason: /Claude Code CLI 2\.1\.321 or later/,
         code: "CLAUDE_REVIEW_UNSUPPORTED",
       },
       {
         name: "unparseable CLI version",
         env: { CLAUDE_FAKE_VERSION: "unknown" },
-        reason: /Claude Code CLI 2\.1\.314 or later/,
+        reason: /Claude Code CLI 2\.1\.321 or later/,
         code: "CLAUDE_REVIEW_UNSUPPORTED",
       },
       {

@@ -13,7 +13,7 @@
 ### Fixed
 
 - Classify the observed expired OAuth session terminal error as an authentication failure, including native generic API-error results. Preserve the native terminal category.
-- Require Claude Code 2.1.314 or later for protected reviews after upstream fixes to excluded settings sources and resumed sandbox checks. Validate the new boolean `permissions.denyInsteadOfPrompting` setting while preserving the plugin's `dontAsk` review policy.
+- Require Claude Code 2.1.321 or later for protected reviews after upstream fixes to permissions, sandbox checks, excluded settings sources, and MCP OAuth redirects. Validate the new boolean `permissions.denyInsteadOfPrompting` setting while preserving the plugin's `dontAsk` review policy.
 
 ## v1.8.1
 

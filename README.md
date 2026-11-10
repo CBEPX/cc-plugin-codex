@@ -150,7 +150,7 @@ JSON task and review results keep `requestedModel` as the forwarded alias or ful
 
 For model qualification, compare `--model claude-opus-5-5 --effort medium` against `high` and `xhigh`, and `--model claude-fable-5-1 --effort high` against `xhigh` on identical tasks. Defaults remain unchanged until local quality and latency measurements justify a change. See Anthropic's [Opus 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5) and [Fable 5.1](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1) prompting guides.
 
-Protected reviews require Claude Code 2.1.314 or later. The plugin refuses older or unverified versions before it starts a review.
+Protected reviews require Claude Code 2.1.321 or later. The plugin refuses older or unverified versions before it starts a review.
 
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 

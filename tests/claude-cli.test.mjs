@@ -1721,7 +1721,7 @@ describe("runClaudeTurn", () => {
     try {
       createFakeClaudeCommand(
         tmpDir,
-        `if (process.argv[2] === "--version") { process.stdout.write("2.1.319 (Claude Code)\\n"); process.exit(0); }\nconst result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
+        `if (process.argv[2] === "--version") { process.stdout.write("2.1.321 (Claude Code)\\n"); process.exit(0); }\nconst result = JSON.stringify(process.argv.slice(2));\nconst out = JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-tools" });\nprocess.stdout.write(out + "\\n", () => process.exit(0));\n`
       );
       process.env.PATH = `${tmpDir}${path.delimiter}${oldPath}`;
       const optionValue = (args, name) => {
@@ -2272,6 +2272,31 @@ describe("cancelClaudeProcess", () => {
 // ===========================================================================
 
 describe("areModelIdsEquivalent", () => {
+  it("keeps Fable 5.2 aliases floating and pinned versions distinct", () => {
+    assert.equal(resolveModel("fable"), "fable");
+    assert.equal(resolveModel("claude-fable-5-2"), "claude-fable-5-2");
+    assert.equal(areModelIdsEquivalent("fable", "claude-fable-5-2"), true);
+    assert.equal(areModelIdsEquivalent("claude-fable-5-1", "claude-fable-5-2"), false);
+    assert.equal(resolveDefaultEffort("claude-fable-5-2", undefined), undefined);
+  });
+
+  it("attributes Fable 5.2 primary usage independently of an advisor model", () => {
+    const parser = new StreamParser();
+    parser.feed(JSON.stringify({
+      type: "assistant", message: { model: "claude-fable-5-2" },
+    }) + "\n");
+    parser.feed(JSON.stringify({
+      type: "result", subtype: "success", is_error: false, result: "done",
+      modelUsage: {
+        "claude-opus-5": { contextWindow: 200000 },
+        "claude-fable-5-2": { contextWindow: 1000000 },
+      },
+    }) + "\n");
+    assert.equal(parser.state.finalModel, "claude-fable-5-2");
+    assert.equal(parser.state.contextWindow, 1000000);
+    assert.equal(parser.state.unresolvedParseErrors, 0);
+  });
+
   it("treats dated model snapshots as equivalent to their stable alias target", () => {
     assert.equal(
       areModelIdsEquivalent("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
@@ -3030,7 +3055,7 @@ describe("protected review isolation", () => {
 
   for (const denyInsteadOfPrompting of [true, false]) {
     it(`preserves restrictions with denyInsteadOfPrompting=${denyInsteadOfPrompting}`,
-      withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
+      withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir }) => {
         const repo = path.join(tmpDir, "repo");
         initRepo(repo);
         writeSettings(repo, "settings.json", { permissions: {
@@ -3046,7 +3071,7 @@ describe("protected review isolation", () => {
   }
 
   it("rejects non-boolean denyInsteadOfPrompting before launching a protected review",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir, invocations }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       writeSettings(repo, "settings.json", { permissions: { denyInsteadOfPrompting: "true" } });
@@ -3057,7 +3082,7 @@ describe("protected review isolation", () => {
 
   it(
     "loads only user setting sources on every review path",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       const reviewArgs = async (run) => JSON.parse((await run()).result).args;
@@ -3077,11 +3102,15 @@ describe("protected review isolation", () => {
 
   for (const version of [
     "2.1.280 (Claude Code)",
+    "2.1.314 (Claude Code)",
+    "2.1.319 (Claude Code)",
+    "2.1.320 (Claude Code)",
     "2.0.999",
     "not a version",
     "",
     "2.1.281-rc.1 (Claude Code)",
     "2.1.300-beta",
+    "2.1.321-rc.1 (Claude Code)",
     "2.1.281junk",
     "2.1.281.0",
     "v2.1.281",
@@ -3094,14 +3123,14 @@ describe("protected review isolation", () => {
         initRepo(repo);
         await assert.rejects(
           runClaudeReview(repo, "prompt", {}),
-          /Claude Code CLI 2\.1\.314 or later/
+          /Claude Code CLI 2\.1\.321 or later/
         );
         assert.equal(launchedReview(invocations), false);
       })
     );
   }
 
-  for (const version of ["2.1.314 (Claude Code)", "2.1.319 (Claude Code)", "3.0.0"]) {
+  for (const version of ["2.1.321 (Claude Code)", "2.1.322 (Claude Code)", "3.0.0"]) {
     it(
       `accepts a protected review on CLI ${version}`,
       withFakeReviewClaude(version, async ({ tmpDir, invocations }) => {
@@ -3114,9 +3143,24 @@ describe("protected review isolation", () => {
     );
   }
 
+  it("refuses every protected review path on CLI 2.1.320 before model launch",
+    withFakeReviewClaude("2.1.320 (Claude Code)", async ({ tmpDir, invocations }) => {
+      const repo = path.join(tmpDir, "repo");
+      initRepo(repo);
+      for (const run of [
+        () => runClaudeReview(repo, "prompt", {}),
+        () => runClaudeAdversarialReview(repo, "prompt", { type: "object" }, {}),
+        () => runClaudeReview(repo, "prompt", { allowedTools: SANDBOX_STOP_REVIEW_TOOLS }),
+      ]) {
+        await assert.rejects(run(), { code: "CLAUDE_REVIEW_UNSUPPORTED" });
+      }
+      assert.equal(launchedReview(invocations), false);
+    })
+  );
+
   it(
     "projects deny and ask rules from the original linked worktree, primary local settings and reviewed tree",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir, invocations }) => {
       const primary = path.join(tmpDir, "primary");
       initRepo(primary);
       writeSettings(primary, "settings.json", {
@@ -3174,7 +3218,7 @@ describe("protected review isolation", () => {
 
   it(
     "keeps relative rules anchored at the review cwd when the review runs in the original checkout",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       writeSettings(repo, "settings.json", {
@@ -3208,7 +3252,7 @@ describe("protected review isolation", () => {
   ]) {
     it(
       `refuses a review before launch when project settings contain ${name}`,
-      withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+      withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir, invocations }) => {
         const repo = path.join(tmpDir, "repo");
         initRepo(repo);
         writeSettings(repo, "settings.json", content);
@@ -3220,7 +3264,7 @@ describe("protected review isolation", () => {
 
   it(
     "refuses a review when malformed local settings sit in the primary checkout of a linked worktree",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir, invocations }) => {
       const primary = path.join(tmpDir, "primary");
       initRepo(primary);
       writeSettings(primary, "settings.local.json", { permissions: { deny: ["Read(!x)"] } });
@@ -3248,7 +3292,7 @@ describe("protected review isolation", () => {
 
   it(
     "keeps a rule that exists only in the reviewed subdirectory settings",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir, invocations }) => {
       const { sub, reviewed } = relocatedSubdirFixture(
         tmpDir,
         { permissions: { deny: ["Read(/reviewed-only.txt)"] } },
@@ -3279,7 +3323,7 @@ describe("protected review isolation", () => {
   ]) {
     it(
       `refuses a review before launch when only the reviewed subdirectory settings are ${name}`,
-      withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+      withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir, invocations }) => {
         const { sub, reviewed } = relocatedSubdirFixture(tmpDir, committed, { permissions: {} });
         const reviewedSettings = path.join("reviewed", "sub", ".claude", "settings.json");
 
@@ -3305,7 +3349,7 @@ describe("protected review isolation", () => {
 
   it(
     "tells the caller not to edit project permission rules when protection cannot be preserved",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       writeSettings(repo, "settings.json", { permissions: { deny: ["Read(*.env)", "Read(!sample.env)"] } });
@@ -3322,7 +3366,7 @@ describe("protected review isolation", () => {
 
   it(
     "keeps subdirectory rules anchored at the matching reviewed subdirectory after relocation",
-    withFakeReviewClaude("2.1.319 (Claude Code)", async ({ tmpDir, invocations }) => {
+    withFakeReviewClaude("2.1.321 (Claude Code)", async ({ tmpDir, invocations }) => {
       const repo = path.join(tmpDir, "repo");
       initRepo(repo);
       const sub = path.join(repo, "sub");

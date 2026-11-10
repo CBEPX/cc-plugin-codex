@@ -612,9 +612,10 @@ export function getClaudeAvailability(cwd) {
 }
 
 // Oldest Claude Code CLI supported for protected (project-isolated) reviews.
-// 2.1.314 fixes excluded settings and resumed worktree sandbox protections;
+// 2.1.321 adds sandbox/permission and MCP OAuth redirect fixes to the earlier
+// excluded-settings and resumed-worktree protections;
 // a documented conservative floor, not a tested matrix of later releases.
-export const MIN_PROTECTED_REVIEW_CLAUDE_VERSION = "2.1.314";
+export const MIN_PROTECTED_REVIEW_CLAUDE_VERSION = "2.1.321";
 
 // Stable releases only: "2.1.296" or "2.1.296 (Claude Code)". Prereleases and
 // unknown suffixes are not trusted to carry a capability.

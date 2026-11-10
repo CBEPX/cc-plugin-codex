@@ -91,7 +91,7 @@ async function readStdin() {
 
 async function main() {
   if (args[0] === "--version") {
-    process.stdout.write("2.1.319 (Claude Code)\\n");
+    process.stdout.write("2.1.321 (Claude Code)\\n");
     return;
   }
 
