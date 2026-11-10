@@ -128,4 +128,11 @@ SessionEnd owns shutdown: active linked companion work is stopped first; only ta
 
 All five accept `--output <new-path>` to export their full authorized JSON shape without the preview cap (workflow-list exports its original array). The receipt contains `outputFile`, `bytes` and `sha256`; existing files and symlinks are refused. Export failures leave notifications unread. `peer-wait --output` also leaves aggregate notifications unread because its exported memos do not deliver checkpoint/final output; pre-seal redacted exports never acknowledge a withheld aggregate. Public exports never reveal raw leases or sibling data before Codex seals its memo. Use the generated export and section commands for workers, retain their captured epoch, and never synthesize silently from a preview.
 
+For new research, the Codex memo includes `toolEvents:[{tool,toolUseId,operation}]` and `toolResults:[{toolUseId,isError}]` alongside content and citations.
+Before each selected search call, assign a unique local receipt ID, such as `codex-search-1`.
+Use that ID as `toolUseId` for the call and its completed result. Native call IDs are not required or guessed.
+These labels correlate worker-observed calls and results. They do not prove native provenance.
+Use the exact frozen tool ID. Record failures, approval denials and provider `success:false` responses with `isError:true`.
+Record `isError:false` only after observing a successful search response.
+
 For `web.run` and `web__run` receipts, set `operation: "search"` only for a non-empty `search_query` call. Use `operation: "read"` for page reads. A page open does not satisfy the search requirement. Do not store query terms or page content in receipts.

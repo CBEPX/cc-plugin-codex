@@ -13,6 +13,7 @@
 ### Fixed
 
 - Classify the observed expired OAuth session terminal error as an authentication failure, including native generic API-error results. Preserve the native terminal category.
+- Give Codex research workers one complete memo structure with linked search call and result receipts. Use local correlation labels when the host does not expose native call IDs. Keep worker-reported provenance explicit and reject missing results.
 - Require Claude Code 2.1.321 or later for protected reviews after upstream fixes to permissions, sandbox checks, excluded settings sources, and MCP OAuth redirects. Validate the new boolean `permissions.denyInsteadOfPrompting` setting while preserving the plugin's `dontAsk` review policy.
 
 ## v1.8.1
